@@ -312,7 +312,7 @@ fn is_thai(c: char) -> bool {
 
 /// Arabic letters, marks, digits and punctuation: an item with any of them is shaped with the
 /// craft-fonts Arabic face.
-fn is_arabic(c: char) -> bool {
+pub(crate) fn is_arabic(c: char) -> bool {
     matches!(u32::from(c), 0x0600..=0x06FF | 0x0750..=0x077F | 0x0870..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFC)
 }
 
@@ -368,11 +368,11 @@ fn shaped_arabic(c: char) -> bool {
 }
 
 /// Direction marks, embeddings, overrides and isolates: they steer the order and are not drawn.
-fn is_bidi_control(c: char) -> bool {
+pub(crate) fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
-fn mirrored(c: char) -> char {
+pub(crate) fn mirrored(c: char) -> char {
     match c {
         '(' => ')',
         ')' => '(',
@@ -389,18 +389,72 @@ fn mirrored(c: char) -> char {
 }
 
 /// A piece of a line with shaped text, in drawing order.
-enum Piece {
+pub(crate) enum Piece {
     /// Shown in the item's own standard font.
     Latin(String),
     Shaped(Vec<ShapedCluster>),
 }
 
+/// Where shaped text gets its shapes and outlines: the craft-fonts faces, or (in tests) a stand-in
+/// that needs no face. Plain function pointers, so a swap is one value and costs nothing.
+#[derive(Clone, Copy)]
+pub(crate) struct Shaper {
+    /// One directional run of a script, clusters in drawing order.
+    pub shape: fn(ShapedScript, &str, bool) -> Result<Vec<ShapedCluster>, GlyphError>,
+    /// Whether the script's face has a glyph for the character.
+    pub has: fn(ShapedScript, char) -> bool,
+    /// The outline of a glyph of the script's face.
+    pub outline: fn(ShapedScript, u32) -> Result<GlyphOutline, GlyphError>,
+    /// Whether the Arabic face exists at all.
+    pub arabic_available: fn() -> bool,
+}
+
+fn face_shape(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
+    match script {
+        ShapedScript::Arabic => shape_arabic(text, rtl),
+        ShapedScript::Hebrew => shape_hebrew(text, rtl),
+        ShapedScript::Thai => shape_thai(text),
+    }
+}
+
+fn face_has(script: ShapedScript, c: char) -> bool {
+    match script {
+        ShapedScript::Arabic => pdfcraft_fonts::arabic_has(c),
+        ShapedScript::Hebrew => pdfcraft_fonts::hebrew_has(c),
+        ShapedScript::Thai => pdfcraft_fonts::thai_has(c),
+    }
+}
+
+fn arabic_face_available() -> bool {
+    pdfcraft_fonts::document_arabic_font().is_some()
+}
+
+impl Shaper {
+    /// The craft-fonts faces.
+    pub(crate) const FACES: Shaper = Shaper { shape: face_shape, has: face_has, outline: shaped_glyph, arabic_available: arabic_face_available };
+}
+
 /// A line of a shaped-text item in drawing order (the Unicode bidirectional algorithm, UAX #9), and
 /// its width at the item's size. `rtl` is its paragraph's direction.
 fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f64), EditError> {
+    let pieces = shaped_pieces(line, rtl, &Shaper::FACES)?;
+    let width = pieces
+        .iter()
+        .map(|p| match p {
+            Piece::Latin(s) => t.family.width(s, t.size, t.bold, t.italic),
+            Piece::Shaped(clusters) => clusters.iter().map(|c| c.advance).sum::<f64>() * t.size,
+        })
+        .sum();
+    Ok((pieces, width))
+}
+
+/// The pieces of `line` in drawing order: Latin text for the caller's own font, and shaped clusters
+/// for Arabic, Hebrew and Thai. `rtl` is the paragraph's direction. Widths are the caller's to
+/// measure, so Add text and Edit text each use their own fonts for the Latin.
+pub(crate) fn shaped_pieces(line: &str, rtl: bool, shaper: &Shaper) -> Result<Vec<Piece>, EditError> {
     // unicode-bidi indexes the first level of a line, so an empty one would panic.
     if line.is_empty() {
-        return Ok((Vec::new(), 0.0));
+        return Ok(Vec::new());
     }
     let base = if rtl { Level::rtl() } else { Level::ltr() };
     let info = ParagraphBidiInfo::new(line, Some(base));
@@ -418,9 +472,9 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
             let after_hebrew = segments.last().is_some_and(|(kind, _)| *kind == Some(ShapedScript::Hebrew));
             let script = if is_thai(c) {
                 Some(ShapedScript::Thai)
-            } else if is_hebrew(c) || (run_rtl && after_hebrew && !c.is_alphanumeric() && pdfcraft_fonts::hebrew_has(c)) {
+            } else if is_hebrew(c) || (run_rtl && after_hebrew && !c.is_alphanumeric() && (shaper.has)(ShapedScript::Hebrew, c)) {
                 Some(ShapedScript::Hebrew)
-            } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && pdfcraft_fonts::arabic_has(c)) {
+            } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && (shaper.has)(ShapedScript::Arabic, c)) {
                 Some(ShapedScript::Arabic)
             } else {
                 None
@@ -435,11 +489,11 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
         }
         for (script, s) in segments {
             pieces.push(if let Some(script) = script {
-                let shaped = match script {
-                    ShapedScript::Arabic => shape_arabic(&s, run_rtl).map_err(|e| arabic_error(e, &s))?,
-                    ShapedScript::Hebrew => shape_hebrew(&s, run_rtl).map_err(|e| hebrew_error(e, &s))?,
-                    ShapedScript::Thai => shape_thai(&s).map_err(|e| thai_error(e, &s))?,
-                };
+                let shaped = (shaper.shape)(script, &s, run_rtl).map_err(|e| match script {
+                    ShapedScript::Arabic => arabic_error(e, &s),
+                    ShapedScript::Hebrew => hebrew_error(e, &s),
+                    ShapedScript::Thai => thai_error(e, &s),
+                })?;
                 Piece::Shaped(shaped)
             } else if run_rtl {
                 Piece::Latin(s.chars().rev().map(mirrored).collect())
@@ -448,14 +502,7 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
             });
         }
     }
-    let width = pieces
-        .iter()
-        .map(|p| match p {
-            Piece::Latin(s) => t.family.width(s, t.size, t.bold, t.italic),
-            Piece::Shaped(clusters) => clusters.iter().map(|c| c.advance).sum::<f64>() * t.size,
-        })
-        .sum();
-    Ok((pieces, width))
+    Ok(pieces)
 }
 
 /// The width of `s` in a shaped-text item; the item's font's estimate if it can't be shaped (drawing
@@ -464,7 +511,7 @@ fn shaped_width(t: &AddedText, s: &str, rtl: bool) -> f64 {
     shaped_layout(t, s, rtl).map(|(_, w)| w).unwrap_or_else(|_| t.family.width(s, t.size, t.bold, t.italic))
 }
 
-fn arabic_error(e: GlyphError, text: &str) -> EditError {
+pub(crate) fn arabic_error(e: GlyphError, text: &str) -> EditError {
     EditError::Invalid(match e {
         GlyphError::NoFont => "Arabic text needs PdfCraft's Arabic font, which this build doesn't include \
                                (to build it in, set CRAFT_FONTS_DIR to a craft-fonts checkout that has an Arab face)"
@@ -512,7 +559,7 @@ fn font_name(base: &str) -> String {
 
 /// Most glyphs in one Type 3 font: its codes are single bytes, 1–240. An item gets one such font
 /// per 240 distinct glyphs it needs.
-const GLYPHS_PER_FONT: usize = 240;
+pub(crate) const GLYPHS_PER_FONT: usize = 240;
 
 /// A line of a shaped-text item after layout: its text, whether its paragraph runs right to left,
 /// its pieces in drawing order and its width at the item's size.
@@ -573,7 +620,7 @@ fn draw_laid_shaped(
     let mut taken_names: HashSet<Vec<u8>> = taken.iter().chain(fonts.iter()).map(|(name, _)| name.clone()).collect();
     let mut names = Vec::new();
     for chunk in keys.chunks(GLYPHS_PER_FONT) {
-        let font = type3_shaped(doc, chunk, &outlines);
+        let font = type3_shaped(doc, chunk, &outlines, None);
         // A name no font on the page has, so items never replace each other's fonts (object
         // numbers alone don't do: a full save renumbers objects but keeps resource names).
         let mut name = format!("PCAr{}", font.num);
@@ -641,14 +688,21 @@ fn draw_laid_shaped(
 
 /// What makes two clusters the same Type 3 glyph: text, glyphs, offsets and advance (bit for bit;
 /// equal clusters come from the same font units).
-type ClusterKey<'a> = (ShapedScript, &'a str, Vec<(u32, u64, u64)>, u64);
+pub(crate) type ClusterKey<'a> = (ShapedScript, &'a str, Vec<(u32, u64, u64)>, u64);
 
-fn cluster_key(c: &ShapedCluster) -> ClusterKey<'_> {
+pub(crate) fn cluster_key(c: &ShapedCluster) -> ClusterKey<'_> {
     (c.script, c.text.as_str(), c.glyphs.iter().map(|(id, [x, y])| (*id, x.to_bits(), y.to_bits())).collect(), c.advance.to_bits())
 }
 
 /// A Type 3 font with `clusters` as codes 1…, each drawn from its script face's glyph `outlines`.
-fn type3_shaped(doc: &mut Document, clusters: &[&ShapedCluster], outlines: &HashMap<(ShapedScript, u32), GlyphOutline>) -> ObjRef {
+/// `name` is the font's `/Name` (Edit text marks its fonts so it recognises them again); Add text
+/// leaves it out.
+pub(crate) fn type3_shaped(
+    doc: &mut Document,
+    clusters: &[&ShapedCluster],
+    outlines: &HashMap<(ShapedScript, u32), GlyphOutline>,
+    name: Option<&str>,
+) -> ObjRef {
     let mut charprocs = Dict::new();
     let mut differences = vec![Object::Int(1)];
     let mut widths = Vec::with_capacity(clusters.len());
@@ -722,6 +776,9 @@ fn type3_shaped(doc: &mut Document, clusters: &[&ShapedCluster], outlines: &Hash
     let mut font = Dict::new();
     font.set(b"Type".to_vec(), Object::name("Font"));
     font.set(b"Subtype".to_vec(), Object::name("Type3"));
+    if let Some(name) = name {
+        font.set(b"Name".to_vec(), Object::name(name));
+    }
     font.set(b"FontDescriptor".to_vec(), Object::Ref(doc.add(Object::Dict(descriptor))));
     font.set(b"FontBBox".to_vec(), Object::Array(bbox.iter().map(|v| Object::Real(*v)).collect()));
     font.set(
