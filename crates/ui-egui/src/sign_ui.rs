@@ -1213,7 +1213,9 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, sigs: &[SignatureInfo], expan
             (true, false, Some(signer)) => ("Rev. {rev}: Signed by {name}", signer),
             (true, false, None) => ("Rev. {rev}: Signed by an unknown signer", ""),
         };
-        let head = crate::i18n::fmt(tl!(template), &[("rev", &s.revision.to_string()), ("name", name)]);
+        // The name is a signer's or a field's: document text, put in display order before it
+        // goes into the sentence (right in every interface language).
+        let head = crate::i18n::fmt(tl!(template), &[("rev", &s.revision.to_string()), ("name", &crate::bidi::visual_auto(name))]);
         let resp = ui
             .horizontal(|ui| {
                 let chevron = if open { "chevron-down" } else { "chevron-right" };
@@ -1252,13 +1254,25 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, sigs: &[SignatureInfo], expan
             for detail in &s.details {
                 // Each detail is a whole sentence of ours plus what the signature itself says; said
                 // here in the panel's language, with the signature's own words left as they are.
-                let line = detail.said(&crate::i18n::words);
-                ui.add(egui::Label::new(egui::RichText::new(format!("• {line}")).font(theme::regular(11.5)).color(t.text_muted)).wrap());
+                let line = format!("• {}", detail.said(&crate::i18n::words));
+                if crate::i18n::current().rtl() {
+                    // The sentence is in display order already, and the signature's words can't be told from ours.
+                    ui.add(egui::Label::new(egui::RichText::new(line).font(theme::regular(11.5)).color(t.text_muted)).wrap());
+                } else {
+                    widgets::wrapped_text(ui, &line, theme::regular(11.5), t.text_muted, false);
+                }
             }
             ui.add_space(4.0);
             ui.label(egui::RichText::new(tl!("Signature Details")).font(theme::semibold(12.0)));
             let row = |ui: &mut egui::Ui, k: &str, v: &str| {
-                ui.add(egui::Label::new(egui::RichText::new(format!("{}: {v}", tl!(k))).font(theme::regular(11.5))).wrap());
+                if crate::i18n::current().rtl() {
+                    // The label is in display order already; only the value is reordered.
+                    let line = format!("{}: {}", tl!(k), crate::bidi::visual_auto(v));
+                    ui.add(egui::Label::new(egui::RichText::new(line).font(theme::regular(11.5))).wrap());
+                } else {
+                    let colour = ui.visuals().text_color();
+                    widgets::wrapped_text(ui, &format!("{}: {v}", tl!(k)), theme::regular(11.5), colour, false);
+                }
             };
             if let Some(r) = &s.reason {
                 row(ui, "Reason", r);
@@ -1283,7 +1297,7 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, sigs: &[SignatureInfo], expan
                         egui::Label::new(
                             egui::RichText::new(crate::i18n::fmt(
                                 tl!("Field: {field} on page {p}"),
-                                &[("field", &s.field), ("p", &(p + 1).to_string())],
+                                &[("field", &crate::bidi::visual_auto(&s.field)), ("p", &(p + 1).to_string())],
                             ))
                             .font(theme::regular(11.5))
                             .color(t.accent_text)
@@ -1385,7 +1399,7 @@ pub(crate) fn cert_viewer(ui: &mut egui::Ui, v: &mut CertViewer, trusted: &[Cert
                 let c = &v.chain[i];
                 ui.horizontal(|ui| {
                     ui.add_space(depth as f32 * 12.0);
-                    if ui.selectable_label(v.selected == i, c.display_name()).clicked() {
+                    if ui.selectable_label(v.selected == i, crate::bidi::visual_auto(&c.display_name())).clicked() {
                         v.selected = i;
                     }
                 });
@@ -1407,7 +1421,10 @@ pub(crate) fn cert_viewer(ui: &mut egui::Ui, v: &mut CertViewer, trusted: &[Cert
                 egui::Grid::new(("cert-rows", v.tab as u8)).num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
                     for (k, val) in rows {
                         ui.label(egui::RichText::new(tl_ctx!("certificate", k)).color(t.text_muted));
-                        ui.add(egui::Label::new(val).wrap());
+                        // Names in a certificate may be right to left; wrapped_label leaves the
+                        // Arabic interface's own words ("Yes", "Any") alone.
+                        let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                        widgets::wrapped_label(ui, &val, font, colour);
                         ui.end_row();
                     }
                 });

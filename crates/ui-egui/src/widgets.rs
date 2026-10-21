@@ -98,7 +98,42 @@ pub(crate) fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 
 
 /// Draw `text` from `pos` (left, vertically centered) so it never runs past `max_width`.
 pub(crate) fn paint_left(ui: &egui::Ui, pos: egui::Pos2, text: &str, font: egui::FontId, color: Color32, max_width: f32) {
-    let shown = fit_line(text, max_width, |s| text_width(ui, s, &font));
+    fn logical(s: &str) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(s)
+    }
+    paint_fitted(ui, pos, text, font, color, max_width, logical);
+}
+
+/// [`paint_left`] for text from a document (a layer name): the fitted line is put in display
+/// order by its own direction ([`crate::bidi::visual_auto`]) when it is painted.
+pub(crate) fn paint_left_doc(ui: &egui::Ui, pos: egui::Pos2, text: &str, font: egui::FontId, color: Color32, max_width: f32) {
+    paint_fitted(ui, pos, text, font, color, max_width, crate::bidi::visual_auto);
+}
+
+/// [`paint_left`] for a sentence that may hold document text (an Undo label): reordered only
+/// where [`needs_bidi`], since the Arabic interface's own strings are in display order already.
+pub(crate) fn paint_left_sentence(ui: &egui::Ui, pos: egui::Pos2, text: &str, font: egui::FontId, color: Color32, max_width: f32) {
+    paint_fitted(ui, pos, text, font, color, max_width, visual_sentence);
+}
+
+/// `text` for a painter call when it is a sentence that may hold document text: in display order
+/// where [`needs_bidi`], otherwise as it is.
+pub fn visual_sentence(text: &str) -> std::borrow::Cow<'_, str> {
+    if needs_bidi(text) { crate::bidi::visual_auto(text) } else { std::borrow::Cow::Borrowed(text) }
+}
+
+/// Fit `text` to `max_width` in logical order, then paint what `reorder` makes of the fitted line.
+fn paint_fitted(
+    ui: &egui::Ui,
+    pos: egui::Pos2,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    max_width: f32,
+    reorder: impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
+) {
+    let fitted = fit_line(text, max_width, |s| text_width(ui, s, &font));
+    let shown = reorder(&fitted).into_owned();
     let clip = Rect::from_min_size(egui::pos2(pos.x, pos.y - 14.0), vec2(max_width.max(0.0), 28.0));
     ui.painter().with_clip_rect(clip).text(pos, Align2::LEFT_CENTER, shown, font, color);
 }
@@ -332,9 +367,10 @@ const WRAP_CACHE_MAX: usize = 256;
 /// a long comment doesn't cost a full wrap just to show its start.
 const COLLAPSED_WRAP_CHARS: usize = 1024;
 
-/// The lines `wrapped_text` paints for a right-to-left `text`, from the cache when the same text
-/// was wrapped the same way before.
-fn wrapped_lines(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32, truncate: bool) -> std::sync::Arc<[crate::bidi::Line]> {
+/// The lines `wrapped_text` paints for a right-to-left `text` (and the Bookmarks panel's titles,
+/// which lay their lines out themselves), from the cache when the same text was wrapped the same
+/// way before.
+pub(crate) fn wrapped_lines(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32, truncate: bool) -> std::sync::Arc<[crate::bidi::Line]> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (text, font, width.to_bits(), ui.ctx().pixels_per_point().to_bits(), truncate).hash(&mut hasher);
@@ -375,6 +411,62 @@ fn wrapped_lines(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32, tru
     lines
 }
 
+/// Whether document text painted by an egui label needs [`wrapped_text`] to read right: it
+/// holds right-to-left script and the interface is left to right. The Arabic interface's own
+/// catalog strings are already in display order, so a sentence built from one (which may hold
+/// a document's name) is left to the ordinary label there; reordering it again would undo it.
+pub fn needs_bidi(text: &str) -> bool {
+    !crate::i18n::current().rtl() && crate::bidi::has_rtl(text)
+}
+
+/// A wrapping label for text that may hold right-to-left script (a notice naming an Arabic file
+/// or field, a hover popup): [`wrapped_text`] in a column as wide as the text, up to the room
+/// there is, when [`needs_bidi`]; otherwise an ordinary wrapping label.
+pub fn wrapped_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32) -> Response {
+    if !needs_bidi(text) {
+        return ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(color)).wrap());
+    }
+    // `wrapped_text` fills the width it is given; give it the text's own width, measured the way
+    // it wraps (each paragraph in logical order), plus a point so rounding never breaks a line.
+    let natural = text.split('\n').map(|paragraph| text_width(ui, paragraph, &font)).fold(0.0_f32, f32::max);
+    let width = if natural.is_finite() { (natural + 1.0).min(ui.available_width()).max(1.0) } else { ui.available_width().max(1.0) };
+    ui.allocate_ui(vec2(width, 0.0), |ui| wrapped_text(ui, text, font, color, false)).inner
+}
+
+/// [`wrapped_text`] as a selectable, clickable row, for lists of document text (findings,
+/// changes): a right-to-left paragraph sits against the right edge, and the row gets the
+/// selected or hovered background of [`egui::Button::selectable`]. Text without right-to-left
+/// script is that button. The accessible name stays the logical `text`.
+pub fn wrapped_text_clickable(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32, selected: bool) -> Response {
+    if !crate::bidi::has_rtl(text) {
+        return ui.add(egui::Button::selectable(selected, egui::RichText::new(text).font(font).color(color)).wrap());
+    }
+    let pad = ui.spacing().button_padding;
+    let width = ui.available_width().max(1.0);
+    let lines = wrapped_lines(ui, text, &font, (width - 2.0 * pad.x).max(1.0), false);
+    let galleys: Vec<_> = lines.iter().map(|line| (line.rtl, ui.painter().layout_no_wrap(line.text.clone(), font.clone(), color))).collect();
+    let height: f32 = galleys.iter().map(|(_, g)| g.size().y).sum();
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height + 2.0 * pad.y), Sense::click());
+    let enabled = ui.is_enabled();
+    // Painted text only: the accessibility name keeps the logical order.
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, text));
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    if selected || resp.hovered() || resp.has_focus() {
+        let visuals = ui.style().interact_selectable(&resp, selected);
+        ui.painter().rect(rect.expand(visuals.expansion), visuals.corner_radius, visuals.weak_bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
+    }
+    let mut y = rect.top() + pad.y;
+    for (rtl, galley) in galleys {
+        let x = if rtl { rect.right() - pad.x - galley.size().x } else { rect.left() + pad.x };
+        let h = galley.size().y;
+        ui.painter().galley(egui::pos2(x, y), galley, color);
+        y += h;
+    }
+    resp
+}
+
 /// Transient message at the bottom centre.
 pub fn toast(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let Some((msg, start)) = app.toast.clone() else { return };
@@ -405,10 +497,14 @@ pub fn toast(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     // Allow natural short labels; wrap longer ones within the viewport,
                     // including the frame's 32 points and 16-point outside margins.
                     ui.set_max_width((screen.width() - 64.0).clamp(1.0, 560.0));
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(msg).color(if t.dark() { Color32::from_rgb(0x22, 0x22, 0x26) } else { Color32::WHITE }))
-                            .wrap(),
-                    );
+                    let ink = if t.dark() { Color32::from_rgb(0x22, 0x22, 0x26) } else { Color32::WHITE };
+                    if needs_bidi(&msg) {
+                        // A notice naming an Arabic file or field reads in display order.
+                        let font = egui::TextStyle::Body.resolve(ui.style());
+                        wrapped_label(ui, &msg, font, ink);
+                    } else {
+                        ui.add(egui::Label::new(egui::RichText::new(msg).color(ink)).wrap());
+                    }
                 });
         });
     ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -723,6 +819,46 @@ mod tests {
         assert!((again.width() - short.width()).abs() < 1.0, "long notices must not impose a permanent minimum width");
     }
 
+    /// The text of every galley the toast paints after settling for a few frames.
+    fn toast_texts(message: &str) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme::font_definitions());
+        let mut app = PdfCraftApp::new();
+        app.notify(message);
+        let mut now = 1.0;
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            now += 0.016;
+            let output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), time: Some(now), ..Default::default() },
+                |ui| toast(&mut app, ui.ctx()),
+            );
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.job.text.clone()) } else { None })
+                .collect();
+            output.drop_without_applying_deltas();
+        }
+        texts
+    }
+
+    #[test]
+    fn a_notice_naming_an_arabic_file_reads_in_display_order() {
+        let previous = crate::i18n::current();
+        let logical = "Could not open تقرير 2024 Report";
+        // Left-to-right interface: the document's name is reordered inside the notice (the Arabic
+        // word and the number after it form one right-to-left stretch: the number comes first).
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        assert!(toast_texts(logical).iter().any(|t| t == "Could not open 2024 تقرير Report"), "{:?}", toast_texts(logical));
+        // Text without right-to-left script is the plain label, as before.
+        assert!(toast_texts("Saved").iter().any(|t| t == "Saved"));
+        // The Arabic interface's own sentences are in display order already: left alone.
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        assert!(toast_texts("تقرير 2024 Report").iter().any(|t| t == "تقرير 2024 Report"));
+        crate::i18n::set_current(previous);
+    }
+
     /// The text shapes `wrapped_text` paints in a 120 pt wide column at x = 0.
     fn wrapped_shapes(text: &str, truncate: bool) -> Vec<(Pos2, Rect, String)> {
         let ctx = egui::Context::default();
@@ -799,6 +935,88 @@ mod tests {
         assert_eq!(latin.len(), 1);
         assert_eq!(latin[0].2, "A short note");
         assert!(latin[0].0.x.abs() < 0.5);
+    }
+
+    /// One frame of `wrapped_text_clickable` in a 120 pt wide column at x = 0 with `events`:
+    /// the row's rect, whether it was clicked, whether it senses clicks, the widget info of a
+    /// click and the shapes it painted.
+    struct ClickableFrame {
+        rect: Rect,
+        clicked: bool,
+        senses_click: bool,
+        info: Option<egui::WidgetInfo>,
+        shapes: Vec<egui::Shape>,
+    }
+
+    fn clickable_frame(ctx: &egui::Context, text: &str, selected: bool, events: Vec<egui::Event>) -> ClickableFrame {
+        let (mut rect, mut clicked, mut senses_click) = (Rect::NOTHING, false, false);
+        let output = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+            let column = Rect::from_min_size(Pos2::ZERO, vec2(120.0, 400.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+                let resp = wrapped_text_clickable(ui, text, theme::regular(13.0), Color32::WHITE, selected);
+                (rect, clicked, senses_click) = (resp.rect, resp.clicked(), resp.sense.senses_click());
+            });
+        });
+        let info = output
+            .platform_output
+            .events
+            .iter()
+            .find_map(|e| if let egui::output::OutputEvent::Clicked(info) = e { Some(info.clone()) } else { None });
+        let shapes = output.shapes.iter().map(|s| s.shape.clone()).collect();
+        output.drop_without_applying_deltas();
+        ClickableFrame { rect, clicked, senses_click, info, shapes }
+    }
+
+    fn click(ctx: &egui::Context, text: &str, selected: bool) -> ClickableFrame {
+        let at = clickable_frame(ctx, text, selected, vec![]).rect.center();
+        let button =
+            |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        clickable_frame(ctx, text, selected, vec![egui::Event::PointerMoved(at)]);
+        clickable_frame(ctx, text, selected, vec![button(true)]);
+        clickable_frame(ctx, text, selected, vec![button(false)])
+    }
+
+    #[test]
+    fn clickable_rtl_text_sits_at_the_right_edge_senses_clicks_and_keeps_its_logical_name() {
+        let persian = "این یک یافته طولانی به زبان فارسی است که باید در چند خط شکسته شود";
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme::font_definitions());
+        let frame = clickable_frame(&ctx, persian, false, vec![]);
+        assert!(frame.senses_click, "a row of findings is clickable");
+        assert!(frame.rect.width() <= 120.5, "the row stays inside the column: {:?}", frame.rect);
+        let texts: Vec<(Pos2, f32, String)> = frame
+            .shapes
+            .iter()
+            .filter_map(|s| if let egui::Shape::Text(t) = s { Some((t.pos, t.galley.rect.width(), t.galley.job.text.clone())) } else { None })
+            .collect();
+        assert!(texts.len() > 1, "wrapped over several lines: {texts:?}");
+        let padding = egui::Style::default().spacing.button_padding.x;
+        for (pos, width, text) in &texts {
+            assert!((pos.x + width - (frame.rect.right() - padding)).abs() < 0.5, "{text:?} at {pos:?} must be right-aligned");
+        }
+        assert!(texts.iter().all(|(_, _, text)| text != persian), "painted in display order");
+        // Not hovered, not selected: no background yet.
+        assert!(!frame.shapes.iter().any(|s| matches!(s, egui::Shape::Rect(_))), "an idle row is unframed");
+        // A click reports the logical text as the accessible name, and the selected state.
+        let clicked = click(&ctx, persian, true);
+        assert!(clicked.clicked);
+        let info = clicked.info.expect("the click is announced");
+        assert_eq!(info.label.as_deref(), Some(persian));
+        assert_eq!(info.typ, egui::WidgetType::Button);
+        assert_eq!(info.selected, Some(true));
+        // Selected (and hovered): the row has its background.
+        assert!(clicked.shapes.iter().any(|s| matches!(s, egui::Shape::Rect(_))), "a selected row is framed");
+    }
+
+    #[test]
+    fn clickable_text_without_rtl_script_is_a_selectable_button() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme::font_definitions());
+        let clicked = click(&ctx, "A short finding", false);
+        assert!(clicked.clicked && clicked.senses_click);
+        let info = clicked.info.expect("the click is announced");
+        assert_eq!(info.label.as_deref(), Some("A short finding"));
+        assert_eq!(info.selected, Some(false));
     }
 
     #[test]

@@ -324,7 +324,12 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &mut A11yState, doc: D
                         // The checker hands over the sentence and the document's own words apart, so
                         // the sentence is said in the panel's language with those words still in it.
                         let said = f.said(&crate::i18n::words);
-                        let l = ui.add(egui::Label::new(egui::RichText::new(said).small().color(t.text_muted)).sense(egui::Sense::click()));
+                        let l = if crate::widgets::needs_bidi(&said) {
+                            let font = egui::TextStyle::Small.resolve(ui.style());
+                            crate::widgets::wrapped_text_clickable(ui, &said, font, t.text_muted, false)
+                        } else {
+                            ui.add(egui::Label::new(egui::RichText::new(said).small().color(t.text_muted)).sense(egui::Sense::click()))
+                        };
                         if let Some(object) = f.object {
                             if l.on_hover_text(tl!("Tags")).clicked() {
                                 action = Some(PanelAction::GoToTag(object, f.page, f.bbox));

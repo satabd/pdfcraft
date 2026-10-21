@@ -396,7 +396,10 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
             }
             egui::ScrollArea::vertical().id_salt("measurement-list").max_height(140.0).show(ui, |ui| {
                 for m in &listing.measurements {
-                    if ui.button(format!("{} {}: {} {}", tl!("Page"), m.page.saturating_add(1), m.reading.label, m.label)).clicked() {
+                    if ui
+                        .button(format!("{} {}: {} {}", tl!("Page"), m.page.saturating_add(1), m.reading.label, crate::bidi::visual_auto(&m.label)))
+                        .clicked()
+                    {
                         select = Some((m.page, m.index, m.reading.clone(), m.scale.clone()));
                     }
                 }

@@ -156,7 +156,7 @@ pub(crate) fn panel(
     egui::ScrollArea::vertical().max_height(100.0).show_rows(ui, 26.0, matching.len(), |ui, range| {
         for tag in &matching[range] {
             let title = tag.title.as_deref().filter(|s| !s.is_empty()).unwrap_or(&tag.kind);
-            let label = format!("{title} · {}", tag.object.num);
+            let label = format!("{} · {}", crate::bidi::visual_auto(title), tag.object.num);
             ui.horizontal(|ui| {
                 ui.add_space((tag.depth.min(8) as f32) * 12.0);
                 if parents.contains(&tag.object) && query.is_empty() {
@@ -229,7 +229,9 @@ pub(crate) fn panel(
     ui.separator();
     for item in content {
         let page_label = item.page.map(|p| crate::i18n::fmt(tl!("Go to page {p}"), &[("p", &(p + 1).to_string())]));
-        let label = match (&page_label, item.text.trim()) {
+        // The content's text is document text: displayed in its own direction.
+        let text = crate::bidi::visual_auto(item.text.trim());
+        let label = match (&page_label, text.as_ref()) {
             (Some(page), text) if !text.is_empty() => format!("MCID {} · {page} · {text}", item.mcid),
             (Some(page), _) => format!("MCID {} · {page}", item.mcid),
             (_, text) if !text.is_empty() => format!("MCID {} · {text}", item.mcid),

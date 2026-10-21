@@ -56,16 +56,18 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     let new_name = app.session.get(new).map(|d| d.name.clone()).unwrap_or_default();
     egui::Grid::new("compare-files").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
         ui.label(tl!("Old file:"));
-        let shown =
-            others.iter().find(|(id, _)| Some(*id) == app.compare_old).map_or(tl!("Open the older version first").to_string(), |(_, n)| n.clone());
+        let shown = others
+            .iter()
+            .find(|(id, _)| Some(*id) == app.compare_old)
+            .map_or(tl!("Open the older version first").to_string(), |(_, n)| crate::bidi::visual(n).into_owned());
         egui::ComboBox::from_id_salt("compare-old").selected_text(shown).width(320.0).show_ui(ui, |ui| {
             for (id, n) in &others {
-                ui.selectable_value(&mut app.compare_old, Some(*id), n);
+                ui.selectable_value(&mut app.compare_old, Some(*id), crate::bidi::visual(n).into_owned());
             }
         });
         ui.end_row();
         ui.label(tl!("New file:"));
-        ui.label(egui::RichText::new(new_name).strong());
+        ui.label(egui::RichText::new(crate::bidi::visual(&new_name)).strong());
         ui.end_row();
     });
     ui.add_space(4.0);
@@ -149,7 +151,13 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &Option<CompareState>,
                         .small()
                         .color(t.text_muted),
                     );
-                    ui.selectable_label(selected, text)
+                    if crate::bidi::has_rtl(&text) {
+                        // Document text only (no sentence of ours), so it is reordered in every interface language.
+                        let (font, colour) = (egui::TextStyle::Button.resolve(ui.style()), ui.visuals().text_color());
+                        crate::widgets::wrapped_text_clickable(ui, &text, font, colour, selected)
+                    } else {
+                        ui.selectable_label(selected, text)
+                    }
                 })
                 .inner
             })
@@ -337,7 +345,8 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
     for (k, (r, index)) in [(left, old), (right, new)].into_iter().enumerate() {
         let caption = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), caption_h));
         ui.painter().rect_filled(caption, 0.0, t.panel);
-        let label = crate::i18n::fmt(if k == 0 { tl!("Old file: {name}") } else { tl!("New file: {name}") }, &[("name", &names[k])]);
+        let label =
+            crate::i18n::fmt(if k == 0 { tl!("Old file: {name}") } else { tl!("New file: {name}") }, &[("name", &crate::bidi::visual(&names[k]))]);
         ui.painter().text(
             egui::pos2(caption.min.x + 10.0, caption.center().y),
             egui::Align2::LEFT_CENTER,

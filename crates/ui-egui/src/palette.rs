@@ -188,7 +188,8 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     let detail = crate::widgets::fit_line(&shown_detail, detail_max, |s| crate::widgets::text_width(ui, s, &detail_font));
                     let detail_w = crate::widgets::text_width(ui, &detail, &detail_font);
                     ui.painter().text(body.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, detail, detail_font, t.text_faint);
-                    crate::widgets::paint_left(
+                    // The label may name the last action (Undo/Redo), which can hold document text.
+                    crate::widgets::paint_left_sentence(
                         ui,
                         body.left_center() + vec2(36.0, 0.0),
                         &shown,
