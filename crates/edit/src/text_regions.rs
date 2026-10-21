@@ -165,7 +165,7 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
 }
 
 /// Shape in the source or an explicitly registered matching full face. Never use interface fonts.
-fn shape_source(
+pub(super) fn shape_source(
     doc: &Document,
     fonts: &Dict,
     name: &str,

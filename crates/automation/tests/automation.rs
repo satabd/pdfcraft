@@ -617,6 +617,84 @@ fn arabic_ligature_actual_text_is_one_editable_word_through_save_reopen() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Text with its whitespace runs collapsed, so wrapped rows compare with the typed text.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn retyped_arabic_is_shaped_with_actual_text_through_edit_tools_save_and_reopen() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic Edit text");
+        return;
+    }
+    let dir = workdir("edit-arabic");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let original = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+
+    // A paragraph, wrapped to a narrow width: the page's Helvetica has no Arabic, so the text is
+    // shaped with the Arabic face, one span of typing-order text per row.
+    let typed = "مرحبا بالعالم الجميل في هذا اليوم";
+    let edited = ok(&mut a, "text_edit", json!({"doc":id,"page":1,"paragraph":1,"text":typed,"width":120}));
+    assert_eq!(edited["paragraph"]["text"], typed, "{edited}");
+    let rows = ok(&mut a, "text_lines", json!({"doc":id,"page":1}));
+    let rows: Vec<String> = rows["lines"].as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap().to_owned()).collect();
+    assert!(rows.len() >= 2, "{rows:?}");
+    assert_eq!(rows.join(" "), typed);
+    assert_eq!(words(&page_text(&mut a, id)[0]), typed);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":id,"query":"بالعالم"}))["matches"].as_array().unwrap().len(), 1);
+    let rendered = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+    assert_ne!(rendered, original, "the page now shows the Arabic text");
+
+    // Save, reopen: the same lines, text, search hits and picture.
+    let lines = ok(&mut a, "text_lines", json!({"doc":id,"page":1}));
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"arabic-edited.pdf"}));
+    let re = ok(&mut a, "doc_open", json!({"path":"arabic-edited.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":re,"page":1})), lines);
+    assert_eq!(words(&page_text(&mut a, re)[0]), typed);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"بالعالم"}))["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(a.call("page_render", &json!({"doc":re,"page":1,"dpi":72})).unwrap(), rendered);
+
+    // Edit it again: the draft measures, the new text replaces the old (no reverse-ToUnicode
+    // guess at the generated fonts' codes), and a line edit shapes too.
+    let again = "السلام عليكم";
+    let draft = ok(&mut a, "text_edit_layout", json!({"doc":re,"page":1,"paragraph":1,"text":again,"width":120}));
+    assert!(draft["draft_rect"].is_array(), "{draft}");
+    ok(&mut a, "text_edit", json!({"doc":re,"page":1,"paragraph":1,"text":again,"width":120}));
+    assert_eq!(words(&page_text(&mut a, re)[0]), again);
+    let line = "مرحبا PDF ١٢٣";
+    ok(&mut a, "text_edit", json!({"doc":re,"page":1,"line":1,"text":line}));
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":re,"page":1}))["lines"][0]["text"], line);
+    ok(&mut a, "doc_save", json!({"doc":re,"path":"arabic-edited-again.pdf"}));
+    let last = ok(&mut a, "doc_open", json!({"path":"arabic-edited-again.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":last,"page":1}))["lines"][0]["text"], line);
+    assert_eq!(page_text(&mut a, last)[0], line);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":last,"query":"PDF"}))["matches"].as_array().unwrap().len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn retyped_arabic_without_the_arabic_face_is_refused_and_changes_nothing() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("edit-arabic-no-face");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let lines = ok(&mut a, "text_lines", json!({"doc":id,"page":1}));
+    let render = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+    for args in
+        [json!({"doc":id,"page":1,"paragraph":1,"text":"مرحبا بالعالم","width":120}), json!({"doc":id,"page":1,"line":1,"text":"مرحبا بالعالم"})]
+    {
+        let e = err(&mut a, "text_edit", args).to_string();
+        assert!(e.contains("Arabic") && e.contains("CRAFT_FONTS_DIR"), "{e}");
+    }
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":id,"page":1})), lines);
+    assert_eq!(a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap(), render);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Each of these writes to its required `path` and replaces an existing file there, so the MCP
 /// annotations must not tell clients the call is read-only or harmless (#130).
 #[test]

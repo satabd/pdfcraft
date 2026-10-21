@@ -858,6 +858,7 @@ pub mod bidi;
 pub mod indic;
 mod linebreak;
 pub mod text;
+mod text_shaped;
 pub use text::{
     BlockStyle, LineEdit, MAX_FORM_DEPTH, MAX_FORM_VISITS, RangeStyle, ReadingBlocks, TextBlock, TextLine, clear_block, reading_blocks,
     reading_blocks_checked, replace_block, replace_line, rewrite_block, text_blocks, text_lines,
@@ -872,3 +873,5 @@ pub use added::{
 mod marked_isolation_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_shaped_tests;

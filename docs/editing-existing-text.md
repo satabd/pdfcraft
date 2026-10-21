@@ -56,6 +56,23 @@ a second bidi reversal; adjacent visual glyph runs still recover their own readi
 Only right-to-left ActualText is kept apart this way: left-to-right spans, such as the Latin
 ligatures (`fi`, `fl`) Word and Chrome wrap in ActualText mid-word, join their line as before.
 
+Arabic text typed into Edit text is shaped when the source font can't shape it. A complete
+embedded face that covers the text still shapes it in place (above). Otherwise (a subset font,
+no embedded font, a face without the letters, or a paragraph an earlier edit already replaced)
+the craft-fonts Arabic face (Noto Sans Arabic) draws it: joined forms, ligatures and marks, in
+UAX #9 order, as Type 3 glyphs named `PCEdAr…` (`/Name /PCArabic`) with a ToUnicode map, up to
+240 glyphs per font. Every wrapped line is one `/Span` with `/ActualText` holding the line in
+typing order, so copy, search and a later edit read it as typed. Latin letters and digits
+between the Arabic are drawn with the paragraph's own font when it has them, else Helvetica.
+The page font's reverse ToUnicode map is never used for Arabic letters: a producer maps a
+letter's initial, medial and final glyphs to one code, so re-encoding would write isolated
+forms. `replace_line` (the automation `line` form) shapes the same way. A build without the
+Arabic face says so (`CRAFT_FONTS_DIR`) and changes nothing. Not done yet: Hebrew and Arabic in
+one paragraph, formatting part of the Arabic text or choosing a document font for it
+(refused), justification (a justified right-to-left paragraph is right-aligned; character
+spacing is ignored, since it would pull joined letters apart), at most 4,096 distinct letter
+shapes per edit, and embedding the face as a real font.
+
 A justified paragraph stretches each row but its last to the paragraph's width by widening its
 spaces. Word spacing (`Tw`) widens only single-byte code 32, so where the font shows a space with
 another code (a composite font, the generated Type 3 fallback) each space is followed by a `TJ`

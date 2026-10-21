@@ -22,7 +22,8 @@ use crate::EditError;
 
 #[path = "text_regions.rs"]
 mod regions;
-use regions::{group_blocks, rewrite_styled_block};
+use crate::text_shaped;
+use regions::{group_blocks, rewrite_styled_block, shape_source};
 
 /// One line of existing text.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,7 +49,7 @@ pub struct TextLine {
     pub decodable: bool,
     /// Whether the font requires visual-order Indic text.
     pub visual_order: bool,
-    /// The Japanese or Hebrew fallback face the font subsets, when the line is in one (see [`same_font`]).
+    /// The Japanese, Hebrew or Arabic fallback face the font subsets, when the line is in one (see [`same_font`]).
     face: Option<String>,
     /// Its box along and across its baseline, `[along0, across0, along1, across1]` (see
     /// [`TextLine::frame_rect`]). Upright text has `rect`; turned text has its own box, which is
@@ -514,7 +515,7 @@ struct Ts {
     /// The operators that set the current fill colour (`g`, `rg`, `k`, or `cs` + `sc`/`scn`).
     fill: Vec<Op>,
     font: Option<(Vec<u8>, Rc<Metrics>)>,
-    /// The Japanese or Hebrew fallback face the font subsets, when the font is one (see [`is_type3_fallback`]).
+    /// The Japanese, Hebrew or Arabic fallback face the font subsets, when the font is one (see [`is_type3_fallback`]).
     face: Option<String>,
     size: f64,
     char_spacing: f64,
@@ -1449,14 +1450,16 @@ const JAPANESE_FONT_NAME: &str = "PCJapanese";
 /// The `/Name` of the Type 3 fonts generated for Hebrew text.
 const HEBREW_FONT_NAME: &str = "PCHebrew";
 
-/// Whether `font` is one of those generated fonts (Japanese or Hebrew): a replacement longer than
-/// one of them is split across several, which read back as one line (see [`same_font`]).
+/// Whether `font` is one of those generated fonts (Japanese, Hebrew or Arabic): a replacement
+/// longer than one of them is split across several, which read back as one line (see [`same_font`]).
 fn is_type3_fallback(font: &Dict) -> bool {
     font.name(b"Subtype") == Some(b"Type3")
-        && font.name(b"Name").is_some_and(|n| n == JAPANESE_FONT_NAME.as_bytes() || n == HEBREW_FONT_NAME.as_bytes())
+        && font
+            .name(b"Name")
+            .is_some_and(|n| n == JAPANESE_FONT_NAME.as_bytes() || n == HEBREW_FONT_NAME.as_bytes() || n == text_shaped::ARABIC_FONT_NAME.as_bytes())
 }
 
-/// Whether a run shown in `font` (a resource name, and the Japanese or Hebrew fallback face it subsets, if
+/// Whether a run shown in `font` (a resource name, and the Japanese, Hebrew or Arabic fallback face it subsets, if
 /// any) continues `line`: the same font resource, or another subset of the same face.
 fn same_font(line: &TextLine, font: &[u8], face: Option<&str>) -> bool {
     line.font.as_bytes() == font || (line.face.is_some() && line.face.as_deref() == face)
@@ -1864,6 +1867,14 @@ fn refuse_clipping_text(lines: &[TextLine], dropped: &std::collections::HashSet<
 /// [`replace_line`] with the most unique characters one generated font may hold (tests lower it).
 pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usize, text: &str, max_glyphs: usize) -> Result<LineEdit, EditError> {
     let text = text.replace(['\n', '\r'], " ");
+    // Arabic is shaped (see `text_shaped`), so its face must exist; settled before anything changes.
+    let arabic = text_shaped::has_arabic(&text);
+    if arabic && text.chars().any(crate::bidi::is_hebrew) {
+        return Err(text_shaped::mixed_scripts_error());
+    }
+    if arabic {
+        text_shaped::require_face(&text)?;
+    }
     let lines = text_lines(doc, page)?;
     let target = lines.get(line).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no line {}", page + 1, line + 1)))?;
     // Copies of the line drawn on the same baseline go with it, so the replacement is all that
@@ -1885,7 +1896,7 @@ pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usi
     let indic_text = if visual_indic { crate::indic::to_visual(&text) } else { text.clone() };
     // Typed in logical order; drawn left to right (right-to-left runs reversed).
     let shown = crate::bidi::to_visual(&indic_text);
-    let reused = font.as_ref().filter(|m| source_encodes(m, &shown));
+    let reused = font.as_ref().filter(|m| !arabic && source_encodes(m, &shown));
     let mut substituted = None;
     let mut replacement: Vec<Op> = Vec::new();
     // ' and " also move to the next line; keep that.
@@ -1907,6 +1918,17 @@ pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usi
             target.origin.state.char_spacing,
             target.origin.state.word_spacing,
         )?),
+        None if arabic => {
+            let size = font_size_before(&ops, first).unwrap_or(target.size);
+            let (spacing, words) = match ops[first].op.as_slice() {
+                b"\"" => (ops[first].operands.get(1).and_then(Object::as_f64), ops[first].operands.first().and_then(Object::as_f64)),
+                _ => (None, None),
+            };
+            let (spacing, words) = (spacing.unwrap_or(target.origin.state.char_spacing), words.unwrap_or(target.origin.state.word_spacing));
+            let substituted_font =
+                shaped_line(doc, &mut fonts_res, &target, font.as_ref(), &text, size, max_glyphs, (spacing, words), &mut replacement)?;
+            substituted = Some(substituted_font);
+        }
         None => {
             let fallback_shown = crate::bidi::to_visual(&text);
             if needs_type3(&text) {
@@ -1959,6 +1981,67 @@ pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usi
         }
     })?;
     Ok(LineEdit { substituted })
+}
+
+/// Replaces `target` with `text` laid out and shaped as Arabic: the operators go to `replacement`,
+/// which ends with the target's own font and spacing restored. Returns what to report as the
+/// substituted font. The Latin pieces use the line's own font when it can show them, else
+/// Helvetica in the line's family.
+#[allow(clippy::too_many_arguments)]
+fn shaped_line(
+    doc: &mut Document,
+    fonts_res: &mut Dict,
+    target: &TextLine,
+    font: Option<&Metrics>,
+    text: &str,
+    size: f64,
+    max_glyphs: usize,
+    (spacing, words): (f64, f64),
+    replacement: &mut Vec<Op>,
+) -> Result<String, EditError> {
+    let n = pdfcraft_content::num;
+    let rtl = crate::bidi::rtl_base(text);
+    let latin = text_shaped::latin_of(text);
+    let space = font.map_or(0.33, |m| source_space(doc, fonts_res, m));
+    let reuse = font.filter(|m| source_encodes(m, &latin) && source_encodes(m, &text_shaped::with_mirrors(&latin)));
+    let base = source_family(&target.base_font).base_font(target.bold, target.italic);
+    let helvetica = format!("PCEd{}", base.replace('-', ""));
+    let show = |s: &str| -> Result<Vec<Op>, EditError> {
+        if let Some(m) = reuse {
+            return source_show(m, s, size, space, 0.0, 0.0);
+        }
+        if s.chars().any(|c| !is_win_ansi_char(c) && c != '?') {
+            return Err(text_shaped::unsupported_with_arabic(s));
+        }
+        Ok(vec![Op::new("Tj", vec![Object::String(PdfString::literal(pdfcraft_fonts::win_ansi(s)))])])
+    };
+    let latin_font = if reuse.is_some() { target.font.as_str() } else { helvetica.as_str() };
+    let plan = text_shaped::plan(doc, fonts_res, &[text.to_owned()], rtl, max_glyphs, &text_shaped::LatinShow { font: latin_font, show: &show })?;
+    if reuse.is_none() {
+        let mut f = Dict::new();
+        f.set(b"Type".to_vec(), Object::name("Font"));
+        f.set(b"Subtype".to_vec(), Object::name("Type1"));
+        f.set(b"BaseFont".to_vec(), Object::name(base));
+        f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+        fonts_res.set(helvetica.clone().into_bytes(), Object::Dict(f));
+    }
+    // Spacing would pull the joined letters apart; it comes back after the line.
+    if spacing != 0.0 {
+        replacement.push(Op::new("Tc", vec![n(0.0)]));
+    }
+    if words != 0.0 {
+        replacement.push(Op::new("Tw", vec![n(0.0)]));
+    }
+    let mut current = target.font.clone();
+    replacement.extend(plan.line_ops(0, size, &mut current));
+    replacement.push(Op::new("Tf", vec![Object::name(&target.font), n(size)]));
+    if spacing != 0.0 {
+        replacement.push(Op::new("Tc", vec![n(spacing)]));
+    }
+    if words != 0.0 {
+        replacement.push(Op::new("Tw", vec![n(words)]));
+    }
+    Ok(format!("{} Type3", plan.family()))
 }
 
 /// The size of the last `Tf` before operator `at`.
@@ -2217,7 +2300,8 @@ fn rewrite_block_from(
     let registered_face = fonts_res.iter().any(|(name, _)| name.starts_with(b"PCFull"));
     // Hebrew is written back in drawing order (and with the Hebrew fallback face) by the
     // single-style path below; the styled region path does not reorder right-to-left runs.
-    let hebrew = text.unwrap_or(&b.text).chars().any(crate::bidi::is_hebrew);
+    let draft = text.unwrap_or(&b.text);
+    let hebrew = draft.chars().any(crate::bidi::is_hebrew);
     if hebrew && (!style.ranges.is_empty() || style.resource.is_some()) {
         return Err(EditError::Invalid(
             "formatting part of right-to-left (Hebrew) text, or choosing a document font for it, isn't supported yet".into(),
@@ -2230,8 +2314,35 @@ fn rewrite_block_from(
         return Err(EditError::Invalid("formatting part of turned text, or choosing a document font for it, isn't supported yet".into()));
     }
     let visual_indic = members.iter().any(|line| line.visual_order);
+    // Arabic (#125) is shaped. A complete source face that covers the text shapes it itself (the
+    // styled path below); otherwise -- a subset font, none, a face without the glyphs, a previous
+    // edit's generated font -- the craft-fonts Arabic face draws it, shaped, as Type 3 glyphs. The
+    // page font's reverse ToUnicode map is never used for Arabic letters: producers map a letter's
+    // initial, medial and final glyphs to one code. Formatting part of the text keeps the styled
+    // path, which says what it needs.
+    let arabic = text_shaped::has_arabic(draft);
+    if arabic && hebrew {
+        return Err(text_shaped::mixed_scripts_error());
+    }
+    // Nothing asked for: the paragraph keeps the glyphs its producer drew (as the styled path does).
+    if arabic && *style == BlockStyle::default() && text.is_none_or(|t| t == b.text || t == b.editor_text) {
+        return Ok(LineEdit { substituted: None });
+    }
+    let arabic_source = arabic
+        && style.ranges.is_empty()
+        && style.resource.is_none()
+        && style.family.is_none()
+        && style.bold.is_none()
+        && upright
+        && !visual_indic
+        && shape_source(doc, &fonts_res, &first.font, draft).ok().flatten().is_some();
+    let shaped = arabic && style.ranges.is_empty() && style.resource.is_none() && !arabic_source;
+    if shaped {
+        text_shaped::require_face(draft)?;
+    }
     if upright
         && !hebrew
+        && !shaped
         && !visual_indic
         && (!style.ranges.is_empty()
             || style.resource.is_some()
@@ -2260,6 +2371,8 @@ fn rewrite_block_from(
         .join("\n");
     // The characters to show, for choosing fonts: the breaks are moves, not glyphs.
     let flat = text.replace('\n', " ");
+    // What the page font or Helvetica has to show: with shaped Arabic, the rest of the text.
+    let fonts_text = if shaped { text_shaped::latin_of(&flat) } else { flat.clone() };
     let o = &first.origin;
     let last = members.last().copied().unwrap_or(first);
     let emit = &last.origin;
@@ -2275,11 +2388,20 @@ fn rewrite_block_from(
     if let Some(sc) = style.scale {
         ts_state.scale = (sc / 100.0).clamp(0.1, 10.0);
     }
+    if shaped {
+        // Spacing would pull joined letters apart.
+        ts_state.char_spacing = 0.0;
+    }
     let o_state = ts_state.clone();
     let metrics = fonts_res.get(font_name.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).map(|d| Metrics::from_dict(doc, &d));
     let visual_indic = metrics.as_ref().is_some_and(|m| m.visual_order) || first.visual_order;
-    let indic_text = if visual_indic { crate::indic::to_visual(&flat) } else { flat.clone() };
-    let reuse = style.family.is_none() && style.bold.is_none() && metrics.as_ref().is_some_and(|m| source_encodes(m, &indic_text));
+    let indic_text = if visual_indic { crate::indic::to_visual(&fonts_text) } else { fonts_text.clone() };
+    // Shaped Arabic draws mirrored brackets in right-to-left runs, so the font needs those too.
+    let reuse = style.family.is_none()
+        && style.bold.is_none()
+        && metrics
+            .as_ref()
+            .is_some_and(|m| source_encodes(m, &indic_text) && (!shaped || source_encodes(m, &text_shaped::with_mirrors(&indic_text))));
     let space = metrics.as_ref().map_or(0.33, |m| source_space(doc, &fonts_res, m));
     // The chosen style also determines the real Japanese fallback outlines and advances.
     let (family, bold, italic) = style.family.unwrap_or((source_family(&b.base_font), b.bold, b.italic));
@@ -2337,8 +2459,26 @@ fn rewrite_block_from(
         let emit_inv = Matrix(emit.ctm).invert().ok_or_else(|| EditError::Invalid("the paragraph has a singular transform".into()))?;
         Matrix(o.tm).then(&Matrix(o.ctm)).then(&emit_inv).0
     };
-    let type3 = if !reuse && needs_type3(&flat) { Some(type3_font(doc, &mut fonts_res, &flat, family, bold, max_glyphs)?) } else { None };
+    let type3 = if !reuse && needs_type3(&fonts_text) {
+        if shaped {
+            return Err(text_shaped::unsupported_with_arabic(&fonts_text));
+        }
+        Some(type3_font(doc, &mut fonts_res, &flat, family, bold, max_glyphs)?)
+    } else {
+        None
+    };
+    // Shaped Arabic is measured by laying a line out; Latin pieces by the font that draws them.
+    let latin_width = |s: &str| -> f64 {
+        match (&metrics, reuse) {
+            (Some(m), true) => source_width(m, s, size, space, 0.0, 0.0),
+            _ => std_width(s, size),
+        }
+    };
+    let measure = shaped.then(|| text_shaped::Measure::new(rtl, size, &latin_width));
     let advance = |s: &str| -> f64 {
+        if let Some(measure) = &measure {
+            return measure.line(s) * o_state.scale * k;
+        }
         let t = match (&metrics, reuse) {
             (Some(m), true) => {
                 let visual_s = if m.visual_order { crate::indic::to_visual(s) } else { s.to_owned() };
@@ -2383,9 +2523,12 @@ fn rewrite_block_from(
         width
     };
     let right_edge = if anchored_right { right_edge } else { width };
-    let wrapped = wrap(&text, width + 0.5, advance);
+    let wrapped = match &measure {
+        Some(measure) => wrap(&text, width + 0.5, |s| measure.approx(s) * o_state.scale * k),
+        None => wrap(&text, width + 0.5, advance),
+    };
     let mut substituted = None;
-    let new_font = !reuse;
+    let new_font = !reuse || shaped;
     let (show_font, encode): (String, Encoder) = if let Some(m) = metrics.clone().filter(|_| reuse) {
         let name = font_name.clone();
         (font_name.clone(), Box::new(move |s: &str| m.encode(s).map(|bytes| vec![(name.clone(), bytes)])))
@@ -2394,11 +2537,11 @@ fn rewrite_block_from(
         let first = fallback.names.first().cloned().ok_or_else(no_japanese_font)?;
         (first, Box::new(move |s: &str| type3_encode(&fallback, s)))
     } else {
-        let win = pdfcraft_fonts::win_ansi(&flat);
+        let win = pdfcraft_fonts::win_ansi(&fonts_text);
         let back: String = win.iter().map(|c| char::from_u32(u32::from(*c)).unwrap_or('?')).collect();
         let base = family.base_font(bold, italic);
-        if flat.chars().zip(back.chars()).any(|(a, c)| c == '?' && a != '?') {
-            return Err(EditError::Invalid(format!("\"{flat}\" has characters neither {} nor {base} can show", b.base_font)));
+        if fonts_text.chars().zip(back.chars()).any(|(a, c)| c == '?' && a != '?') {
+            return Err(EditError::Invalid(format!("\"{fonts_text}\" has characters neither {} nor {base} can show", b.base_font)));
         }
         let mut f = Dict::new();
         f.set(b"Type".to_vec(), Object::name("Font"));
@@ -2465,7 +2608,9 @@ fn rewrite_block_from(
     // (ISO 32000-1 §9.3.3), so where a space is shown with another code (a composite font, a
     // generated Type 3 font, a subset without a space) the extra space follows each space as a
     // TJ adjustment instead, and code 32, which may then be a letter, gets none.
-    let justify = align == Some(crate::added::Align::Justify);
+    // (Shaped Arabic isn't stretched: word spacing doesn't reach its generated fonts' spaces, and a
+    // justified right-to-left paragraph is right-aligned, see `offset`.)
+    let justify = align == Some(crate::added::Align::Justify) && !shaped;
     let word_spacing_reaches_spaces = match metrics.as_ref().filter(|_| reuse) {
         Some(m) => m.encode(" ").is_some_and(|b| m.codes(&b).iter().all(|(c, len)| m.is_space(*c, *len))),
         None => type3.is_none(),
@@ -2473,6 +2618,27 @@ fn rewrite_block_from(
     let mut x = 0.0;
     let mut tw_set = 0.0;
     let mut underlines: Vec<(f64, f64, f64)> = Vec::new(); // (x0, x1, y) in text space
+    // Shaped Arabic: every line is laid out and every font made now, before the document is changed;
+    // the Latin pieces of a line use the font the paragraph would use for them.
+    let shaped_plan = if shaped {
+        let latin_ops = |s: &str| -> Result<Vec<Op>, EditError> {
+            match &metrics {
+                Some(m) if reuse => source_show(m, s, size, space, 0.0, 0.0),
+                _ => {
+                    if s.chars().any(|c| !is_win_ansi_char(c) && c != '?') {
+                        return Err(text_shaped::unsupported_with_arabic(s));
+                    }
+                    Ok(vec![Op::new("Tj", vec![Object::String(PdfString::literal(pdfcraft_fonts::win_ansi(s)))])])
+                }
+            }
+        };
+        let latin = text_shaped::LatinShow { font: &shown_font, show: &latin_ops };
+        let plan = text_shaped::plan(doc, &mut fonts_res, &wrapped, rtl, max_glyphs, &latin)?;
+        substituted = Some(format!("{} Type3", plan.family()));
+        Some(plan)
+    } else {
+        None
+    };
     for (i, line) in wrapped.iter().enumerate() {
         let spaces = line.matches(' ').count();
         let tw =
@@ -2490,9 +2656,19 @@ fn rewrite_block_from(
             tw_set = tw;
         }
         // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
-        let visual = crate::bidi::to_visual(line);
+        // (Shaped Arabic is laid out already: one span per line, in drawing order.)
+        if let Some(plan) = &shaped_plan {
+            block_ops.extend(plan.line_ops(i, size, &mut shown_font));
+        }
+        let visual = if shaped_plan.is_some() { String::new() } else { crate::bidi::to_visual(line) };
         // Stretched without word spacing: shown up to and including each space, then moved on.
-        let pieces = if stretch > 0.0 { visual.split_inclusive(' ').collect() } else { vec![visual.as_str()] };
+        let pieces = if shaped_plan.is_some() {
+            Vec::new()
+        } else if stretch > 0.0 {
+            visual.split_inclusive(' ').collect()
+        } else {
+            vec![visual.as_str()]
+        };
         for piece in pieces {
             if let Some(metrics) = metrics.as_ref().filter(|_| reuse) {
                 let indic_piece = if metrics.visual_order { crate::indic::to_visual(piece) } else { piece.to_owned() };

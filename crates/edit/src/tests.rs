@@ -32,7 +32,7 @@ fn fixture() -> Document {
     Document::open(Arc::new(out)).unwrap()
 }
 
-fn reopen(doc: &Document) -> Document {
+pub(crate) fn reopen(doc: &Document) -> Document {
     let bytes = write_incremental(doc, &SaveOptions::default()).unwrap();
     hayro_syntax::Pdf::new(bytes.clone()).expect("parses");
     Document::open(Arc::new(bytes)).unwrap()
@@ -878,7 +878,7 @@ fn odd_arabic_text_never_panics() {
 }
 
 /// One page with Helvetica (WinAnsi) and a subset font that has only the glyphs it uses.
-fn text_page(content: &str) -> Document {
+pub(crate) fn text_page(content: &str) -> Document {
     let objs: Vec<String> = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".into(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
@@ -1919,7 +1919,7 @@ fn paragraphs_are_found_and_rewrapped() {
     assert_eq!((blocks[0].text.as_str(), blocks[0].lines.len()), ("Short.", 1));
 }
 
-fn page_content_bytes(doc: &Document, page: usize) -> Vec<u8> {
+pub(crate) fn page_content_bytes(doc: &Document, page: usize) -> Vec<u8> {
     let p = pdfcraft_model::pages(doc).swap_remove(page);
     let c = p.dict.get(b"Contents").unwrap();
     match &*doc.resolve(c) {
@@ -2549,7 +2549,7 @@ fn the_graphics_state_carries_over_between_content_streams() {
 
 /// One page whose font draws a few Hebrew letters (ToUnicode): A ב, B ד, C י, D ו, E ק, F ש,
 /// G ל, H ם. Content streams draw Hebrew in visual order, so "בדיוק" is `(EDCBA)`.
-fn hebrew_page(content: &str) -> Document {
+pub(crate) fn hebrew_page(content: &str) -> Document {
     let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
                 1 begincodespacerange <00> <FF> endcodespacerange 9 beginbfchar \
                 <20> <0020> <41> <05D1> <42> <05D3> <43> <05D9> <44> <05D5> <45> <05E7> <46> <05E9> <47> <05DC> <48> <05DD> \
@@ -2875,7 +2875,7 @@ fn fill_sign_flatten_bakes_marks_keeps_other_comments_and_does_not_reuse_pcfl0()
 }
 
 /// A one-page document from its objects (object 1 is the catalog).
-fn build(objs: &[&str]) -> Document {
+pub(crate) fn build(objs: &[&str]) -> Document {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offs = Vec::new();
     for (i, o) in objs.iter().enumerate() {
@@ -2891,7 +2891,7 @@ fn build(objs: &[&str]) -> Document {
     Document::open(Arc::new(out)).unwrap()
 }
 
-fn stream(dict: &str, data: &str) -> String {
+pub(crate) fn stream(dict: &str, data: &str) -> String {
     format!("<< {dict} /Length {} >>\nstream\n{data}\nendstream", data.len())
 }
 
@@ -3664,7 +3664,7 @@ fn actual_text_and_visual_rtl_glyphs_keep_their_own_reading_order() {
 }
 
 /// Synthetic codes A س, B م and X a lam-alef glyph, drawn from left to right.
-fn arabic_ligature_page(content: &str, composite: bool) -> Document {
+pub(crate) fn arabic_ligature_page(content: &str, composite: bool) -> Document {
     let prefix = if composite { "00" } else { "" };
     let cmap = format!(
         "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
