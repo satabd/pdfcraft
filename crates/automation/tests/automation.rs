@@ -719,8 +719,9 @@ fn text_find_ignores_arabic_harakat_and_matches_presentation_forms() {
 
     let mut a = auto(&dir);
     let id = ok(&mut a, "doc_open", json!({"path":"arabic.pdf"}))["doc"].as_u64().unwrap();
+    // One string per page; extraction keeps the producer's presentation forms as they are.
     let text = page_text(&mut a, id);
-    assert_eq!(text, ["كَتَبَ", "ملا"], "the page really holds vowelled text and a ligature glyph");
+    assert_eq!(text, ["كَتَبَ\nﻡﻻ"], "the page really holds vowelled text and a ligature glyph");
     for (query, count) in [("كتب", 1), ("كَتَبَ", 1), ("كـتـب", 1), ("لا", 1), ("ملا", 1), ("ﻡﻻ", 1), ("بتك", 0), ("كتاب", 0)]
     {
         let found = ok(&mut a, "text_find", json!({"doc":id,"query":query}));
