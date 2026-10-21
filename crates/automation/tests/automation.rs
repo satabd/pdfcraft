@@ -617,6 +617,40 @@ fn arabic_ligature_actual_text_is_one_editable_word_through_save_reopen() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Find ignores harakat, tatweel and presentation forms: a bare query finds vowelled text, and
+/// a lam-alef ligature glyph is found by its two letters (public Acrobat behaviour).
+#[test]
+fn text_find_ignores_arabic_harakat_and_matches_presentation_forms() {
+    use pdfcraft_cos::{Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
+    use std::sync::Arc;
+
+    let dir = workdir("arabic-find-harakat");
+    let mut doc = Document::open(Arc::new(fixture(1))).unwrap();
+    // Synthetic glyph codes: A كَ, B تَ, C بَ (letter plus fatha), X lam-alef presentation form,
+    // Y ا, Z a letter drawn as an isolated presentation form (U+FEE1 meem).
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
+                1 begincodespacerange <00> <FF> endcodespacerange 5 beginbfchar \
+                <41> <0643064E> <42> <062A064E> <43> <0628064E> <58> <FEFB> <59> <FEE1> \
+                endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let unicode = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
+    doc.update_dict(ObjRef::new(3, 0), |d| d.set(b"ToUnicode".to_vec(), Object::Ref(unicode))).unwrap();
+    // Drawn left to right, so the logical order is reversed: بَ تَ كَ is "كَتَبَ" read from the right.
+    let content = "BT /F1 24 Tf 20 150 Td (CBA) Tj ET BT /F1 24 Tf 20 100 Td (XY) Tj ET";
+    doc.set(ObjRef::new(5, 0), Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    std::fs::write(dir.join("arabic.pdf"), write_full(&doc, &SaveOptions::default()).unwrap()).unwrap();
+
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"arabic.pdf"}))["doc"].as_u64().unwrap();
+    let text = page_text(&mut a, id);
+    assert_eq!(text, ["كَتَبَ", "ملا"], "the page really holds vowelled text and a ligature glyph");
+    for (query, count) in [("كتب", 1), ("كَتَبَ", 1), ("كـتـب", 1), ("لا", 1), ("ملا", 1), ("ﻡﻻ", 1), ("بتك", 0), ("كتاب", 0)]
+    {
+        let found = ok(&mut a, "text_find", json!({"doc":id,"query":query}));
+        assert_eq!(found["count"], count, "query {query:?}: {found}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Each of these writes to its required `path` and replaces an existing file there, so the MCP
 /// annotations must not tell clients the call is read-only or harmless (#130).
 #[test]

@@ -73,6 +73,156 @@ pub fn fold_case(s: &str) -> String {
     out
 }
 
+/// `s` as search compares it: Arabic normalised, then (unless `sensitive`) case-folded.
+///
+/// Applied to the query and to every glyph's text, so both sides reduce to the same letters:
+/// - Arabic harakat and other combining marks (U+0610–U+061A, U+064B–U+065F, U+0670, the Quranic
+///   marks of U+06D6–U+06ED that are not letters or symbols), tatweel (U+0640) and the bidi and
+///   joiner controls (U+061C, U+200C–U+200F, U+202A–U+202E, U+2066–U+2069) are dropped;
+/// - presentation forms (U+FB50–U+FDFF, U+FE70–U+FEFC) become their base letters, the lam-alef
+///   ligatures and the Allah ligature become the letters they are made of;
+/// - Arabic-Indic (U+0660–U+0669) and Persian (U+06F0–U+06F9) digits become ASCII digits.
+///
+/// Alef variants, alef maksura and yeh, teh marbuta and heh, and the Persian kaf and yeh stay
+/// distinct letters, as they do in Acrobat. A dropped character is simply absent, and a ligature
+/// gives several characters, so the result is not one character per character (unlike
+/// [`fold_case`]); search keeps the owning glyph of each character it receives.
+fn fold_search(s: &str, sensitive: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() || !arabic_fold(c, &mut out) {
+            if sensitive {
+                out.push(c);
+            } else {
+                out.push_str(&fold_case(c.encode_utf8(&mut [0; 4])));
+            }
+        }
+    }
+    out
+}
+
+/// Runs of Arabic presentation forms that stand for one base letter: first code point, number of
+/// consecutive forms (isolated, final, initial, medial: each letter has two or four), base letter.
+/// From the Unicode compatibility decompositions of Arabic Presentation Forms-A and -B.
+const PRESENTATION_LETTERS: &[(u32, u32, u32)] = &[
+    (0xFB50, 2, 0x0671),
+    (0xFB52, 4, 0x067B),
+    (0xFB56, 4, 0x067E),
+    (0xFB5A, 4, 0x0680),
+    (0xFB5E, 4, 0x067A),
+    (0xFB62, 4, 0x067F),
+    (0xFB66, 4, 0x0679),
+    (0xFB6A, 4, 0x06A4),
+    (0xFB6E, 4, 0x06A6),
+    (0xFB72, 4, 0x0684),
+    (0xFB76, 4, 0x0683),
+    (0xFB7A, 4, 0x0686),
+    (0xFB7E, 4, 0x0687),
+    (0xFB82, 2, 0x068D),
+    (0xFB84, 2, 0x068C),
+    (0xFB86, 2, 0x068E),
+    (0xFB88, 2, 0x0688),
+    (0xFB8A, 2, 0x0698),
+    (0xFB8C, 2, 0x0691),
+    (0xFB8E, 4, 0x06A9),
+    (0xFB92, 4, 0x06AF),
+    (0xFB96, 4, 0x06B3),
+    (0xFB9A, 4, 0x06B1),
+    (0xFB9E, 2, 0x06BA),
+    (0xFBA0, 4, 0x06BB),
+    (0xFBA4, 2, 0x06C0),
+    (0xFBA6, 4, 0x06C1),
+    (0xFBAA, 4, 0x06BE),
+    (0xFBAE, 2, 0x06D2),
+    (0xFBB0, 2, 0x06D3),
+    (0xFBD3, 4, 0x06AD),
+    (0xFBD7, 2, 0x06C7),
+    (0xFBD9, 2, 0x06C6),
+    (0xFBDB, 2, 0x06C8),
+    (0xFBDD, 1, 0x0677),
+    (0xFBDE, 2, 0x06CB),
+    (0xFBE0, 2, 0x06C5),
+    (0xFBE2, 2, 0x06C9),
+    (0xFBE4, 4, 0x06D0),
+    (0xFBE8, 2, 0x0649),
+    (0xFBFC, 4, 0x06CC),
+    (0xFE80, 1, 0x0621),
+    (0xFE81, 2, 0x0622),
+    (0xFE83, 2, 0x0623),
+    (0xFE85, 2, 0x0624),
+    (0xFE87, 2, 0x0625),
+    (0xFE89, 4, 0x0626),
+    (0xFE8D, 2, 0x0627),
+    (0xFE8F, 4, 0x0628),
+    (0xFE93, 2, 0x0629),
+    (0xFE95, 4, 0x062A),
+    (0xFE99, 4, 0x062B),
+    (0xFE9D, 4, 0x062C),
+    (0xFEA1, 4, 0x062D),
+    (0xFEA5, 4, 0x062E),
+    (0xFEA9, 2, 0x062F),
+    (0xFEAB, 2, 0x0630),
+    (0xFEAD, 2, 0x0631),
+    (0xFEAF, 2, 0x0632),
+    (0xFEB1, 4, 0x0633),
+    (0xFEB5, 4, 0x0634),
+    (0xFEB9, 4, 0x0635),
+    (0xFEBD, 4, 0x0636),
+    (0xFEC1, 4, 0x0637),
+    (0xFEC5, 4, 0x0638),
+    (0xFEC9, 4, 0x0639),
+    (0xFECD, 4, 0x063A),
+    (0xFED1, 4, 0x0641),
+    (0xFED5, 4, 0x0642),
+    (0xFED9, 4, 0x0643),
+    (0xFEDD, 4, 0x0644),
+    (0xFEE1, 4, 0x0645),
+    (0xFEE5, 4, 0x0646),
+    (0xFEE9, 4, 0x0647),
+    (0xFEED, 2, 0x0648),
+    (0xFEEF, 2, 0x0649),
+    (0xFEF1, 4, 0x064A),
+];
+
+/// Appends the Arabic fold of `c` to `out` and returns `true`, or returns `false` (appending
+/// nothing) when `c` is not touched by it. The base letters have no case, so the fold is the same
+/// for case-sensitive and case-insensitive search.
+fn arabic_fold(c: char, out: &mut String) -> bool {
+    let cp = u32::from(c);
+    let mut push = |cp: u32| out.extend(char::from_u32(cp));
+    match cp {
+        // Harakat and other combining marks, tatweel, and bidi/joiner controls.
+        0x0610..=0x061A | 0x061C | 0x0640 | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7 | 0x06E8 | 0x06EA..=0x06ED => {}
+        0x200C..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 => {}
+        // Presentation-form marks (a fatha on a space or on a tatweel, ...): all are marks.
+        0xFE70..=0xFE72 | 0xFE74 | 0xFE76..=0xFE7F => {}
+        // Digits.
+        0x0660..=0x0669 => push(cp - 0x0660 + u32::from(b'0')),
+        0x06F0..=0x06F9 => push(cp - 0x06F0 + u32::from(b'0')),
+        // Lam-alef ligatures: lam, then madda / hamza above / hamza below / plain alef.
+        0xFEF5..=0xFEFC => {
+            push(0x0644);
+            push(match cp {
+                0xFEF5 | 0xFEF6 => 0x0622,
+                0xFEF7 | 0xFEF8 => 0x0623,
+                0xFEF9 | 0xFEFA => 0x0625,
+                _ => 0x0627,
+            });
+        }
+        // The Allah ligature.
+        0xFDF2 => [0x0627, 0x0644, 0x0644, 0x0647].into_iter().for_each(push),
+        0xFB50..=0xFEFC => {
+            let Some(&(_, _, base)) = PRESENTATION_LETTERS.iter().find(|&&(first, count, _)| (first..first.saturating_add(count)).contains(&cp))
+            else {
+                return false;
+            };
+            push(base);
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// The text of one page, in content order, with line structure.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PageText {
@@ -2045,6 +2195,160 @@ mod tests {
         assert_eq!(fold_case("ÇAĞLAR Şişli"), "çağlar şişli");
         assert_eq!(fold_case("İIıi"), "iiii");
         assert_eq!(fold_case("Σσς"), "σσσ");
+    }
+
+    /// A one-line page whose glyphs carry `parts` as their text, in logical order.
+    fn logical(parts: &[&str]) -> PageText {
+        let glyphs = parts.iter().enumerate().map(|(i, t)| g(t, i as f32 * 6.0, 0.0, i as f32 * 6.0 + 6.0)).collect();
+        PageText { glyphs, line_of: vec![0; parts.len()], space_before: vec![false; parts.len()] }
+    }
+
+    fn letters(s: &str) -> Vec<String> {
+        s.chars().map(String::from).collect()
+    }
+
+    fn page_of(s: &str) -> PageText {
+        let parts = letters(s);
+        logical(&parts.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// Harakat are ignored in both directions. When a mark is its own glyph, a match includes the
+    /// marks between its letters and stops after the last letter, so a trailing mark stays
+    /// outside the highlight; when a mark shares its letter's glyph the glyph is whole.
+    #[test]
+    fn arabic_search_ignores_harakat_in_the_query_and_in_the_page() {
+        // Marks as glyphs of their own: ك َ ت َ ب َ.
+        let marked = page_of("كَتَبَ");
+        assert_eq!(marked.find("كتب"), vec![0..5], "letters and the marks between them, not the trailing mark");
+        assert_eq!(marked.find("كَتَبَ"), vec![0..5], "the same query with its marks");
+        assert_eq!(marked.find("كتب"), marked.find("كَتَبَ"));
+        // Marks fused into the letter glyphs: كَ تَ بَ.
+        let fused = logical(&["كَ", "تَ", "بَ"]);
+        assert_eq!(fused.find("كتب"), vec![0..3], "exactly the three letter glyphs");
+        assert_eq!(fused.find_opts("كتب", true, true), vec![0..3], "case-sensitive and whole-word agree");
+        // The reverse: a page without marks, a query with them.
+        let bare = page_of("كتب");
+        assert_eq!(bare.find("كَتَبَ"), vec![0..3]);
+        assert_eq!(bare.find("كتب"), vec![0..3]);
+        // A query of marks alone has nothing to look for.
+        assert!(bare.find("\u{64e}\u{64e}").is_empty());
+        // A word inside a sentence stays a whole word.
+        let sentence = page_of("ذَهَبَ كَتَبَ الولد");
+        assert_eq!(sentence.find_opts("كتب", false, true).len(), 1);
+        assert!(sentence.find_opts("كت", false, true).is_empty());
+    }
+
+    #[test]
+    fn arabic_presentation_forms_match_their_base_letters() {
+        // ﻛ ﺘ ﺐ: initial kaf, medial teh, final beh.
+        let shaped = page_of("\u{FEDB}\u{FE98}\u{FE90}");
+        assert_eq!(shaped.find("كتب"), vec![0..3]);
+        assert_eq!(shaped.find("\u{FEDB}\u{FE98}\u{FE90}"), vec![0..3], "and by themselves");
+        assert_eq!(page_of("كتب").find("\u{FEDB}\u{FE98}\u{FE90}"), vec![0..3], "the reverse");
+        assert_eq!(shaped.find_opts("كتب", true, true), vec![0..3]);
+        // Lam-alef ligatures are one glyph for two letters; the match is that one glyph.
+        let ligature = logical(&["\u{FEFB}"]);
+        assert_eq!(ligature.find("لا"), vec![0..1]);
+        let word = logical(&["\u{FE8D}", "\u{FEFC}", "\u{FEE2}"]); // ا لا م
+        assert_eq!(word.find("لا"), vec![1..2]);
+        assert_eq!(word.find("الام"), vec![0..3]);
+        assert_eq!(logical(&["\u{FEF5}"]).find("لآ"), vec![0..1], "lam-alef with madda");
+        assert_eq!(logical(&["\u{FEF7}"]).find("لأ"), vec![0..1]);
+        assert_eq!(logical(&["\u{FEF9}"]).find("لإ"), vec![0..1]);
+        // A query for one half still finds its glyph.
+        assert_eq!(ligature.find("ل"), vec![0..1]);
+        assert_eq!(ligature.find("ا"), vec![0..1]);
+        // Allah ligature and a Persian letter from the extended block.
+        assert_eq!(logical(&["\u{FDF2}"]).find("الله"), vec![0..1]);
+        assert_eq!(logical(&["\u{FB8F}"]).find("\u{6A9}"), vec![0..1], "final keheh is U+06A9");
+        // Symbol ligatures with no letter-by-letter reading are left as they are.
+        assert!(logical(&["\u{FDFA}"]).find("صلى").is_empty());
+        // Presentation-form marks (a space-plus-fatha form, a tatweel-plus-fatha form) are dropped.
+        assert_eq!(logical(&["\u{FEDB}", "\u{FE77}", "\u{FE98}"]).find("كت"), vec![0..3]);
+    }
+
+    #[test]
+    fn arabic_search_does_not_unify_distinct_letters() {
+        // Acrobat keeps these apart, and so do we.
+        for (page, query) in [
+            ("أحمد", "احمد"),
+            ("إسلام", "اسلام"),
+            ("آمن", "امن"),
+            ("ٱلله", "الله"),
+            ("على", "علي"),
+            ("مدرسة", "مدرسه"),
+            ("\u{6A9}", "\u{643}"),
+            ("\u{6CC}", "\u{64A}"),
+        ] {
+            assert!(page_of(page).find(query).is_empty(), "{page} must not match {query}");
+            assert!(page_of(query).find(page).is_empty(), "{query} must not match {page}");
+        }
+    }
+
+    #[test]
+    fn arabic_indic_and_persian_digits_match_western_digits() {
+        let arabic = page_of("\u{661}\u{662}\u{663}");
+        let persian = page_of("\u{6F1}\u{6F2}\u{6F3}");
+        let western = page_of("123");
+        for page in [&arabic, &persian, &western] {
+            assert_eq!(page.find("123"), vec![0..3]);
+            assert_eq!(page.find("\u{661}\u{662}\u{663}"), vec![0..3]);
+            assert_eq!(page.find("\u{6F1}\u{6F2}\u{6F3}"), vec![0..3]);
+            assert_eq!(page.find_opts("123", true, true), vec![0..3]);
+        }
+        assert_eq!(page_of("\u{660}\u{669}\u{6F0}\u{6F9}").find("0909"), vec![0..4]);
+    }
+
+    #[test]
+    fn tatweel_and_bidi_controls_are_ignored_by_search() {
+        assert_eq!(page_of("كـتـب").find("كتب"), vec![0..5]);
+        assert_eq!(page_of("كتب").find("كـتـب"), vec![0..3]);
+        // A right-to-left mark or embedding control inside the text does not break a match.
+        assert_eq!(page_of("ك\u{200F}تب").find("كتب"), vec![0..4]);
+        assert_eq!(page_of("\u{202B}كتب\u{202C}").find("كتب"), vec![1..4]);
+        assert_eq!(page_of("كت\u{200C}ب").find("كتب"), vec![0..4]);
+    }
+
+    #[test]
+    fn arabic_fold_table_is_ordered_and_touches_only_arabic() {
+        for pair in PRESENTATION_LETTERS.windows(2) {
+            assert!(pair[0].0 + pair[0].1 <= pair[1].0, "{:X?} overlaps {:X?}", pair[0], pair[1]);
+        }
+        for cp in 0..=0x10FFFF_u32 {
+            let Some(c) = char::from_u32(cp) else { continue };
+            let s = c.to_string();
+            let arabic = matches!(cp, 0x0610..=0x061C | 0x0640 | 0x064B..=0x065F | 0x0660..=0x0670 | 0x06D6..=0x06ED | 0x06F0..=0x06F9 | 0x200C..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFB50..=0xFEFC);
+            if !arabic {
+                assert_eq!(fold_search(&s, false), fold_case(&s), "U+{cp:04X}");
+                assert_eq!(fold_search(&s, true), s, "U+{cp:04X}");
+            }
+            // Never longer than a ligature's four letters, and never produces a mark.
+            let folded = fold_search(&s, false);
+            assert!(folded.chars().count() <= 4, "U+{cp:04X}");
+        }
+        // Every table entry lands on a letter of the Arabic block.
+        for &(first, count, base) in PRESENTATION_LETTERS {
+            assert!((0x0621..=0x06D3).contains(&base), "{base:X}");
+            for cp in first..first + count {
+                assert_eq!(fold_search(&char::from_u32(cp).unwrap().to_string(), false), char::from_u32(base).unwrap().to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn arabic_folding_leaves_other_scripts_alone() {
+        for s in ["Hello WORLD", "İSTANBUL ırmak", "Σσς κόσμος", "ÇAĞLAR", "日本語", "e\u{301}", "", "  "] {
+            assert_eq!(fold_search(s, false), fold_case(s), "{s}");
+            assert_eq!(fold_search(s, true), s, "{s}");
+        }
+        assert_eq!(fold_search("İIıi", false), "iiii");
+        // Search on a Latin page still matches by case and Turkish i.
+        let upper = page_of("İSTANBUL");
+        assert_eq!(upper.find("istanbul"), vec![0..8]);
+        assert_eq!(page_of("istanbul").find("İSTANBUL"), vec![0..8]);
+        assert!(upper.find_opts("istanbul", true, false).is_empty());
+        // Latin combining marks are not Arabic marks and are not dropped.
+        assert!(page_of("e\u{301}").find("e\u{302}").is_empty());
     }
 
     fn g(t: &str, x0: f32, y0: f32, x1: f32) -> TextGlyph {
