@@ -526,7 +526,7 @@ pub(crate) fn paint_page(ui: &egui::Ui, painter: &egui::Painter, xf: &PageXform,
             // The name tag: white text on black, clipped to the field.
             let label = f.name.rsplit('.').next().unwrap_or(&f.name);
             let font = theme::regular((9.0 * zoom).clamp(7.0, 13.0));
-            let galley = painter.layout_no_wrap(label.to_string(), font, Color32::WHITE);
+            let galley = painter.layout_no_wrap(crate::bidi::visual_auto(label).into_owned(), font, Color32::WHITE);
             let size = galley.size() + vec2(6.0, 2.0);
             let tag = Rect::from_center_size(r.center(), size);
             let clip = painter.clip_rect().intersect(r);
@@ -1178,7 +1178,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                     egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
                         for (i, o) in d.options.iter().enumerate() {
                             ui.horizontal(|ui| {
-                                ui.label(o);
+                                ui.label(crate::bidi::visual_auto(o).as_ref());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let delete = ui.small_button(tl!("Delete"));
                                     if widgets::hover_text(delete, &crate::i18n::fmt_logical(&tl_logical!("Delete {o}"), &[("o", o)])).clicked() {
@@ -1204,11 +1204,12 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label(tl!("Default:"));
-                        let shown = if d.default.is_empty() { tl!("(none)").to_string() } else { d.default.clone() };
+                        let shown = if d.default.is_empty() { tl!("(none)").to_string() } else { crate::bidi::visual_auto(&d.default).into_owned() };
                         egui::ComboBox::from_id_salt("choice-default").selected_text(shown).show_ui(ui, |ui| {
                             ui.selectable_value(&mut d.default, String::new(), tl!("(none)"));
                             for o in d.options.clone() {
-                                ui.selectable_value(&mut d.default, o.clone(), o);
+                                let shown = crate::bidi::visual_auto(&o).into_owned();
+                                ui.selectable_value(&mut d.default, o, shown);
                             }
                         });
                     });

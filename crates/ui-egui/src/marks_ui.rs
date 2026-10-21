@@ -334,7 +334,13 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
                     egui::Stroke::new(1.0, Color32::GRAY),
                     egui::StrokeKind::Inside,
                 );
-                p.text(centre, egui::Align2::CENTER_CENTER, file_name.clone().unwrap_or_default(), egui::FontId::proportional(10.0), Color32::GRAY);
+                p.text(
+                    centre,
+                    egui::Align2::CENTER_CENTER,
+                    file_name.as_deref().map(|n| crate::bidi::visual(n).into_owned()).unwrap_or_default(),
+                    egui::FontId::proportional(10.0),
+                    Color32::GRAY,
+                );
             }
             MarkKind::Watermark => {
                 let text = if wm.text.trim().is_empty() { "CONFIDENTIAL" } else { wm.text.trim() };
@@ -356,7 +362,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
                 p.text(
                     r.center(),
                     egui::Align2::CENTER_CENTER,
-                    file_name.clone().unwrap_or_default(),
+                    file_name.as_deref().map(|n| crate::bidi::visual(n).into_owned()).unwrap_or_default(),
                     egui::FontId::proportional(10.0),
                     Color32::GRAY,
                 );

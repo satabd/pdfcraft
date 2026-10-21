@@ -118,17 +118,26 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let Some((_, id)) = app.active_ids() else { return };
                 let Some(doc) = app.session.get(id) else { return };
                 let i = &doc.info;
-                let row = |ui: &mut egui::Ui, k: &str, v: String| {
+                // `reorder`: the value is document text in logical order (a title), put in display
+                // order by its own direction; the others (a file name, a path) already are.
+                let row_with = |ui: &mut egui::Ui, k: &str, v: String, reorder: bool| {
                     // Row labels are UI chrome; values are document data and stay as they are.
                     ui.label(egui::RichText::new(tl!(k)).color(t.text_muted));
                     ui.scope(|ui| {
                         ui.set_max_width(420.0);
+                        if reorder && !v.is_empty() {
+                            let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                            widgets::wrapped_text(ui, &v, font, colour, false);
+                            return;
+                        }
                         ui.add(
                             egui::Label::new(if v.is_empty() { egui::RichText::new("—").color(t.text_faint) } else { egui::RichText::new(v) }).wrap(),
                         );
                     });
                     ui.end_row();
                 };
+                let row = |ui: &mut egui::Ui, k: &str, v: String| row_with(ui, k, v, false);
+                let row_doc = |ui: &mut egui::Ui, k: &str, v: String| row_with(ui, k, v, true);
                 egui::ScrollArea::vertical().max_height(460.0).auto_shrink([false, true]).show(ui, |ui| {
                     egui::Grid::new("props").num_columns(2).spacing([18.0, 8.0]).min_col_width(140.0).show(ui, |ui| match tab {
                         PropsTab::Description => {
@@ -143,14 +152,14 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                                     }
                                 }
                                 _ => {
-                                    row(ui, "Title", i.title.clone().unwrap_or_default());
-                                    row(ui, "Author", i.author.clone().unwrap_or_default());
-                                    row(ui, "Subject", i.subject.clone().unwrap_or_default());
-                                    row(ui, "Keywords", i.keywords.clone().unwrap_or_default());
+                                    row_doc(ui, "Title", i.title.clone().unwrap_or_default());
+                                    row_doc(ui, "Author", i.author.clone().unwrap_or_default());
+                                    row_doc(ui, "Subject", i.subject.clone().unwrap_or_default());
+                                    row_doc(ui, "Keywords", i.keywords.clone().unwrap_or_default());
                                 }
                             }
-                            row(ui, "Application", i.creator.clone().unwrap_or_default());
-                            row(ui, "PDF producer", i.producer.clone().unwrap_or_default());
+                            row_doc(ui, "Application", i.creator.clone().unwrap_or_default());
+                            row_doc(ui, "PDF producer", i.producer.clone().unwrap_or_default());
                         }
                         PropsTab::InitialView => {
                             use pdfcraft_engine::{InitialLayout as L, Magnification as M, Navigation as N};
@@ -334,7 +343,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                                 } else {
                                     " · Not embedded (substituted)"
                                 });
-                                row(ui, &f.name, detail);
+                                row(ui, &crate::bidi::visual(&f.name), detail);
                             }
                         }
                         PropsTab::Advanced => {
@@ -501,7 +510,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let max_start = d.src_pages.saturating_sub(n) + 1;
                 d.src_from = d.src_from.clamp(1, max_start.max(1));
                 ui.horizontal(|ui| {
-                    ui.label(crate::i18n::fmt(tl!("Replacement: pages of {name}"), &[("name", &d.name)]));
+                    ui.label(crate::i18n::fmt(tl!("Replacement: pages of {name}"), &[("name", &crate::bidi::visual(&d.name))]));
                     ui.add(egui::DragValue::new(&mut d.src_from).range(1..=max_start.max(1)));
                     ui.label(crate::i18n::fmt(tl!("to {n}"), &[("n", &(d.src_from + n - 1).to_string())]));
                     ui.label(egui::RichText::new(crate::i18n::fmt(tl!("of {name}"), &[("name", &d.src_pages.to_string())])).color(t.text_muted));
@@ -693,7 +702,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 };
                 ui.label(egui::RichText::new(tl!("Duplicate Field")).font(theme::semibold(18.0)));
                 ui.add_space(8.0);
-                ui.label(crate::i18n::fmt(tl!("Duplicate \"{name}\" onto:"), &[("name", &d.name)]));
+                ui.label(crate::i18n::fmt(tl!("Duplicate \"{name}\" onto:"), &[("name", &crate::bidi::visual_auto(&d.name))]));
                 widgets::radio_value(ui, &mut d.all, true, tl!("All pages"));
                 ui.horizontal(|ui| {
                     widgets::radio_value(ui, &mut d.all, false, tl!("From"));
@@ -1076,7 +1085,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 egui::Grid::new("recoverable").num_columns(2).spacing([18.0, 6.0]).show(ui, |ui| {
                     for m in &app.recoverable {
-                        ui.label(egui::RichText::new(&m.name).font(theme::medium(13.0)));
+                        ui.label(egui::RichText::new(crate::bidi::visual(&m.name)).font(theme::medium(13.0)));
                         let mins = now.saturating_sub(m.saved_at) / 60;
                         let when = match mins {
                             0 => tl!("just now").to_string(),
@@ -1486,7 +1495,7 @@ fn save_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ui.add(crate::icons::image("save", 22.0, t.accent));
             let title = ui.add(
                 egui::Label::new(
-                    egui::RichText::new(crate::i18n::fmt(tl!("Save changes to “{name}” before closing?"), &[("name", &shown)]))
+                    egui::RichText::new(crate::i18n::fmt(tl!("Save changes to “{name}” before closing?"), &[("name", &crate::bidi::visual(&shown))]))
                         .font(theme::semibold(16.0)),
                 )
                 .wrap(),

@@ -696,7 +696,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 t.icon,
                             );
                             let fg = if l.visible { t.text } else { t.text_faint };
-                            crate::widgets::paint_left(
+                            crate::widgets::paint_left_doc(
                                 ui,
                                 body.left_center() + vec2(32.0, 0.0),
                                 &l.name,
@@ -736,7 +736,9 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                     ui.add(icons::image("paperclip", 16.0, t.icon));
                                     ui.vertical(|ui| {
                                         ui.set_width(ui.available_width() - 70.0);
-                                        ui.add(egui::Label::new(egui::RichText::new(&a.name).font(theme::medium(13.0))).truncate());
+                                        ui.add(
+                                            egui::Label::new(egui::RichText::new(crate::bidi::visual(&a.name)).font(theme::medium(13.0))).truncate(),
+                                        );
                                         let mut meta = a.size.map(human_size).unwrap_or_default();
                                         if let pdfcraft_render::AttachmentSource::Annotation { page, .. } = a.source {
                                             let on_page = crate::i18n::fmt(
@@ -746,7 +748,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                             meta = format!("{meta}  ·  {on_page}");
                                         }
                                         if let Some(d) = &a.description {
-                                            meta = format!("{meta}  ·  {d}");
+                                            meta = format!("{meta}  ·  {}", crate::bidi::visual_auto(d));
                                         }
                                         ui.add(egui::Label::new(egui::RichText::new(meta).color(t.text_faint).small()).truncate());
                                     });
@@ -930,6 +932,30 @@ pub(crate) fn ellipsized_prefix(text: &str, mut fits: impl FnMut(&str) -> bool) 
     }
 }
 
+/// The most characters of a right-to-left bookmark title that are wrapped; the rest is cut.
+const TITLE_RTL_CHARS: usize = 1024;
+
+/// A bookmark title laid out for a column `width` wide, one galley per line, each with whether
+/// it belongs against the right edge. Text without right-to-left script is wrapped by egui as
+/// ever; a title with some is wrapped in reading order and each line put in display order
+/// ([`crate::bidi::wrap`], through the widgets' wrap cache).
+fn title_lines(ui: &egui::Ui, title: &str, font: &egui::FontId, color: Color32, width: f32) -> Vec<(bool, std::sync::Arc<egui::Galley>)> {
+    if !crate::bidi::has_rtl(title) {
+        return vec![(false, ui.fonts_mut(|f| f.layout(title.to_owned(), font.clone(), color, width)))];
+    }
+    let cut: Option<&str> = title.char_indices().nth(TITLE_RTL_CHARS).and_then(|(at, _)| title.get(..at));
+    let owned;
+    let shown = match cut {
+        Some(head) => {
+            owned = format!("{head}\u{2026}");
+            owned.as_str()
+        }
+        None => title,
+    };
+    let lines = widgets::wrapped_lines(ui, shown, font, width, false);
+    lines.iter().map(|line| (line.rtl, ui.painter().layout_no_wrap(line.text.clone(), font.clone(), color))).collect()
+}
+
 fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineItem, path: &[usize], siblings: usize, cx: &mut OutlineCtx<'_>) {
     if cx.searching && !cx.matches.contains(path) {
         return;
@@ -977,16 +1003,18 @@ fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineIte
         let label_font = theme::regular(11.0);
         let label_galley = item.page.and_then(|p| info.pages.get(p)).map(|page| {
             ui.fonts_mut(|f| {
-                let text =
-                    ellipsized_prefix(&page.label, |s| f.layout_no_wrap(s.to_owned(), label_font.clone(), t.text_faint).size().x <= LABEL_COLUMN_MAX);
-                f.layout_no_wrap(text, label_font, t.text_faint)
+                let measure = |f: &mut egui::epaint::text::FontsView<'_>, s: &str| {
+                    f.layout_no_wrap(crate::bidi::visual(s).into_owned(), label_font.clone(), t.text_faint).size().x
+                };
+                let text = ellipsized_prefix(&page.label, |s| measure(f, s) <= LABEL_COLUMN_MAX);
+                f.layout_no_wrap(crate::bidi::visual(&text).into_owned(), label_font, t.text_faint)
             })
         });
         let label_w = label_galley.as_ref().map_or(0.0, |g| g.size().x);
         let font = if depth == 0 { theme::medium(13.0) } else { theme::regular(13.0) };
         let wrap_w = (ui.available_width() - indent - 20.0 - label_w - 12.0).max(60.0);
-        let galley = ui.fonts_mut(|f| f.layout(item.title.clone(), font, t.text, wrap_w));
-        let h = (galley.size().y + 12.0).max(28.0);
+        let lines = title_lines(ui, &item.title, &font, t.text, wrap_w);
+        let h = (lines.iter().map(|(_, g)| g.size().y).sum::<f32>() + 12.0).max(28.0);
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &item.title));
         theme::Press::track(ui, &resp).wash(ui, rect, 6, false);
@@ -999,7 +1027,14 @@ fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineIte
                 ui.data_mut(|d| d.insert_temp(id, open));
             }
         }
-        ui.painter().galley(pos2(x0 + 20.0, rect.top() + 6.0), galley, t.text);
+        let mut y = rect.top() + 6.0;
+        for (rtl, galley) in lines {
+            // A right-to-left line ends at the right edge of the column the title wraps in.
+            let x = if rtl { x0 + 20.0 + wrap_w - galley.size().x } else { x0 + 20.0 };
+            let line_h = galley.size().y;
+            ui.painter().galley(pos2(x, y), galley, t.text);
+            y += line_h;
+        }
         if let Some(g) = label_galley {
             // Right-aligned, vertically centred at the first line, inside the column the title
             // wrapped around.
@@ -1119,7 +1154,7 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut crate::DocVie
                 Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { t.accent } else { t.border }),
                 egui::StrokeKind::Outside,
             );
-            let label = ui.label(egui::RichText::new(&p.label).font(theme::medium(12.0)).color(if selected || picked {
+            let label = ui.label(egui::RichText::new(crate::bidi::visual(&p.label)).font(theme::medium(12.0)).color(if selected || picked {
                 t.accent_text
             } else {
                 t.text_muted
@@ -1346,13 +1381,16 @@ fn fields(
                 press.wash(ui, rect, 6, selected);
                 let body = rect.translate(press.offset());
                 icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 7.0), vec2(16.0, 16.0)), icon, 15.0, Color32::from_rgb(0x8E, 0x4E, 0xE6));
-                let value =
-                    f.value.as_ref().map(|v| if v.chars().count() > 18 { format!("{}…", v.chars().take(17).collect::<String>()) } else { v.clone() });
+                // The value is cut in logical order, then put in display order for painting.
+                let value = f.value.as_ref().map(|v| {
+                    let cut = if v.chars().count() > 18 { format!("{}…", v.chars().take(17).collect::<String>()) } else { v.clone() };
+                    crate::bidi::visual_auto(&cut).into_owned()
+                });
                 let value_font = theme::regular(11.5);
                 let value_w = value.as_ref().map(|v| crate::widgets::text_width(ui, v, &value_font)).unwrap_or(0.0);
                 let arrows = if preparing && f.page.is_some() { 56.0 } else { 0.0 };
                 let max_w = (rect.width() - 32.0 - value_w - arrows - 16.0).max(0.0);
-                crate::widgets::paint_left(ui, body.left_center() + vec2(32.0, 0.0), &f.name, theme::regular(13.0), t.text, max_w);
+                crate::widgets::paint_left_doc(ui, body.left_center() + vec2(32.0, 0.0), &f.name, theme::regular(13.0), t.text, max_w);
                 if let Some(v) = value {
                     let x = if arrows > 0.0 { 64.0 } else { 8.0 };
                     ui.painter().text(body.right_center() - vec2(x, 0.0), Align2::RIGHT_CENTER, v, value_font, t.text_faint);
@@ -1407,7 +1445,7 @@ fn field_tip(f: &pdfcraft_render::Field) -> String {
     let kind = format!("{:?}", f.kind);
     let mut tip = crate::i18n::fmt(tl!("{kind} field"), &[("kind", tl!(&kind))]);
     if let Some(tt) = &f.tooltip {
-        tip.push_str(&format!(" — {tt}"));
+        tip.push_str(&format!(" — {}", crate::bidi::visual_auto(tt)));
     }
     if f.has_actions {
         tip.push_str(&format!("\n{}", tl!("Has JavaScript actions (run in M6)")));

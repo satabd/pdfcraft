@@ -3882,7 +3882,12 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         egui::Area::new(egui::Id::new("canvas-hover")).order(egui::Order::Tooltip).fixed_pos(pos + vec2(14.0, 16.0)).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_max_width(320.0);
-                ui.label(text);
+                if widgets::needs_bidi(&text) {
+                    let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                    widgets::wrapped_label(ui, &text, font, colour);
+                } else {
+                    ui.label(text);
+                }
             });
         });
     }
@@ -4615,8 +4620,14 @@ fn notice_bar(ui: &mut egui::Ui, t: &Tokens, icon: &str, icon_color: Color32, te
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                     let (slot, _) = ui.allocate_exact_size(vec2(ICON, line), Sense::hover());
                     icons::paint(ui, Rect::from_center_size(slot.center(), vec2(ICON, ICON)), icon, ICON, icon_color);
-                    let label = egui::Label::new(egui::RichText::new(text).color(t.text));
                     // Wrapping into a sliver would stack the message a few letters per line.
+                    if ui.available_width() >= 120.0 && widgets::needs_bidi(&text) {
+                        // A notice naming an Arabic file or field reads in display order.
+                        let font = egui::TextStyle::Body.resolve(ui.style());
+                        widgets::wrapped_label(ui, &text, font, t.text);
+                        return;
+                    }
+                    let label = egui::Label::new(egui::RichText::new(text).color(t.text));
                     ui.add(if ui.available_width() >= 120.0 { label.wrap() } else { label.truncate() });
                 });
             });

@@ -219,7 +219,7 @@ pub(crate) fn document_js_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
                 ui.label(egui::RichText::new(tl!("This document has no document-level scripts.")).color(t.text_muted));
             }
             for (name, js) in &scripts {
-                if ui.selectable_label(app.doc_js.name == *name, name).clicked() {
+                if ui.selectable_label(app.doc_js.name == *name, crate::bidi::visual_auto(name).as_ref()).clicked() {
                     app.doc_js = DocJsDraft { name: name.clone(), script: js.clone() };
                 }
             }

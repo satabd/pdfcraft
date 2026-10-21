@@ -139,7 +139,9 @@ impl PdfCraftApp {
                 // unprotected or a read-only document gets here.
                 commands::Needs::Security | commands::Needs::ProtectedSecurity if self.active.is_some() => {
                     match self.active_ids().and_then(|(_, id)| self.session.get(id)) {
-                        Some(d) if !d.allows_security_change() => crate::i18n::fmt(tl!("{name} is read-only"), &[("name", &d.name)]),
+                        Some(d) if !d.allows_security_change() => {
+                            crate::i18n::fmt(tl!("{name} is read-only"), &[("name", &crate::bidi::visual(&d.name))])
+                        }
                         _ => tl!("This document isn't password-protected").to_string(),
                     }
                 }
@@ -786,7 +788,14 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
             ui.menu_button(label, |ui| {
                 crate::chrome::scroll_menu(ui, |ui| {
                     for r in &app.recent {
-                        if ui.button(&r.name).on_hover_text(&r.path).clicked() {
+                        let shown = crate::bidi::visual(&r.name);
+                        let reordered = matches!(shown, std::borrow::Cow::Owned(_));
+                        let resp = ui.button(shown.as_ref());
+                        if reordered {
+                            // Painted in display order; the accessible name stays the file's own.
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &r.name));
+                        }
+                        if resp.on_hover_text(crate::bidi::visual(&r.path).into_owned()).clicked() {
                             open = Some(r.path.clone());
                             ui.close();
                         }
@@ -810,7 +819,13 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
         }
         let shortcut = spec.shortcut.or((spec.id == "edit.copy").then_some(COPY)).map(|s| shortcut_label(ui.ctx(), s)).unwrap_or_default();
         let enabled = app.command_enabled(spec);
-        let resp = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut));
+        // Undo and Redo name the last action, which may be a document's text; painted in display order.
+        let painted = widgets::visual_sentence(&label);
+        let reordered = matches!(painted, std::borrow::Cow::Owned(_));
+        let resp = ui.add_enabled(enabled, egui::Button::new(painted.as_ref()).shortcut_text(shortcut));
+        if reordered {
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label));
+        }
         if resp.clicked() {
             app.execute(spec.id);
             ui.close();

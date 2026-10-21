@@ -90,7 +90,13 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool
                         let fix = if i.fixable { String::new() } else { tl!("  · not fixable here").to_string() };
                         // The verifier hands the wording over whole, with the document's own name
                         // apart from it, so the problem reads in this language and the name as it is.
-                        ui.label(format!("{}{page}", i.said(&crate::i18n::words)));
+                        let said = format!("{}{page}", i.said(&crate::i18n::words));
+                        if crate::widgets::needs_bidi(&said) {
+                            let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                            crate::widgets::wrapped_text(ui, &said, font, colour, false);
+                        } else {
+                            ui.label(said);
+                        }
                         ui.label(egui::RichText::new(format!("ISO 19005 {}{fix}", i.clause)).small().color(t.text_muted));
                     }
                 }
