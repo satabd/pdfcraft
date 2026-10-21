@@ -5,6 +5,7 @@ use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, Sense, Stroke, po
 use pdfcraft_engine::catalog::{self, Availability, TOOL_GROUPS, ToolGroup};
 use pdfcraft_render::{DocInfo, FieldKind, OutlineItem};
 
+use crate::i18n::Logical;
 use crate::theme::{self, Tokens};
 use crate::{LeftPanel, PdfCraftApp, RightPanel, icons, widgets};
 
@@ -135,12 +136,14 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
         _ => {}
     }
     let tip = match g.availability {
-        Availability::Ready => tl!("Available").to_string(),
-        Availability::Planned(m) => format!("{} {m} — {}", tl!("Planned for milestone"), tl!("open to see what it will include")),
-        Availability::Provider => tl!("Optional: needs an AI provider you configure").into(),
+        Availability::Ready => tl_logical!("Available"),
+        Availability::Planned(m) => {
+            Logical::from(format!("{} {m} — {}", tl_logical!("Planned for milestone"), tl_logical!("open to see what it will include")))
+        }
+        Availability::Provider => tl_logical!("Optional: needs an AI provider you configure"),
     };
-    let tip = if clipped { format!("{} — {tip}", tl!(g.label)) } else { tip };
-    theme::hand(resp).on_hover_text(tip)
+    let tip = if clipped { Logical::from(format!("{} — {tip}", tl_logical!(g.label))) } else { tip };
+    widgets::hover_text(theme::hand(resp), &tip)
 }
 
 fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static ToolGroup) {
@@ -191,9 +194,9 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
             let count = app.active_ids().map_or(0, |(i, _)| app.views[i].objects.count());
             if count > 0 {
                 ui.label(crate::i18n::trn(crate::i18n::current(), count as u64, "{n} object selected", "{n} objects selected"));
-                ui.label(tl!("Drag the selection to move it. Esc clears the selection."));
+                widgets::body_text(ui, &tl_logical!("Drag the selection to move it. Esc clears the selection."));
             } else {
-                ui.label(tl!("Shift-click to select several objects. Drag empty space to select an area."));
+                widgets::body_text(ui, &tl_logical!("Shift-click to select several objects. Drag empty space to select an area."));
             }
             ui.add_space(6.0);
         }
@@ -667,7 +670,10 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             outline_item(ui, &t, info, item, &[i], info.outline.len(), &mut ctx);
                         }
                         if info.outline_more {
-                            ui.label(tl!("Some bookmarks are not shown here: the panel lists a limited number, nested a limited depth."));
+                            widgets::body_text(
+                                ui,
+                                &tl_logical!("Some bookmarks are not shown here: the panel lists a limited number, nested a limited depth."),
+                            );
                         }
                     }
                     RightPanel::Pages => pages(ui, &t, info, view, modal, bm_editable, &mut nav),
@@ -1356,7 +1362,7 @@ fn fields(
                 let up = Rect::from_center_size(rect.right_center() - vec2(44.0, 0.0), vec2(22.0, 22.0));
                 let down = Rect::from_center_size(rect.right_center() - vec2(20.0, 0.0), vec2(22.0, 22.0));
                 for (r, icon, earlier, tip) in
-                    [(up, "chevron-up", true, tl!("Earlier in tab order")), (down, "chevron-down", false, tl!("Later in tab order"))]
+                    [(up, "chevron-up", true, tl_logical!("Earlier in tab order")), (down, "chevron-down", false, tl_logical!("Later in tab order"))]
                 {
                     let b = ui.interact(r, ui.id().with((&f.name, earlier)), Sense::click());
                     b.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{tip}: {}", f.name)));
@@ -1365,7 +1371,7 @@ fn fields(
                         bpress.wash(ui, r, 4, false);
                         icons::paint(ui, r.shrink(3.0).translate(bpress.offset()), icon, 15.0, t.icon);
                     }
-                    if theme::hand(b).on_hover_text(tip).clicked() {
+                    if widgets::hover_text(theme::hand(b), &tip).clicked() {
                         *edit = Some(pdfcraft_engine::Edit::MoveInTabOrder { name: f.name.clone(), earlier });
                     }
                 }

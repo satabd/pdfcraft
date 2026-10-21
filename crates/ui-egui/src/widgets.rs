@@ -291,6 +291,13 @@ pub fn row_text(ui: &egui::Ui, pos: egui::Pos2, text: impl Into<String>, font: e
 /// right edge ([`crate::bidi::wrap`]); text without one is an ordinary wrapping label.
 /// `truncate` keeps the first line only, with an ellipsis where the text goes on.
 pub fn wrapped_text(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32, truncate: bool) -> Response {
+    wrapped_text_impl(ui, text, font, color, truncate, false)
+}
+
+/// [`wrapped_text`], optionally shrunk to its text. With `fit`, right-to-left text takes the width
+/// of its widest line instead of all the room, as egui's own label does in a tooltip; its lines
+/// still sit against the right edge of that width. Without `fit` it takes the whole width.
+fn wrapped_text_impl(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32, truncate: bool, fit: bool) -> Response {
     if !crate::bidi::has_rtl(text) {
         let mut label = egui::Label::new(egui::RichText::new(text).font(font).color(color)).wrap();
         if truncate {
@@ -298,10 +305,12 @@ pub fn wrapped_text(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Co
         }
         return ui.add(label);
     }
-    let width = ui.available_width().max(1.0);
-    let lines = wrapped_lines(ui, text, &font, width, truncate);
+    let available = ui.available_width().max(1.0);
+    let lines = wrapped_lines(ui, text, &font, available, truncate);
     let galleys: Vec<_> = lines.iter().map(|line| (line.rtl, ui.painter().layout_no_wrap(line.text.clone(), font.clone(), color))).collect();
     let height = galleys.iter().map(|(_, g)| g.size().y).sum();
+    let widest = galleys.iter().map(|(_, g)| g.size().x).fold(0.0, f32::max);
+    let width = if fit { widest.min(available).max(1.0) } else { available };
     let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     // Painted text only: the accessibility name keeps the logical order.
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
@@ -313,6 +322,71 @@ pub fn wrapped_text(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Co
         y += h;
     }
     resp
+}
+
+/// A tooltip for `resp` from translated text in LOGICAL order. Takes the output of
+/// [`tl_logical!`](crate::tl_logical) and [`fmt_logical`](crate::i18n::fmt_logical), never of
+/// `tl!`: display-order text would be reordered a second time and read backwards.
+///
+/// egui breaks a long right-to-left tooltip at the wrong end, so those are wrapped here with the
+/// bidirectional algorithm and set against the right edge. Every other language gets egui's own
+/// [`Response::on_hover_text`].
+pub fn hover_text(resp: Response, text: &crate::i18n::Logical<'_>) -> Response {
+    if !crate::bidi::has_rtl(text) {
+        return resp.on_hover_text(text.as_str());
+    }
+    resp.on_hover_ui(|ui| tooltip_body(ui, text))
+}
+
+/// [`hover_text`] for a disabled widget ([`Response::on_disabled_hover_text`]). LOGICAL-order text
+/// only: use [`tl_logical!`](crate::tl_logical), never `tl!` output.
+pub fn disabled_hover_text(resp: Response, text: &crate::i18n::Logical<'_>) -> Response {
+    if !crate::bidi::has_rtl(text) {
+        return resp.on_disabled_hover_text(text.as_str());
+    }
+    resp.on_disabled_hover_ui(|ui| tooltip_body(ui, text))
+}
+
+/// The right-to-left tooltip's text, wrapped to a tooltip's width and shrunk to fit it.
+fn tooltip_body(ui: &mut egui::Ui, text: &crate::i18n::Logical<'_>) {
+    ui.set_max_width(ui.spacing().tooltip_width);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    wrapped_text_impl(ui, &crate::bidi::isolate_shortcuts(text), font, color, false, true);
+}
+
+/// A paragraph of translated body text (a dialog's explanation) in LOGICAL order. Takes the
+/// output of [`tl_logical!`](crate::tl_logical) and [`fmt_logical`](crate::i18n::fmt_logical),
+/// never of `tl!`: display-order text would be reordered a second time and read backwards.
+///
+/// A right-to-left paragraph is wrapped here and sits against the right edge of the available
+/// width; any other language gets an ordinary label.
+pub fn body_text(ui: &mut egui::Ui, text: &crate::i18n::Logical<'_>) -> Response {
+    if !crate::bidi::has_rtl(text) {
+        return ui.label(text.as_str());
+    }
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    wrapped_text(ui, &crate::bidi::isolate_shortcuts(text), font, color, false)
+}
+
+/// [`body_text`] with a font and colour of the caller's choosing, for notes (a small, muted
+/// line under a control). LOGICAL-order text only: use [`tl_logical!`](crate::tl_logical) and
+/// [`fmt_logical`](crate::i18n::fmt_logical), never `tl!` output. Other languages get a label
+/// in that font and colour.
+pub fn styled_text(ui: &mut egui::Ui, text: &crate::i18n::Logical<'_>, font: egui::FontId, color: Color32) -> Response {
+    if !crate::bidi::has_rtl(text) {
+        return ui.label(egui::RichText::new(text.as_str()).font(font).color(color));
+    }
+    wrapped_text(ui, &crate::bidi::isolate_shortcuts(text), font, color, false)
+}
+
+/// [`styled_text`] in the small font: a note under a control. LOGICAL-order text only
+/// ([`tl_logical!`](crate::tl_logical), [`fmt_logical`](crate::i18n::fmt_logical)), never `tl!`
+/// output.
+pub fn small_text(ui: &mut egui::Ui, text: &crate::i18n::Logical<'_>, color: Color32) -> Response {
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    styled_text(ui, text, font, color)
 }
 
 const ELLIPSIS: &str = "\u{2026}";
@@ -348,7 +422,11 @@ fn wrapped_lines(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32, tru
         Some((at, _)) if truncate => (text.get(..at).unwrap_or(text), true),
         _ => (text, false),
     };
-    let measure = |f: &mut egui::epaint::text::FontsView<'_>, s: &str| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x;
+    // The direction controls (the isolates around a shortcut) are never painted, so they have no width.
+    let measure = |f: &mut egui::epaint::text::FontsView<'_>, s: &str| {
+        let shown: String = s.chars().filter(|c| !crate::bidi::is_bidi_control(*c)).collect();
+        f.layout_no_wrap(shown, font.clone(), Color32::WHITE).size().x
+    };
     let mut lines = ui.fonts_mut(|f| {
         let room = if truncate { width - measure(f, ELLIPSIS) } else { width };
         crate::bidi::wrap(measured, |s| measure(f, s) <= room)
@@ -799,6 +877,108 @@ mod tests {
         assert_eq!(latin.len(), 1);
         assert_eq!(latin[0].2, "A short note");
         assert!(latin[0].0.x.abs() < 0.5);
+    }
+
+    /// What `run` paints in a 120 pt wide column at x = 0: its response rectangle and the text
+    /// shapes (position, galley rectangle, painted text).
+    fn painted(run: impl FnOnce(&mut egui::Ui) -> Response) -> (Rect, Vec<(Pos2, Rect, String)>) {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme::font_definitions());
+        let mut response = Rect::NOTHING;
+        let mut run = Some(run);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let column = Rect::from_min_size(Pos2::ZERO, vec2(120.0, 400.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+                if let Some(run) = run.take() {
+                    response = run(ui).rect;
+                }
+            });
+        });
+        let shapes = output
+            .shapes
+            .iter()
+            .filter_map(|shape| if let egui::Shape::Text(t) = &shape.shape { Some((t.pos, t.galley.rect, t.galley.job.text.clone())) } else { None })
+            .collect();
+        output.drop_without_applying_deltas();
+        (response, shapes)
+    }
+
+    fn has_word(line: &str, word: &str) -> bool {
+        line.split_whitespace().any(|w| w == word)
+    }
+
+    /// Text that egui wraps has to be wrapped in typing order: the first line of an Arabic
+    /// paragraph holds its first words and the last line its last words. The catalog's display
+    /// order text wrapped the same way reads from the last line up (the bug this pins).
+    #[test]
+    fn logical_arabic_wraps_from_its_first_words() {
+        let words = ["احفظ", "الملف", "الحالي", "باسم", "جديد", "قبل", "إغلاق", "التطبيق", "نهائيا"];
+        let (first, last) = (words[0], words[words.len() - 1]);
+        let logical = words.join(" ");
+        let (_, shapes) = painted(|ui| wrapped_text(ui, &logical, theme::regular(13.0), Color32::WHITE, false));
+        assert!(shapes.len() > 2, "narrow column: {shapes:?}");
+        let top = shapes.iter().min_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        let bottom = shapes.iter().max_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        assert!(has_word(&top.2, first), "the first words are on the first line: {shapes:?}");
+        assert!(has_word(&bottom.2, last), "the last words are on the last line: {shapes:?}");
+        // Lines are right-aligned.
+        let right = shapes.iter().map(|(pos, rect, _)| pos.x + rect.width()).fold(0.0, f32::max);
+        for (pos, rect, text) in &shapes {
+            assert!((pos.x + rect.width() - right).abs() < 0.5, "{text:?} must be right-aligned");
+        }
+        // The display-order text, wrapped the same way, starts with the last words.
+        let display = crate::bidi::display_rtl(&logical);
+        assert_ne!(display, logical);
+        let (_, shapes) = painted(|ui| wrapped_text(ui, &display, theme::regular(13.0), Color32::WHITE, false));
+        let top = shapes.iter().min_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        let bottom = shapes.iter().max_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        assert!(has_word(&top.2, last) && !has_word(&top.2, first), "display order puts the last words first: {shapes:?}");
+        assert!(has_word(&bottom.2, first), "display order puts the first words last: {shapes:?}");
+    }
+
+    /// A tooltip shrinks to its text; body text takes the whole width.
+    #[test]
+    fn fitted_right_to_left_text_is_no_wider_than_its_lines() {
+        let long = "احفظ الملف الحالي باسم جديد قبل إغلاق التطبيق نهائيا";
+        for text in [long, "احفظ الملف"] {
+            let (rect, shapes) = painted(|ui| wrapped_text_impl(ui, text, theme::regular(13.0), Color32::WHITE, false, true));
+            let widest = shapes.iter().map(|(_, g, _)| g.width()).fold(0.0, f32::max);
+            assert!(rect.width() <= 120.0 + 0.5, "no wider than the room: {rect:?}");
+            assert!(rect.width() <= widest + 0.5 && rect.width() + 0.5 >= widest, "as wide as the widest line {widest}: {rect:?}");
+            // Lines stay right-aligned inside the shrunk rectangle.
+            for (pos, g, line) in &shapes {
+                assert!((pos.x + g.width() - rect.right()).abs() < 0.5, "{line:?} at {pos:?} in {rect:?}");
+            }
+            let (full, _) = painted(|ui| wrapped_text_impl(ui, text, theme::regular(13.0), Color32::WHITE, false, false));
+            assert!((full.width() - 120.0).abs() < 0.5, "unfitted text takes the whole width: {full:?}");
+        }
+        let (short, _) = painted(|ui| wrapped_text_impl(ui, "احفظ", theme::regular(13.0), Color32::WHITE, false, true));
+        assert!(short.width() < 60.0, "{short:?}");
+    }
+
+    /// The isolates around a shortcut order its symbols and are neither painted nor measured.
+    #[test]
+    fn tooltip_keeps_a_shortcut_whole() {
+        let tip = crate::i18n::Logical::from("احفظ الملف الحالي ⇧⌘S");
+        let (_, shapes) = painted(|ui| {
+            tooltip_body(ui, &tip);
+            ui.label("")
+        });
+        let painted_text: Vec<&str> = shapes.iter().map(|(_, _, t)| t.as_str()).collect();
+        assert!(painted_text.iter().any(|t| t.contains("⇧⌘S")), "{painted_text:?}");
+        assert!(painted_text.iter().all(|t| !t.chars().any(crate::bidi::is_bidi_control)), "{painted_text:?}");
+        // The same in a column too narrow for one line.
+        let narrow = crate::i18n::Logical::from("احفظ الملف الحالي باسم جديد قبل إغلاق التطبيق نهائيا ⇧⌘S");
+        let (_, shapes) = painted(|ui| body_text(ui, &narrow));
+        assert!(shapes.iter().any(|(_, _, t)| t.contains("⇧⌘S")), "{shapes:?}");
+        // Left-to-right text is an ordinary label.
+        let (_, shapes) = painted(|ui| body_text(ui, &crate::i18n::Logical::from("Save the file")));
+        assert_eq!(shapes.iter().map(|s| s.2.as_str()).collect::<Vec<_>>(), ["Save the file"]);
+        let (_, shapes) = painted(|ui| styled_text(ui, &crate::i18n::Logical::from("Note"), theme::regular(11.0), Color32::GRAY));
+        assert_eq!(shapes.iter().map(|s| s.2.as_str()).collect::<Vec<_>>(), ["Note"]);
+        let (_, shapes) =
+            painted(|ui| styled_text(ui, &crate::i18n::Logical::from("ملاحظة طويلة جدا للاختبار هنا"), theme::regular(11.0), Color32::GRAY));
+        assert!(shapes.len() >= 2, "wrapped: {shapes:?}");
     }
 
     #[test]

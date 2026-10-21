@@ -96,7 +96,18 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 theme::medium(12.0),
                                 t.accent_text,
                             );
-                            let resp = if title_elided || blurb_elided { resp.on_hover_text(format!("{}\n{blurb}", tl!(g.label))) } else { resp };
+                            let resp = if title_elided || blurb_elided {
+                                let items = g
+                                    .sections
+                                    .first()
+                                    .map(|s| s.items.iter().take(3).map(|i| tl_logical!(i.label).into_owned()).collect::<Vec<_>>().join(" · "));
+                                widgets::hover_text(
+                                    resp,
+                                    &crate::i18n::Logical::from(format!("{}\n{}", tl_logical!(g.label), items.unwrap_or_default())),
+                                )
+                            } else {
+                                resp
+                            };
                             if theme::hand(resp).clicked() {
                                 app.select_tool(g.id);
                             }
@@ -141,7 +152,12 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             });
             ui.add_space(8.0);
             if app.recent.is_empty() {
-                ui.label(egui::RichText::new(tl!("Files you open in PdfCraft appear here. Drop a PDF anywhere to open it.")).color(t.text_muted));
+                widgets::styled_text(
+                    ui,
+                    &tl_logical!("Files you open in PdfCraft appear here. Drop a PDF anywhere to open it."),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    t.text_muted,
+                );
             }
             let mut open = None;
             let mut remove = None;
@@ -206,9 +222,11 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             }
             ui.add_space(20.0);
             widgets::section_title(ui, tl!("Privacy"));
-            ui.label(
-                egui::RichText::new(tl!("PdfCraft works offline. No telemetry, no account, and no cloud processing unless you add a provider."))
-                    .color(t.text_muted),
+            widgets::styled_text(
+                ui,
+                &tl_logical!("PdfCraft works offline. No telemetry, no account, and no cloud processing unless you add a provider."),
+                egui::TextStyle::Body.resolve(ui.style()),
+                t.text_muted,
             );
         });
     });

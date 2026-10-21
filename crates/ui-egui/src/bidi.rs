@@ -291,20 +291,49 @@ fn next_atom(text: &str) -> Option<(usize, usize)> {
         let len = text.get(open..)?.find('}')?;
         Some((open, open.saturating_add(len).saturating_add(1)))
     });
-    let shortcut = text.find(is_modifier_key).map(|at| {
-        // The shortcut is the stretch around the symbol up to a space, a bracket or script text.
-        let outside = |c: char| c.is_whitespace() || is_rtl_script(c) || matches!(c, '(' | ')' | '[' | ']' | '{' | '}');
-        let start = text
-            .get(..at)
-            .and_then(|before| before.rfind(outside).and_then(|i| before.get(i..)?.chars().next().map(|c| i.saturating_add(c.len_utf8()))))
-            .unwrap_or(0);
-        let end = text.get(at..).and_then(|after| after.find(outside)).map_or(text.len(), |i| at.saturating_add(i));
-        (start, end)
-    });
-    match (placeholder, shortcut) {
+    match (placeholder, next_shortcut(text)) {
         (Some(p), Some(s)) => Some(if s.0 < p.0 { s } else { p }),
         (p, s) => p.or(s),
     }
+}
+
+/// The byte range of the first keyboard shortcut in `text`: the stretch around a modifier symbol
+/// up to a space, a bracket or script text.
+fn next_shortcut(text: &str) -> Option<(usize, usize)> {
+    let at = text.find(is_modifier_key)?;
+    let outside = |c: char| c.is_whitespace() || is_rtl_script(c) || matches!(c, '(' | ')' | '[' | ']' | '{' | '}');
+    let start = text
+        .get(..at)
+        .and_then(|before| before.rfind(outside).and_then(|i| before.get(i..)?.chars().next().map(|c| i.saturating_add(c.len_utf8()))))
+        .unwrap_or(0);
+    let end = text.get(at..).and_then(|after| after.find(outside)).map_or(text.len(), |i| at.saturating_add(i));
+    Some((start, end))
+}
+
+/// The most shortcuts [`isolate_shortcuts`] isolates in one text; the rest stay as they are.
+const MAX_SHORTCUTS: usize = 64;
+
+/// `text` with each keyboard shortcut (`⇧⌘S`, `⌘P`) wrapped in a left-to-right isolate, so the
+/// bidirectional algorithm keeps its symbols in order inside a right-to-left paragraph. The
+/// isolate characters are not drawn ([`wrap`] drops them). Text without a shortcut comes back
+/// borrowed.
+pub fn isolate_shortcuts(text: &str) -> Cow<'_, str> {
+    let Some(first) = next_shortcut(text) else { return Cow::Borrowed(text) };
+    let mut out = String::with_capacity(text.len().saturating_add(text.len() / 4));
+    let mut rest = text;
+    let mut next = Some(first);
+    for _ in 0..MAX_SHORTCUTS {
+        let Some((start, end)) = next else { break };
+        let (Some(before), Some(shortcut), Some(after)) = (rest.get(..start), rest.get(start..end), rest.get(end..)) else { break };
+        out.push_str(before);
+        out.push('\u{2066}');
+        out.push_str(shortcut);
+        out.push('\u{2069}');
+        rest = after;
+        next = next_shortcut(rest);
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 /// The modifier-key symbols of keyboard shortcuts: ⌘ ⇧ ⌥ ⌃.
@@ -325,7 +354,7 @@ fn is_joiner(c: char) -> bool {
 }
 
 /// Direction marks, embeddings, overrides and isolates: they steer the reordering and are not drawn.
-fn is_bidi_control(c: char) -> bool {
+pub fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
@@ -571,6 +600,40 @@ mod tests {
         assert_eq!(on_screen("ب۱۲"), ["۱۲ب"]);
         assert_eq!(on_screen("See واحد اثنين here"), [format!("See {} {} here", rev("اثنين"), rev("واحد"))]);
         assert_eq!(on_screen("واحد (اثنين)."), [format!(".({}) {}", rev("اثنين"), rev("واحد"))]);
+    }
+
+    #[test]
+    fn shortcuts_keep_their_order_inside_a_right_to_left_paragraph() {
+        let isolated = isolate_shortcuts("احفظ الملف ⇧⌘S");
+        assert!(isolated.contains('\u{2066}') && isolated.contains('\u{2069}'));
+        let lines = wrap(&isolated, |_| true);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].rtl);
+        assert!(lines[0].text.contains("⇧⌘S"), "{:?}", lines[0].text);
+        assert!(!lines[0].text.chars().any(is_bidi_control), "{:?}", lines[0].text);
+        // The shortcut sits at the left, the end of right-to-left reading.
+        assert!(lines[0].text.starts_with("⇧⌘S"), "{:?}", lines[0].text);
+        // Without the isolate the symbols are not guaranteed to stay in order; with it, several
+        // shortcuts each stay whole.
+        let two = isolate_shortcuts("طباعة (⌘P) أو ⇧⌘S الآن");
+        let lines = wrap(&two, |_| true);
+        assert!(lines[0].text.contains("⌘P") && lines[0].text.contains("⇧⌘S"), "{:?}", lines[0].text);
+        assert!(matches!(isolate_shortcuts("plain"), Cow::Borrowed("plain")));
+        assert!(matches!(isolate_shortcuts("نص عادي"), Cow::Borrowed(_)));
+        assert!(matches!(isolate_shortcuts(""), Cow::Borrowed("")));
+    }
+
+    #[test]
+    fn isolating_shortcuts_is_bounded_and_total() {
+        let many = "⌘A ".repeat(1_000);
+        let isolated = isolate_shortcuts(&many);
+        assert_eq!(isolated.matches('\u{2066}').count(), MAX_SHORTCUTS);
+        assert!(isolated.ends_with("⌘A "));
+        for s in ["⌘", "ا⌘", "⌘ا", "(⇧⌘", "⌘⌘⌘", "\u{2066}⌘\u{2069}", "{⌘}"] {
+            let v = isolate_shortcuts(s);
+            assert!(v.chars().filter(|c| !is_bidi_control(*c)).eq(s.chars().filter(|c| !is_bidi_control(*c))), "{s:?}");
+            let _ = wrap(&v, |_| true);
+        }
     }
 
     #[test]

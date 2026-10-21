@@ -735,7 +735,7 @@ pub(crate) fn page(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             let open_docs: Vec<(usize, String)> =
                 app.views.iter().enumerate().filter_map(|(i, _)| crate::canvas::tab_label(app, i).map(|name| (i, name))).collect();
             let response = ui.add_enabled_ui(!open_docs.is_empty(), |ui| widgets::icon_pill(ui, "file-plus", tl!("Add open documents"), false)).inner;
-            response.clone().on_disabled_hover_text(tl!("No documents are open"));
+            widgets::disabled_hover_text(response.clone(), &tl_logical!("No documents are open"));
             egui::Popup::menu(&response).show(|ui| {
                 if open_docs.len() > 1 && ui.button(tl!("All open documents")).clicked() {
                     app.add_open_documents(&open_docs.iter().map(|(i, _)| *i).collect::<Vec<_>>());
@@ -1257,13 +1257,15 @@ fn add_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             app.combine_dialog();
             ui.close();
         }
-        if item(ui, "folder", tl!("Add folder…")).on_hover_text(tl!("Every PDF, image and text file in the folder")).clicked() {
+        if widgets::hover_text(item(ui, "folder", tl!("Add folder…")), &tl_logical!("Every PDF, image and text file in the folder")).clicked() {
             app.combine_add_folder(false);
             ui.close();
         }
-        if item(ui, "folder-open", tl!("Add folder and subfolders…"))
-            .on_hover_text(tl!("Every PDF, image and text file in the folder and the folders inside it"))
-            .clicked()
+        if widgets::hover_text(
+            item(ui, "folder-open", tl!("Add folder and subfolders…")),
+            &tl_logical!("Every PDF, image and text file in the folder and the folders inside it"),
+        )
+        .clicked()
         {
             app.combine_add_folder(true);
             ui.close();
@@ -1380,9 +1382,8 @@ fn heading(ui: &mut egui::Ui, t: &Tokens, key: SortKey, sort: Option<(SortKey, b
     {
         event = Some(HeadingEvent::Move { kind: dragged.0, to: key, after: after(&response) });
     }
-    let response = response
-        .on_hover_cursor(if being_dragged { egui::CursorIcon::Grabbing } else { egui::CursorIcon::PointingHand })
-        .on_hover_text(tl!("Click to sort, drag to move the column. Drag its edge to resize it."));
+    let response = response.on_hover_cursor(if being_dragged { egui::CursorIcon::Grabbing } else { egui::CursorIcon::PointingHand });
+    let response = widgets::hover_text(response, &tl_logical!("Click to sort, drag to move the column. Drag its edge to resize it."));
     response.context_menu(|ui| {
         if ui.button(tl!("Reset columns")).clicked() {
             event = Some(HeadingEvent::Reset);
@@ -1482,8 +1483,10 @@ fn table_body(
                                 if let Err(e) = &check {
                                     edit.clone().on_hover_text(e);
                                 } else {
-                                    edit.clone()
-                                        .on_hover_text(crate::i18n::fmt(tl!("Pages of {name} to combine, e.g. 1-3, 6"), &[("name", &f.name)]));
+                                    widgets::hover_text(
+                                        edit.clone(),
+                                        &crate::i18n::fmt_logical(&tl_logical!("Pages of {name} to combine, e.g. 1-3, 6"), &[("name", &f.name)]),
+                                    );
                                 }
                                 if edit.gained_focus() {
                                     events.range_focused = true;

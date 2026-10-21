@@ -262,10 +262,10 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
     ui.set_width(600.0);
     ui.label(egui::RichText::new(tl!("Shared Field Properties")).font(theme::semibold(18.0)));
     ui.label(crate::i18n::fmt(tl!("{n} fields selected"), &[("n", &d.names.len().to_string())]));
-    ui.label(
-        egui::RichText::new(tl!("Only checked properties will change. Mixed means the selected fields have different values."))
-            .small()
-            .color(t.text_muted),
+    widgets::small_text(
+        ui,
+        &tl_logical!("Only checked properties will change. Mixed means the selected fields have different values."),
+        t.text_muted,
     );
     ui.add_space(8.0);
     ui.horizontal(|ui| {

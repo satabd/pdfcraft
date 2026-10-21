@@ -583,16 +583,26 @@ pub(crate) fn apply_body(ui: &mut egui::Ui, marks: usize, t: &Tokens) -> (bool, 
     ui.set_width(420.0);
     ui.label(egui::RichText::new(tl!("Apply redactions")).font(crate::theme::semibold(18.0)));
     ui.add_space(8.0);
-    ui.label(if marks == 1 {
-        tl!("You are about to apply 1 redaction mark. Text, images and drawings under the marks, and comments and form fields that overlap them, are removed permanently.").to_string()
-    } else {
-        crate::i18n::fmt(tl!("You are about to apply {n} redaction marks. Text, images and drawings under the marks, and comments and form fields that overlap them, are removed permanently."), &[("n", &marks.to_string())])
-    });
+    widgets::body_text(
+        ui,
+        &if marks == 1 {
+            tl_logical!(
+                "You are about to apply 1 redaction mark. Text, images and drawings under the marks, and comments and form fields that overlap them, are removed permanently."
+            )
+        } else {
+            crate::i18n::fmt_logical(
+                &tl_logical!(
+                    "You are about to apply {n} redaction marks. Text, images and drawings under the marks, and comments and form fields that overlap them, are removed permanently."
+                ),
+                &[("n", &marks.to_string())],
+            )
+        },
+    );
     ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(tl!("Save the document afterwards: saving rewrites the whole file so no trace of the removed content stays in it."))
-            .small()
-            .color(t.text_muted),
+    widgets::small_text(
+        ui,
+        &tl_logical!("Save the document afterwards: saving rewrites the whole file so no trace of the removed content stays in it."),
+        t.text_muted,
     );
     ui.add_space(12.0);
     buttons(ui, "Apply", true)
@@ -647,9 +657,7 @@ pub(crate) fn hidden_body(ui: &mut egui::Ui, d: &mut HiddenDraft, t: &Tokens) ->
         });
     }
     ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(tl!("Form fields are flattened: their values stay visible. Saving rewrites the whole file.")).small().color(t.text_faint),
-    );
+    widgets::small_text(ui, &tl_logical!("Form fields are flattened: their values stay visible. Saving rewrites the whole file."), t.text_faint);
     ui.add_space(12.0);
     let any = d.found.iter().any(|f| f.2 && f.1 > 0);
     let (mut a, mut c) = (false, false);
@@ -669,12 +677,17 @@ pub(crate) fn sanitize_body(ui: &mut egui::Ui, t: &Tokens) -> (bool, bool) {
     ui.set_width(440.0);
     ui.label(egui::RichText::new(tl!("Sanitize document")).font(crate::theme::semibold(18.0)));
     ui.add_space(8.0);
-    ui.label(tl!("Sanitizing removes hidden information from the document: metadata, file attachments, comments, form fields (flattened), hidden text and layers, bookmarks, links, actions and scripts, and private application data."));
+    widgets::body_text(
+        ui,
+        &tl_logical!(
+            "Sanitizing removes hidden information from the document: metadata, file attachments, comments, form fields (flattened), hidden text and layers, bookmarks, links, actions and scripts, and private application data."
+        ),
+    );
     ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(tl!("Save the document afterwards; saving rewrites the whole file so nothing removed stays in it."))
-            .small()
-            .color(t.text_muted),
+    widgets::small_text(
+        ui,
+        &tl_logical!("Save the document afterwards; saving rewrites the whole file so nothing removed stays in it."),
+        t.text_muted,
     );
     ui.add_space(12.0);
     buttons(ui, "Sanitize", true)

@@ -106,9 +106,8 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
             ui.end_row();
             ui.label(tl!("Output"));
             egui::ComboBox::from_id_salt("ocr-output").selected_text(tl!("Searchable Image (Exact)")).width(220.0).show_ui(ui, |ui| {
-                let _ = ui
-                    .selectable_label(true, tl!("Searchable Image (Exact)"))
-                    .on_hover_text(tl!("Adds invisible text over each word; the page image is not changed"));
+                let option = ui.selectable_label(true, tl!("Searchable Image (Exact)"));
+                let _ = widgets::hover_text(option, &tl_logical!("Adds invisible text over each word; the page image is not changed"));
             });
             ui.end_row();
             ui.label(tl!("Downsample to"));
@@ -120,14 +119,16 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
             ui.end_row();
         });
         ui.add_space(4.0);
-        ui.add(crate::widgets::checkbox(&mut d.text_pages, tl!("Also recognize pages that already have text")))
-            .on_hover_text(tl!("Pictures on those pages are recognized too; words already in the page's text are not added again"));
+        let resp = ui.add(crate::widgets::checkbox(&mut d.text_pages, tl!("Also recognize pages that already have text")));
+        widgets::hover_text(resp, &tl_logical!("Pictures on those pages are recognized too; words already in the page's text are not added again"));
     });
     if !available {
-        ui.label(
-            egui::RichText::new(tl!("Text recognition isn't installed: its model files are missing. Reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them."))
-                .small()
-                .color(t.text_muted),
+        widgets::small_text(
+            ui,
+            &tl_logical!(
+                "Text recognition isn't installed: its model files are missing. Reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them."
+            ),
+            t.text_muted,
         );
         ui.add_space(6.0);
     }

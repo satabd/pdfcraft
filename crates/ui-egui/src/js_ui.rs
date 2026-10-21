@@ -303,11 +303,7 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
             }
         });
     });
-    ui.label(
-        egui::RichText::new(tl!("Auto follows the system's text size. Pages always render at the display's full resolution."))
-            .small()
-            .color(t.text_muted),
-    );
+    widgets::small_text(ui, &tl_logical!("Auto follows the system's text size. Pages always render at the display's full resolution."), t.text_muted);
     ui.horizontal(|ui| {
         ui.label(tl!("Tools panel side"));
         let right = app.docking.tools_on_right();
@@ -338,10 +334,10 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
             widgets::radio_value(ui, &mut app.default_mode, mode, tl!(label));
         }
     });
-    ui.label(
-        egui::RichText::new(tl!("Used when opening PDFs. An explicit launch or control mode takes precedence for the session."))
-            .small()
-            .color(t.text_muted),
+    widgets::small_text(
+        ui,
+        &tl_logical!("Used when opening PDFs. An explicit launch or control mode takes precedence for the session."),
+        t.text_muted,
     );
     let defaults = &mut app.view_defaults;
     ui.horizontal(|ui| {
@@ -363,10 +359,10 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
             (defaults.fit, defaults.zoom) = (Fit::None, percent / 100.0);
         }
     });
-    ui.label(
-        egui::RichText::new(tl!("Used when a PDF doesn't ask for a layout or zoom. Continuous scrolling never snaps between pages."))
-            .small()
-            .color(t.text_muted),
+    widgets::small_text(
+        ui,
+        &tl_logical!("Used when a PDF doesn't ask for a layout or zoom. Continuous scrolling never snaps between pages."),
+        t.text_muted,
     );
     ui.horizontal(|ui| {
         ui.label(tl!("Units"));
@@ -397,8 +393,13 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
     });
     // Only where the app draws the title bar (GNOME on Wayland); elsewhere the desktop draws it.
     if app.window_controls.is_some() {
-        ui.add(widgets::checkbox(&mut app.system_title_bar, tl!("Use system title bar")))
-            .on_hover_text(tl!("Show a basic title bar for the window buttons instead of the tab strip. GNOME doesn't draw title bars for apps, so this one doesn't follow its theme."));
+        let resp = ui.add(widgets::checkbox(&mut app.system_title_bar, tl!("Use system title bar")));
+        widgets::hover_text(
+            resp,
+            &tl_logical!(
+                "Show a basic title bar for the window buttons instead of the tab strip. GNOME doesn't draw title bars for apps, so this one doesn't follow its theme."
+            ),
+        );
     }
     ui.add_space(8.0);
     // Reading colours (Acrobat: Replace Document Colors): solid text and line-art paints are
@@ -459,7 +460,7 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
             app.set_reading_colors(app.reading_colors);
         }
     }
-    ui.label(egui::RichText::new(tl!("Colours are remapped while rendering; the document itself never changes.")).small().color(t.text_muted));
+    widgets::small_text(ui, &tl_logical!("Colours are remapped while rendering; the document itself never changes."), t.text_muted);
     ui.add_space(8.0);
     // Identity: the author of new comments (Acrobat: Preferences ▸ Identity).
     ui.label(egui::RichText::new(tl!("Identity")).font(theme::semibold(13.0)));
@@ -471,9 +472,7 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
     ui.add_space(8.0);
     ui.label(egui::RichText::new(tl!("Fill & Sign")).font(theme::semibold(13.0)));
     ui.add(widgets::checkbox(&mut app.flatten_fill_sign_on_save, tl!("Flatten Fill & Sign when saving")));
-    ui.label(
-        egui::RichText::new(tl!("Text, marks and signatures become part of the page. Other comments stay editable.")).small().color(t.text_muted),
-    );
+    widgets::small_text(ui, &tl_logical!("Text, marks and signatures become part of the page. Other comments stay editable."), t.text_muted);
     ui.add_space(8.0);
     date_format(ui, app, t);
     ui.add_space(8.0);
@@ -484,11 +483,7 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
         if ui.add(widgets::checkbox(&mut on, tl!("Enable Acrobat JavaScript"))).changed() {
             app.session.set_javascript(on);
         }
-        ui.label(
-            egui::RichText::new(tl!("Scripts run in a sandbox without file or network access. A script that asks to open a web page needs your permission first. With JavaScript off, Acrobat's standard format, validate and calculate functions still work."))
-                .small()
-                .color(t.text_muted),
-        );
+        widgets::small_text(ui, &tl_logical!("Scripts run in a sandbox without file or network access. A script that asks to open a web page needs your permission first. With JavaScript off, Acrobat's standard format, validate and calculate functions still work."), t.text_muted);
     });
     ui.add_space(10.0);
     buttons(ui, tl!("OK"), &[]).is_some()
@@ -575,12 +570,14 @@ fn date_format(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) {
             .response
             .labelled_by(label.id);
     });
-    ui.label(
-        egui::RichText::new(crate::i18n::fmt(
-            tl!("yyyy or yy year · m or mm month · mmm or mmmm month name · d or dd day · ddd or dddd weekday. H, h, M, s and t are time letters and can't be used on their own: put {escape} before a letter to show it as is."),
+    widgets::small_text(
+        ui,
+        &crate::i18n::fmt_logical(
+            &tl_logical!(
+                "yyyy or yy year · m or mm month · mmm or mmmm month name · d or dd day · ddd or dddd weekday. H, h, M, s and t are time letters and can't be used on their own: put {escape} before a letter to show it as is."
+            ),
             &[("escape", "\\")],
-        ))
-        .small()
-        .color(t.text_muted),
+        ),
+        t.text_muted,
     );
 }

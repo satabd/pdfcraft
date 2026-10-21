@@ -424,10 +424,11 @@ fn card(
     // The header row selects the card (and shows the comment on the page); unselected cards are
     // clickable everywhere.
     let hit = if selected { frame.inner } else { rect };
-    let click = ui
-        .interact(hit, ui.id().with(("card", key)), Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(crate::i18n::fmt(tl!("{kind} — click to show it on the page"), &[("kind", tl!(kind_label(a)))]));
+    let click = ui.interact(hit, ui.id().with(("card", key)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let click = widgets::hover_text(
+        click,
+        &crate::i18n::fmt_logical(&tl_logical!("{kind} — click to show it on the page"), &[("kind", &tl_logical!(kind_label(a)))]),
+    );
     if click.clicked() {
         view.comments.selected = Some(key);
         view.comments.reply.clear();

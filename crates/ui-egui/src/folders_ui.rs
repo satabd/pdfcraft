@@ -300,9 +300,12 @@ pub(crate) fn section(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     });
     ui.add_space(4.0);
     if app.pinned.folders.is_empty() {
-        ui.label(
-            egui::RichText::new(tl!("Pin a folder to list its newest PDFs here, such as where your scanner or a synced cloud drive saves them."))
-                .color(t.text_muted),
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        crate::widgets::styled_text(
+            ui,
+            &tl_logical!("Pin a folder to list its newest PDFs here, such as where your scanner or a synced cloud drive saves them."),
+            font,
+            t.text_muted,
         );
     }
     let mut open = None;
@@ -333,20 +336,21 @@ pub(crate) fn section(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 }
             });
         });
-        let note = |ui: &mut egui::Ui, text: &str| {
+        let note = |ui: &mut egui::Ui, text: &crate::i18n::Logical<'_>| {
             ui.add_space(2.0);
-            ui.label(egui::RichText::new(text).color(t.text_muted));
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            crate::widgets::styled_text(ui, text, font, t.text_muted);
         };
         let Some(listing) = app.pinned.listing(folder) else {
-            note(ui, tl!("Looking for PDFs…"));
+            note(ui, &tl_logical!("Looking for PDFs…"));
             continue;
         };
         if listing.unavailable {
-            note(ui, tl!("This folder isn't available right now. It may have moved, or its drive or cloud sync is offline."));
+            note(ui, &tl_logical!("This folder isn't available right now. It may have moved, or its drive or cloud sync is offline."));
             continue;
         }
         if listing.files.is_empty() {
-            note(ui, tl!("No PDFs in this folder yet"));
+            note(ui, &tl_logical!("No PDFs in this folder yet"));
             continue;
         }
         let expanded = app.pinned.expanded.contains(folder);

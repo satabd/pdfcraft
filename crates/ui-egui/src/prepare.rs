@@ -1180,7 +1180,8 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                             ui.horizontal(|ui| {
                                 ui.label(o);
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button(tl!("Delete")).on_hover_text(crate::i18n::fmt(tl!("Delete {o}"), &[("o", o)])).clicked() {
+                                    let delete = ui.small_button(tl!("Delete"));
+                                    if widgets::hover_text(delete, &crate::i18n::fmt_logical(&tl_logical!("Delete {o}"), &[("o", o)])).clicked() {
                                         remove = Some(i);
                                     }
                                     if i > 0 && ui.small_button(tl!("Up")).clicked() {
@@ -1578,7 +1579,7 @@ fn calculate_tab(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Tokens
     }
     if let Calculate::Notation(expr) = &mut d.calculate {
         ui.add(crate::widgets::block(expr).hint_text("Price * Quantity").desired_rows(2).desired_width(420.0));
-        ui.label(egui::RichText::new(tl!("Field names with + - * / and parentheses; put \\ before spaces in names.")).small().color(t.text_faint));
+        widgets::small_text(ui, &tl_logical!("Field names with + - * / and parentheses; put \\ before spaces in names."), t.text_faint);
     }
 }
 

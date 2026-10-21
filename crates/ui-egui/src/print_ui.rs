@@ -843,11 +843,12 @@ pub(crate) fn body(
                         }
                     });
                     let tip = if spool::HAS_PRINTER_PREFERENCES {
-                        tl!("Opens the printer driver's preferences. They are saved for every print from this computer; the copies, two-sided, grayscale and paper chosen here still apply.")
+                        tl_logical!("Opens the printer driver's preferences. They are saved for every print from this computer; the copies, two-sided, grayscale and paper chosen here still apply.")
                     } else {
-                        tl!("The printer driver's own settings for this print: paper tray, paper type, finishing and more.")
+                        tl_logical!("The printer driver's own settings for this print: paper tray, paper type, finishing and more.")
                     };
-                    let properties = ui.add_enabled(d.printer.is_some() && !browser, egui::Button::new(tl!("Properties…"))).on_hover_text(tip);
+                    let properties = ui.add_enabled(d.printer.is_some() && !browser, egui::Button::new(tl!("Properties…")));
+                    let properties = widgets::hover_text(properties, &tip);
                     if properties.clicked()
                         && let Some(p) = d.printer.clone()
                     {
@@ -872,11 +873,7 @@ pub(crate) fn body(
                 // leaving Save as PDF looking like the only thing PdfCraft can do.
                 if !d.printers_loading && d.printers.is_empty() {
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new(tl!("No printers were found. Check that the printer is installed and the print spooler is running, then open Print again."))
-                            .small()
-                            .color(t.text_muted),
-                    );
+                    widgets::small_text(ui, &tl_logical!("No printers were found. Check that the printer is installed and the print spooler is running, then open Print again."), t.text_muted);
                     ui.end_row();
                 }
                 ui.label(tl!("Copies:"));
@@ -923,10 +920,10 @@ pub(crate) fn body(
             if let Some(p) = d.printers.iter().find(|p| d.printer.as_ref() == Some(&p.name))
                 && p.two_sided == Some(false)
             {
-                ui.label(egui::RichText::new(tl!("This printer's driver doesn't take two-sided settings from other programs, so its own setting applies. Change it in Properties…")).small().color(t.text_muted));
+                widgets::small_text(ui, &tl_logical!("This printer's driver doesn't take two-sided settings from other programs, so its own setting applies. Change it in Properties…"), t.text_muted);
             }
             if d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER) {
-                ui.label(egui::RichText::new(tl!("Copies, two-sided printing and colour are chosen in the browser's print dialog.")).small().color(t.text_muted));
+                widgets::small_text(ui, &tl_logical!("Copies, two-sided printing and colour are chosen in the browser's print dialog."), t.text_muted);
             }
             if let Some(e) = &d.driver_error {
                 ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Couldn't open the printer's preferences: {e}"), &[("e", e)])).small().color(t.text_muted));
@@ -1017,11 +1014,7 @@ pub(crate) fn body(
                 }
                 Handling::Label => {
                     ui.add(widgets::checkbox(&mut d.label_flip, tl!("Turn upside down (180°)")));
-                    ui.label(
-                        egui::RichText::new(tl!("Cuts each page to its printed area, turns it upright and fits it to the sheet without stretching. One label per sheet."))
-                            .small()
-                            .color(t.text_muted),
-                    );
+                    widgets::small_text(ui, &tl_logical!("Cuts each page to its printed area, turns it upright and fits it to the sheet without stretching. One label per sheet."), t.text_muted);
                 }
                 Handling::Poster => {
                     ui.horizontal(|ui| {

@@ -319,8 +319,11 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
             state.precision = scale.precision;
         }
     }
-    ui.label(tl!("Click vertices. Enter or double-click finishes a perimeter or area. Click the first point to close an area."));
-    ui.label(tl!("Shift constrains to 45 degrees. Backspace removes a vertex. Escape cancels."));
+    widgets::body_text(
+        ui,
+        &tl_logical!("Click vertices. Enter or double-click finishes a perimeter or area. Click the first point to close an area."),
+    );
+    widgets::body_text(ui, &tl_logical!("Shift constrains to 45 degrees. Backspace removes a vertex. Escape cancels."));
     ui.separator();
     ui.label(tl!("Measurement information"));
     if let Some(reading) = &state.reading {

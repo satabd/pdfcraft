@@ -76,6 +76,11 @@ pub(crate) fn command_tip(ctx: &egui::Context, template: &str, id: &str) -> Stri
     crate::i18n::fmt(template, &[("key", &command_shortcut_label(ctx, id))])
 }
 
+/// [`command_tip`] for a tooltip in logical order (see [`crate::widgets::hover_text`]).
+pub(crate) fn command_tip_logical(ctx: &egui::Context, template: &crate::i18n::Logical<'_>, id: &str) -> crate::i18n::Logical<'static> {
+    crate::i18n::fmt_logical(template, &[("key", &command_shortcut_label(ctx, id))])
+}
+
 impl PdfCraftApp {
     /// Whether a registered command can run now. The engine judges the document (security,
     /// contents, undo history); view state it can't see is checked here.

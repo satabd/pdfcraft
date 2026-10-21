@@ -810,10 +810,10 @@ fn configure(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
             ui.add(crate::widgets::line(&mut n.confirm).password(true).desired_width(200.0)).labelled_by(l.id);
             ui.end_row();
         });
-        ui.label(
-            egui::RichText::new(tl!("Valid for 5 years, for digital signatures. Self-signed IDs are usually not trusted by others."))
-                .small()
-                .color(t.text_muted),
+        widgets::small_text(
+            ui,
+            &tl_logical!("Valid for 5 years, for digital signatures. Self-signed IDs are usually not trusted by others."),
+            t.text_muted,
         );
     } else {
         egui::Grid::new("id-file").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -1000,11 +1000,7 @@ fn sign_as(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
         let lines = detail_lines(&d.appearance, &labels, &entry.name, &d.reason, &d.location, &date);
         preview(ui, t, &entry.name, &d.appearance, &lines, graphic.as_ref(), &mut app.sign_graphic_preview);
         if in_english && d.appearance.labels {
-            ui.label(
-                egui::RichText::new(tl!("The labels are in English: the signature's font can't draw them in this language."))
-                    .small()
-                    .color(t.text_muted),
-            );
+            widgets::small_text(ui, &tl_logical!("The labels are in English: the signature's font can't draw them in this language."), t.text_muted);
         }
         ui.horizontal_wrapped(|ui| {
             let a = &mut d.appearance;
@@ -1065,15 +1061,12 @@ fn sign_as(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
         ui.end_row();
         if in_os_key_store {
             ui.label("");
-            ui.label(
-                egui::RichText::new(if entry.path.starts_with("windows:") {
-                    tl!("The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.")
-                } else {
-                    tl!("The key is in the macOS Keychain, which may ask to allow PdfCraft to use it.")
-                })
-                .small()
-                .color(t.text_muted),
-            );
+            let note = if entry.path.starts_with("windows:") {
+                tl_logical!("The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.")
+            } else {
+                tl_logical!("The key is in the macOS Keychain, which may ask to allow PdfCraft to use it.")
+            };
+            widgets::small_text(ui, &note, t.text_muted);
         } else {
             let l = ui.label(tl!("Digital ID password"));
             let r = ui.add(crate::widgets::line(&mut d.password).password(true).desired_width(200.0)).labelled_by(l.id);
@@ -1443,13 +1436,16 @@ pub(crate) fn cert_viewer(ui: &mut egui::Ui, v: &mut CertViewer, trusted: &[Cert
                 CertTab::Trust => {
                     let is_trusted = trusted.iter().any(|x| x.raw == c.raw);
                     let anchored = v.chain.iter().any(|x| trusted.iter().any(|y| y.raw == x.raw));
-                    ui.label(if is_trusted {
-                        tl!("This certificate is in your list of trusted certificates.")
-                    } else if anchored {
-                        tl!("This certificate is trusted through a certificate above it in the chain.")
-                    } else {
-                        tl!("This certificate is not trusted. Signatures made with it show an unknown identity.")
-                    });
+                    widgets::body_text(
+                        ui,
+                        &if is_trusted {
+                            tl_logical!("This certificate is in your list of trusted certificates.")
+                        } else if anchored {
+                            tl_logical!("This certificate is trusted through a certificate above it in the chain.")
+                        } else {
+                            tl_logical!("This certificate is not trusted. Signatures made with it show an unknown identity.")
+                        },
+                    );
                     ui.add_space(8.0);
                     if !is_trusted && widgets::pill_button(ui, tl!("Add to Trusted Certificates"), false).clicked() {
                         action = Some(CertAction::Trust(Box::new(c.clone())));

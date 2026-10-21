@@ -69,7 +69,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         ui.end_row();
     });
     ui.add_space(4.0);
-    ui.label(egui::RichText::new(tl!("Text is compared word by word; the differences are shown on the new file.")).small().color(t.text_muted));
+    widgets::small_text(ui, &tl_logical!("Text is compared word by word; the differences are shown on the new file."), t.text_muted);
     ui.add_space(10.0);
     let (mut go, mut cancel) = (false, false);
     ui.horizontal(|ui| {
@@ -88,7 +88,12 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
 /// The Compare panel.
 pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &Option<CompareState>, id: DocId) -> Option<PanelAction> {
     let Some(s) = state.as_ref().filter(|s| s.new == id) else {
-        ui.label(egui::RichText::new(tl!("Compare this file with an older version: Compare files… in All tools.")).color(t.text_muted));
+        widgets::styled_text(
+            ui,
+            &tl_logical!("Compare this file with an older version: Compare files… in All tools."),
+            egui::TextStyle::Body.resolve(ui.style()),
+            t.text_muted,
+        );
         return None;
     };
     let mut action = None;

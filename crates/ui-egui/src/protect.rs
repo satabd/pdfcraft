@@ -202,14 +202,15 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         // problem() stays English (tested); only the display translates.
         ui.label(egui::RichText::new(tl!(problem)).color(t.text_muted).font(theme::regular(12.0)));
     }
-    ui.label(
-        egui::RichText::new(if d.viewing {
-            tl!("Anyone opening the document will need this password. It's applied when you save.")
+    widgets::styled_text(
+        ui,
+        &if d.viewing {
+            tl_logical!("Anyone opening the document will need this password. It's applied when you save.")
         } else {
-            tl!("The document opens without a password; this password is needed to change the restrictions. It's applied when you save.")
-        })
-        .color(t.text_faint)
-        .font(theme::regular(11.5)),
+            tl_logical!("The document opens without a password; this password is needed to change the restrictions. It's applied when you save.")
+        },
+        theme::regular(11.5),
+        t.text_faint,
     );
     ui.add_space(12.0);
     let (mut apply, mut cancel) = (false, false);

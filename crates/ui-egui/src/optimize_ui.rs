@@ -194,10 +194,10 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut OptimizeDraft, t: &Tokens) -> (boo
             ui.add(widgets::checkbox(&mut s.merge_fragments, tl!("Merge image fragments")));
             image_row(ui, "color", "Color Images", &mut s.color);
             image_row(ui, "gray", "Grayscale Images", &mut s.gray);
-            ui.label(
-                egui::RichText::new(tl!("Each image is measured where pages draw it; an image is replaced only if the result is smaller."))
-                    .small()
-                    .color(t.text_muted),
+            widgets::small_text(
+                ui,
+                &tl_logical!("Each image is measured where pages draw it; an image is replaced only if the result is smaller."),
+                t.text_muted,
             );
         }
         OptimizeTab::DiscardObjects => {

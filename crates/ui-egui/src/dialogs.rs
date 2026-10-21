@@ -508,15 +508,12 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 });
                 let fits = n <= d.src_pages;
                 ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(if fits {
-                        tl!("Only the page content changes: links, comments, form fields and bookmarks on the original pages stay.")
-                    } else {
-                        tl!("The replacement file doesn't have that many pages.")
-                    })
-                    .small()
-                    .color(t.text_faint),
-                );
+                let note = if fits {
+                    tl_logical!("Only the page content changes: links, comments, form fields and bookmarks on the original pages stay.")
+                } else {
+                    tl_logical!("The replacement file doesn't have that many pages.")
+                };
+                widgets::styled_text(ui, &note, egui::TextStyle::Small.resolve(ui.style()), t.text_faint);
                 ui.add_space(10.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.add_enabled_ui(fits, |ui| widgets::pill_button(ui, tl!("OK"), true)).inner.clicked() {
@@ -790,10 +787,13 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let name = app.active_ids().and_then(|(_, id)| app.session.get(id)).map(|d| d.name.clone()).unwrap_or_default();
                 ui.label(egui::RichText::new(tl!("Revert")).font(theme::semibold(18.0)));
                 ui.add_space(8.0);
-                ui.label(crate::i18n::fmt(
-                    tl!("Revert to the previously saved version of “{name}”? Changes since then can't be undone afterwards."),
-                    &[("name", &name)],
-                ));
+                widgets::body_text(
+                    ui,
+                    &crate::i18n::fmt_logical(
+                        &tl_logical!("Revert to the previously saved version of “{name}”? Changes since then can't be undone afterwards."),
+                        &[("name", &name)],
+                    ),
+                );
                 ui.add_space(12.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if widgets::pill_button(ui, tl!("Revert"), true).clicked() {
@@ -813,10 +813,15 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let name = String::new();
                 ui.label(egui::RichText::new(tl!("Save over the changed file?")).font(theme::semibold(18.0)));
                 ui.add_space(8.0);
-                ui.label(crate::i18n::fmt(
-                    tl!("“{name}” changed on disk after it was opened or last saved. Saving now replaces that newer version with this one."),
-                    &[("name", &name)],
-                ));
+                widgets::body_text(
+                    ui,
+                    &crate::i18n::fmt_logical(
+                        &tl_logical!(
+                            "“{name}” changed on disk after it was opened or last saved. Saving now replaces that newer version with this one."
+                        ),
+                        &[("name", &name)],
+                    ),
+                );
                 ui.add_space(12.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if widgets::pill_button(ui, tl!("Save anyway"), true).clicked() {
@@ -1066,7 +1071,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     ui.label(egui::RichText::new(tl!("Recover unsaved documents?")).font(theme::semibold(18.0)));
                 });
                 ui.add_space(6.0);
-                ui.label(tl!("PdfCraft didn't shut down normally. These documents had changes that were autosaved:"));
+                widgets::body_text(ui, &tl_logical!("PdfCraft didn't shut down normally. These documents had changes that were autosaved:"));
                 ui.add_space(8.0);
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 egui::Grid::new("recoverable").num_columns(2).spacing([18.0, 6.0]).show(ui, |ui| {
@@ -1162,7 +1167,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                             });
                         });
                         ui.add_space(6.0);
-                        ui.label(tl!("A clean-room, open-source PDF application written in Rust. MIT OR Apache-2.0."));
+                        widgets::body_text(ui, &tl_logical!("A clean-room, open-source PDF application written in Rust. MIT OR Apache-2.0."));
                         ui.label(
                             egui::RichText::new(
                                 "Rendering: hayro (bootstrap) · UI: egui · Icons: Lucide (ISC) · Fonts: Inter, JetBrains Mono, Dancing Script (OFL)",
@@ -1491,7 +1496,12 @@ fn save_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
             }
         });
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(tl!("Your changes will be lost if you don't save them.")).color(t.text_muted));
+        widgets::styled_text(
+            ui,
+            &tl_logical!("Your changes will be lost if you don't save them."),
+            egui::TextStyle::Body.resolve(ui.style()),
+            t.text_muted,
+        );
         ui.add_space(14.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if widgets::pill_button(ui, tl!("Save"), true).clicked() {
@@ -1544,11 +1554,11 @@ fn link_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
         });
         ui.add_space(6.0);
         let template = if email {
-            tl!("{who} in this document wants to open your email app with this address:")
+            tl_logical!("{who} in this document wants to open your email app with this address:")
         } else {
-            tl!("{who} in this document wants to open this address in your browser:")
+            tl_logical!("{who} in this document wants to open this address in your browser:")
         };
-        ui.label(crate::i18n::fmt(template, &[("who", tl!(pending.origin.noun()))]));
+        widgets::body_text(ui, &crate::i18n::fmt_logical(&template, &[("who", &tl_logical!(pending.origin.noun()))]));
         ui.add_space(6.0);
         // The host as the browser will connect to it, in punycode when it is international, so a
         // lookalike such as `pаypal.com` (Cyrillic `а`) reads as `xn--pypal-4ve.com`. Its Unicode
@@ -1610,11 +1620,11 @@ fn full_screen_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ui.label(egui::RichText::new(tl!("Open in Full Screen mode?")).font(theme::semibold(16.0)));
         });
         ui.add_space(6.0);
-        ui.add(
-            egui::Label::new(tl!(
+        widgets::body_text(
+            ui,
+            &tl_logical!(
                 "This document asks to open in Full Screen mode: the page fills the screen and nothing else shows. Press Esc at any time to leave it."
-            ))
-            .wrap(),
+            ),
         );
         ui.add_space(14.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1681,7 +1691,7 @@ fn password_modal(
     ctx: &egui::Context,
     id: &str,
     title: &str,
-    message: String,
+    message: &crate::i18n::Logical<'_>,
     input: &mut String,
     error: Option<&str>,
     ok: &str,
@@ -1695,7 +1705,7 @@ fn password_modal(
             ui.label(egui::RichText::new(title).font(theme::semibold(17.0)));
         });
         ui.add_space(6.0);
-        ui.add(egui::Label::new(message).wrap());
+        widgets::body_text(ui, message);
         ui.add_space(8.0);
         let r = ui.add(widgets::line(input).password(true).hint_text(tl!("Password")).desired_width(f32::INFINITY));
         // Enter submits. The field keeps focus (we request it every frame), so check the key
@@ -1725,8 +1735,8 @@ fn password_modal(
 /// Password prompt for encrypted documents (Acrobat: "Password" dialog on open).
 fn password(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let Some(prompt) = app.password_prompt.as_mut() else { return };
-    let message = crate::i18n::fmt(tl!("“{name}” is protected. Enter a password to open it."), &[("name", &prompt.name)]);
-    match password_modal(ctx, "password", tl!("Password required"), message, &mut prompt.input, prompt.error.as_deref(), tl!("Open")) {
+    let message = crate::i18n::fmt_logical(&tl_logical!("“{name}” is protected. Enter a password to open it."), &[("name", &prompt.name)]);
+    match password_modal(ctx, "password", tl!("Password required"), &message, &mut prompt.input, prompt.error.as_deref(), tl!("Open")) {
         Some(PasswordAnswer::Submit) => {
             let pw = prompt.input.clone();
             app.submit_password(Some(pw));
@@ -1739,9 +1749,11 @@ fn password(app: &mut PdfCraftApp, ctx: &egui::Context) {
 /// Permissions password prompt: lifts the restrictions of an open document (#995).
 fn unlock(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let Some(prompt) = app.unlock_prompt.as_mut() else { return };
-    let message =
-        crate::i18n::fmt(tl!("“{name}” has security restrictions. Enter its permissions password to lift them."), &[("name", &prompt.name)]);
-    match password_modal(ctx, "unlock", tl!("Permissions password"), message, &mut prompt.input, prompt.error.as_deref(), tl!("Unlock")) {
+    let message = crate::i18n::fmt_logical(
+        &tl_logical!("“{name}” has security restrictions. Enter its permissions password to lift them."),
+        &[("name", &prompt.name)],
+    );
+    match password_modal(ctx, "unlock", tl!("Permissions password"), &message, &mut prompt.input, prompt.error.as_deref(), tl!("Unlock")) {
         Some(PasswordAnswer::Submit) => {
             let pw = prompt.input.clone();
             app.submit_unlock(Some(pw));

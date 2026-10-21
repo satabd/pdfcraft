@@ -221,10 +221,9 @@ pub(crate) fn panel(
     ui.horizontal(|ui| {
         earlier = ui.add_enabled(can_edit && !dirty && before.is_some(), egui::Button::new(tl!("Move tag earlier"))).clicked();
         later = ui.add_enabled(can_edit && !dirty && after.is_some(), egui::Button::new(tl!("Move tag later"))).clicked();
-        artifact = ui
-            .add_enabled(can_edit && !dirty, egui::Button::new(tl!("Mark as artifact")))
-            .on_hover_text(tl!("Remove this leaf tag from reading order and mark its direct content as an artifact"))
-            .clicked();
+        let button = ui.add_enabled(can_edit && !dirty, egui::Button::new(tl!("Mark as artifact")));
+        artifact =
+            widgets::hover_text(button, &tl_logical!("Remove this leaf tag from reading order and mark its direct content as an artifact")).clicked();
     });
     ui.separator();
     for item in content {

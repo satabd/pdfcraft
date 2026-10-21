@@ -161,11 +161,7 @@ pub(crate) fn dialog(app: &mut PdfCraftApp, ctx: &egui::Context) {
             }
         }
         ui.add_space(10.0);
-        ui.label(
-            egui::RichText::new(tl!("Asks GitHub for the latest release. Nothing is downloaded or installed automatically."))
-                .color(t.text_muted)
-                .small(),
-        );
+        widgets::small_text(ui, &tl_logical!("Asks GitHub for the latest release. Nothing is downloaded or installed automatically."), t.text_muted);
         ui.add_space(12.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(url) = download.take() {

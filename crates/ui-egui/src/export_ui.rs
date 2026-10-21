@@ -99,13 +99,13 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: E
                 }
             });
         });
-        ui.label(
-            egui::RichText::new(tl!("Each image once, named after the document and page. JPEG images are saved unchanged; others as PNG."))
-                .small()
-                .color(t.text_faint),
+        widgets::small_text(
+            ui,
+            &tl_logical!("Each image once, named after the document and page. JPEG images are saved unchanged; others as PNG."),
+            t.text_faint,
         );
     } else {
-        ui.label(egui::RichText::new(tl!("Plain text in reading order; pages are separated by form feeds.")).small().color(t.text_faint));
+        widgets::small_text(ui, &tl_logical!("Plain text in reading order; pages are separated by form feeds."), t.text_faint);
     }
     ui.add_space(6.0);
     ui.label(egui::RichText::new(tl!("Pages")).font(theme::semibold(12.5)));

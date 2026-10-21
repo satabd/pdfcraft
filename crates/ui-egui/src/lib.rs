@@ -28,6 +28,16 @@ macro_rules! tl_ctx {
     };
 }
 
+/// [`tl!`] for text that egui wraps (tooltips, body text, notes), as [`i18n::Logical`]: a
+/// right-to-left language's text stays in typing order for [`widgets::hover_text`],
+/// [`widgets::body_text`] and [`widgets::styled_text`], which wrap and reorder it. Anywhere else
+/// use [`tl!`].
+macro_rules! tl_logical {
+    ($s:expr) => {
+        $crate::i18n::t_logical($s)
+    };
+}
+
 mod a11y_ui;
 mod actions_ui;
 mod appearance;
