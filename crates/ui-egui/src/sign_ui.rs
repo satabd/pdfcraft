@@ -810,10 +810,10 @@ fn configure(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
                 });
             });
             rows.row(tl!("Password"), |ui, l| {
-                ui.add(crate::widgets::line(&mut n.password).password(true).desired_width(200.0)).labelled_by(l.id);
+                ui.add(crate::widgets::plain_line(&mut n.password).password(true).desired_width(200.0)).labelled_by(l.id);
             });
             rows.row(tl!("Confirm Password"), |ui, l| {
-                ui.add(crate::widgets::line(&mut n.confirm).password(true).desired_width(200.0)).labelled_by(l.id);
+                ui.add(crate::widgets::plain_line(&mut n.confirm).password(true).desired_width(200.0)).labelled_by(l.id);
             });
         });
         widgets::small_text(
@@ -833,7 +833,7 @@ fn configure(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
                 });
             });
             rows.row(tl!("Password"), |ui, l| {
-                ui.add(crate::widgets::line(&mut n.file_password).password(true).desired_width(200.0)).labelled_by(l.id);
+                ui.add(crate::widgets::plain_line(&mut n.file_password).password(true).desired_width(200.0)).labelled_by(l.id);
             });
         });
     }
@@ -1076,7 +1076,7 @@ fn sign_as(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
             });
         } else {
             rows.row(tl!("Digital ID password"), |ui, l| {
-                let r = ui.add(crate::widgets::line(&mut d.password).password(true).desired_width(200.0)).labelled_by(l.id);
+                let r = ui.add(crate::widgets::plain_line(&mut d.password).password(true).desired_width(200.0)).labelled_by(l.id);
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     go = true;
                 }

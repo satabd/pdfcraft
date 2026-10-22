@@ -154,7 +154,7 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     ui.add(icons::image("search", 18.0, t.text_muted));
                     let align = crate::widgets::field_align(&app.palette_query);
                     let r = ui.add(
-                        egui::TextEdit::singleline(&mut app.palette_query)
+                        crate::widgets::BidiEdit::singleline(&mut app.palette_query)
                             .hint_text(tl!("Search tools and commands…"))
                             .frame(egui::Frame::NONE)
                             .font(theme::regular(15.0))

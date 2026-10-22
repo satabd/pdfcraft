@@ -1506,7 +1506,14 @@ fn actions_tab(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Tokens) 
         };
         rows.row(if a.kind == 0 { tl!("Script:") } else { tl!("Value:") }, |ui, _| {
             if a.kind == 0 {
-                ui.add(crate::widgets::block(&mut a.text).code_editor().desired_rows(3).desired_width(340.0).hint_text(hint).id_salt("action-text"));
+                ui.add(
+                    crate::widgets::plain_block(&mut a.text)
+                        .code_editor()
+                        .desired_rows(3)
+                        .desired_width(340.0)
+                        .hint_text(hint)
+                        .id_salt("action-text"),
+                );
             } else {
                 ui.add(crate::widgets::line(&mut a.text).desired_width(340.0).hint_text(hint).id_salt("action-text"));
             }

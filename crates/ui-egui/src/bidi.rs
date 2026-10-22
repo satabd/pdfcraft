@@ -8,6 +8,10 @@
 //!
 //! [`display_rtl`] does the same for the labels of a right-to-left interface language (the Arabic
 //! catalog), whose base direction is right to left.
+//!
+//! [`screen_map`] keeps where every character of a [`visual`] line goes, which is what a text field
+//! needs to turn the caret and selection egui reports (in the order the glyphs are drawn) into
+//! places in the stored, logical text (`widgets::BidiEdit`).
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -40,21 +44,33 @@ fn push_visual(out: &mut String, text: &str, base: Level) {
 /// The `line` of paragraph `para` (a non-empty byte range of `text`) in display order, as egui
 /// needs it, appended to `out`.
 fn push_line(out: &mut String, text: &str, info: &BidiInfo<'_>, para: &ParagraphInfo, line: Range<usize>) {
-    let (levels, runs) = info.visual_runs(para, line);
     // First the true display order, every character left to right as it appears on screen.
     let mut shown = String::with_capacity(text.len());
+    for_each_shown(text, info, para, line, |c, _, _| shown.push(c));
+    push_for_shaper(out, &shown);
+}
+
+/// Calls `emit(c, at, rtl)` for each character of the `line` of paragraph `para` in true display
+/// order, left to right as it appears on screen: `c` as drawn (brackets mirrored in a right-to-left
+/// run), `at` the byte offset of the character in `text`, `rtl` whether its run reads right to
+/// left. Direction controls are not drawn and not emitted.
+fn for_each_shown(text: &str, info: &BidiInfo<'_>, para: &ParagraphInfo, line: Range<usize>, mut emit: impl FnMut(char, usize, bool)) {
+    let (levels, runs) = info.visual_runs(para, line);
     for run in runs {
         let rtl = levels.get(run.start).is_some_and(Level::is_rtl);
         // Runs lie on character boundaries; a missing slice is skipped, never a panic.
-        let Some(piece) = text.get(run) else { continue };
-        let chars = piece.chars().filter(|c| !is_bidi_control(*c));
+        let Some(piece) = text.get(run.clone()) else { continue };
+        let chars = piece.char_indices().filter(|(_, c)| !is_bidi_control(*c));
         if rtl {
-            shown.extend(chars.rev().map(mirrored));
+            for (at, c) in chars.rev() {
+                emit(mirrored(c), run.start.saturating_add(at), true);
+            }
         } else {
-            shown.extend(chars);
+            for (at, c) in chars {
+                emit(c, run.start.saturating_add(at), false);
+            }
         }
     }
-    push_for_shaper(out, &shown);
 }
 
 /// `shown` (in screen order) as egui must get it: egui hands each stretch of right-to-left
@@ -65,7 +81,7 @@ fn push_line(out: &mut String, text: &str, info: &BidiInfo<'_>, para: &Paragraph
 fn push_for_shaper(out: &mut String, shown: &str) {
     let mut stretch: Vec<char> = Vec::new();
     for c in shown.chars() {
-        if is_rtl_script(c) || is_joiner(c) {
+        if is_shaped_rtl(c) {
             stretch.push(c);
         } else {
             out.extend(stretch.drain(..).rev());
@@ -73,6 +89,152 @@ fn push_for_shaper(out: &mut String, shown: &str) {
         }
     }
     out.extend(stretch.drain(..).rev());
+}
+
+/// How [`visual`] puts the characters of one text on screen, character by character: what a text
+/// field needs to relate the caret and selection egui reports in the order the galley is drawn
+/// (screen order) to the text that is stored (logical order).
+///
+/// Indices are character indices. `N`, the number of characters drawn, is at most `M`, the number
+/// in the text: direction controls are not drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenMap {
+    /// The text to hand to egui: exactly what [`visual`] returns. Its i-th character is the
+    /// i-th one from the left in the galley egui builds from it.
+    pub shaper: String,
+    /// The logical index of the character drawn at each screen position (`N` entries).
+    pub shown: Vec<usize>,
+    /// The character as drawn at each screen position (`N` entries): the text's own, brackets
+    /// mirrored in a right-to-left run.
+    pub drawn: Vec<char>,
+    /// Whether the run holding each logical character reads right to left (`M` entries; false
+    /// for the characters that are not drawn).
+    pub rtl: Vec<bool>,
+    /// The screen position of each logical character (`M` entries); `None` for a direction
+    /// control, which is not drawn.
+    pub to_screen: Vec<Option<usize>>,
+}
+
+/// The [`ScreenMap`] of `text`: [`visual`] with the position of every character kept. Text without
+/// right-to-left script maps to itself.
+pub fn screen_map(text: &str) -> ScreenMap {
+    let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    let count = offsets.len();
+    if !has_rtl(text) {
+        return ScreenMap {
+            shaper: text.to_owned(),
+            shown: (0..count).collect(),
+            drawn: text.chars().collect(),
+            rtl: vec![false; count],
+            to_screen: (0..count).map(Some).collect(),
+        };
+    }
+    let mut map = ScreenMap {
+        shaper: String::with_capacity(text.len()),
+        shown: Vec::with_capacity(count),
+        drawn: Vec::with_capacity(count),
+        rtl: vec![false; count],
+        to_screen: vec![None; count],
+    };
+    let info = BidiInfo::new(text, Some(Level::ltr()));
+    for para in &info.paragraphs {
+        let mut drawn = String::with_capacity(para.range.len());
+        for_each_shown(text, &info, para, para.range.clone(), |c, at, rtl| {
+            // `at` is the start of a character, so the search finds it; if not, the character is skipped.
+            let Ok(logical) = offsets.binary_search(&at) else { return };
+            drawn.push(c);
+            let screen = map.shown.len();
+            map.shown.push(logical);
+            map.drawn.push(c);
+            if let Some(slot) = map.rtl.get_mut(logical) {
+                *slot = rtl;
+            }
+            if let Some(slot) = map.to_screen.get_mut(logical) {
+                *slot = Some(screen);
+            }
+        });
+        push_for_shaper(&mut map.shaper, &drawn);
+    }
+    map
+}
+
+impl ScreenMap {
+    /// `M`: the characters of the text.
+    pub fn logical_len(&self) -> usize {
+        self.to_screen.len()
+    }
+
+    /// `N`: the characters drawn, and the last screen position of a caret.
+    pub fn screen_len(&self) -> usize {
+        self.shown.len()
+    }
+
+    /// The screen position just after the logical character `p` as it is read: at its right edge
+    /// in a left-to-right run, at its left edge in a right-to-left one. `None` if it is not drawn.
+    fn trail(&self, p: usize) -> Option<usize> {
+        let at = (*self.to_screen.get(p)?)?;
+        Some(if self.rtl.get(p).copied().unwrap_or(false) { at } else { at.saturating_add(1) })
+    }
+
+    /// The screen position just before the logical character `n` as it is read: at its left edge
+    /// in a left-to-right run, at its right edge in a right-to-left one. `None` if it is not drawn.
+    fn lead(&self, n: usize) -> Option<usize> {
+        let at = (*self.to_screen.get(n)?)?;
+        Some(if self.rtl.get(n).copied().unwrap_or(false) { at.saturating_add(1) } else { at })
+    }
+
+    /// The screen positions (`0..=N`) a caret between logical characters `l - 1` and `l` (`0..=M`)
+    /// can be drawn at, the one after the previous character first: typing continues there.
+    /// There are two when the neighbours sit apart on screen (at the edge of a run of the other
+    /// direction), one otherwise. `l` past the end counts as the end.
+    pub fn screen_positions(&self, l: usize) -> Vec<usize> {
+        let l = l.min(self.logical_len());
+        let before = (0..l).rev().find_map(|p| self.trail(p));
+        let after = (l..self.logical_len()).find_map(|n| self.lead(n));
+        let mut out = Vec::with_capacity(2);
+        for v in [before, after].into_iter().flatten() {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+        if out.is_empty() {
+            out.push(0);
+        }
+        out
+    }
+
+    /// The logical caret positions (`0..=M`) a caret at screen position `v` (`0..=N`) can mean: the
+    /// one at the right edge of the character drawn to its left first, then the one at the left
+    /// edge of the character drawn to its right (the same when both read in one direction).
+    /// `v` past the end counts as the end.
+    pub fn logical_positions(&self, v: usize) -> Vec<usize> {
+        let v = v.min(self.screen_len());
+        let left = v.checked_sub(1).and_then(|i| self.shown.get(i)).map(|&a| {
+            // The right edge of `a` is where it ends in a left-to-right run and begins in the other.
+            if self.rtl.get(a).copied().unwrap_or(false) { a } else { a.saturating_add(1) }
+        });
+        let right = self.shown.get(v).map(|&b| if self.rtl.get(b).copied().unwrap_or(false) { b.saturating_add(1) } else { b });
+        let mut out = Vec::with_capacity(2);
+        for l in [left, right].into_iter().flatten() {
+            if !out.contains(&l) {
+                out.push(l);
+            }
+        }
+        if out.is_empty() {
+            out.push(self.logical_len());
+        }
+        out
+    }
+
+    /// The logical indices, sorted, of the characters drawn at the screen positions `range`
+    /// (past the end ignored). A selection between two screen positions covers these.
+    pub fn logical_of_screen(&self, range: Range<usize>) -> Vec<usize> {
+        let end = range.end.min(self.screen_len());
+        let start = range.start.min(end);
+        let mut set: Vec<usize> = self.shown.get(start..end).unwrap_or_default().to_vec();
+        set.sort_unstable();
+        set
+    }
 }
 
 /// One line of wrapped text (see [`wrap`]).
@@ -359,6 +521,14 @@ fn is_rtl_script(c: char) -> bool {
     matches!(u32::from(c), 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFC | 0x1_0800..=0x1_0FFF | 0x1_E800..=0x1_EFFF)
 }
 
+/// Whether egui hands `c` to the shaper as part of a right-to-left run (whatever level the
+/// bidirectional algorithm gave it): the characters of the right-to-left scripts, and the joiners
+/// that belong to the letter before them. egui guesses a run's direction from its script, so such a
+/// run is shaped right to left, with the glyph accounting that goes with it.
+pub(crate) fn is_shaped_rtl(c: char) -> bool {
+    is_rtl_script(c) || is_joiner(c)
+}
+
 /// The zero-width (non-)joiners inside a word (Persian `می‌روم`): egui shapes them with the
 /// letter before them.
 fn is_joiner(c: char) -> bool {
@@ -384,6 +554,24 @@ fn mirrored(c: char) -> char {
         '»' => '«',
         other => other,
     }
+}
+
+/// The interface fonts with an Arabic face, or `None` when this build has none (no craft-fonts)
+/// and `PDFCRAFT_TEST_ARABIC_FONT` does not name one either. That variable is for a local run
+/// without craft-fonts: any font file with Arabic coverage stands in (DejaVu Sans, say), and
+/// the tests that need glyph positions then run instead of skipping.
+#[cfg(test)]
+pub(crate) fn arabic_test_fonts() -> Option<egui::FontDefinitions> {
+    let mut fonts = crate::theme::font_definitions();
+    if !pdfcraft_fonts::ui_arabic_fonts().is_empty() {
+        return Some(fonts);
+    }
+    let bytes = std::fs::read(std::env::var_os("PDFCRAFT_TEST_ARABIC_FONT")?).ok()?;
+    fonts.font_data.insert("test-arabic".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+    for stack in fonts.families.values_mut() {
+        stack.push("test-arabic".to_owned());
+    }
+    Some(fonts)
 }
 
 #[cfg(test)]
@@ -674,5 +862,201 @@ mod tests {
             let v = visual(s);
             assert!(v.chars().count() <= s.chars().count(), "{:?}", s.chars().take(12).collect::<String>());
         }
+    }
+
+    /// Fixed odd strings plus pseudo-random mixes of the characters that steer reordering.
+    fn corpus() -> Vec<String> {
+        let mut out: Vec<String> = [
+            "",
+            "abc",
+            "ab\u{643}\u{62A}\u{627}\u{628}",
+            "\u{648}\u{627}\u{62D}\u{62F} \u{627}\u{62B}\u{646}\u{64A}\u{646}.pdf",
+            "report \u{648}\u{627}\u{62D}\u{62F} final",
+            "\u{645}\u{644}\u{641} 2024",
+            "\u{202B}\u{648}\u{627}\u{62D}\u{62F}\u{202C}.pdf",
+            "\u{200F}\u{648}\u{627}\u{62D}\u{62F}\u{61C}",
+            "\u{64B}",
+            "\u{202E}\u{202E}\u{202E}\u{627}",
+            "\u{2067}\u{627}\u{2066}b",
+            "\u{627}\nb\r\n\u{62C}\u{2029}\u{62F}",
+            "\u{FEFF}\u{627}\u{0}\u{628}",
+            "((((\u{627}]]]]",
+            "\u{648}\u{627}\u{62D}\u{62F} (\u{627}\u{62B}\u{646}\u{64A}\u{646}) \u{62B}\u{644}\u{627}\u{62B}\u{629}",
+            "\u{645}\u{646} \u{628}\u{647} \u{645}\u{62F}\u{631}\u{633}\u{647} \u{645}\u{6CC}\u{200C}\u{631}\u{648}\u{645}",
+            "\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD}",
+            "\u{633}\u{627}\u{644} \u{6F1}\u{6F4}\u{6F0}\u{6F2} \u{634}\u{645}\u{633}\u{6CC}",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let alphabet: Vec<char> =
+            "ab 1\u{6F1}\u{639}\u{644}\u{64A}\u{628}()[]\u{200C}\u{200E}\u{200F}\u{202B}\u{202C}\u{2066}\u{2069}\u{64B}\n\u{5D0}.,:"
+                .chars()
+                .collect();
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        for len in (0..40).chain([200]) {
+            let mut text = String::new();
+            for _ in 0..len {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                if let Some(c) = usize::try_from(seed % alphabet.len() as u64).ok().and_then(|i| alphabet.get(i)) {
+                    text.push(*c);
+                }
+            }
+            out.push(text);
+        }
+        out
+    }
+
+    #[test]
+    fn the_screen_map_agrees_with_visual() {
+        for text in corpus() {
+            let map = screen_map(&text);
+            let m = text.chars().count();
+            let n = map.shaper.chars().count();
+            assert_eq!(map.shaper, visual(&text), "{text:?}");
+            assert_eq!(map.shown.len(), n, "{text:?}");
+            assert_eq!(map.drawn.len(), n, "{text:?}");
+            assert!(n <= m && map.logical_len() == m && map.rtl.len() == m, "{text:?}");
+            // `shown` and `to_screen` are inverse to each other.
+            for (screen, &logical) in map.shown.iter().enumerate() {
+                assert!(logical < m, "{text:?}");
+                assert_eq!(map.to_screen.get(logical), Some(&Some(screen)), "{text:?}");
+            }
+            assert_eq!(map.to_screen.iter().flatten().count(), n, "{text:?}");
+            // What is not drawn is exactly the direction controls.
+            for (logical, c) in text.chars().enumerate() {
+                let drawn = map.to_screen.get(logical).copied().flatten().is_some();
+                assert!(drawn || is_bidi_control(c), "{text:?} drops {c:?}");
+                assert!(!drawn || !is_bidi_control(c) || !has_rtl(&text), "{text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_latin_word_then_an_arabic_one_has_two_places_for_the_caret_between_them() {
+        // "ab" and the four letters kaf, ta, alef, ba: the word is drawn reversed after "ab".
+        let map = screen_map("ab\u{643}\u{62A}\u{627}\u{628}");
+        assert_eq!(map.shown, [0, 1, 5, 4, 3, 2]);
+        assert_eq!(map.to_screen, [Some(0), Some(1), Some(5), Some(4), Some(3), Some(2)]);
+        assert_eq!(map.rtl, [false, false, true, true, true, true]);
+        // Logical 2 (between "ab" and the word) is at the right edge of "b" and at the right edge
+        // of the word; logical 6 (the end of the text) is at the right edge of "b" too, where the
+        // next letter typed appears.
+        assert_eq!(map.screen_positions(2), [2, 6]);
+        assert_eq!(map.screen_positions(6), [2]);
+        assert_eq!(map.screen_positions(0), [0]);
+        assert_eq!(map.screen_positions(1), [1]);
+        // Inside the word the neighbours are adjacent on screen.
+        assert_eq!(map.screen_positions(3), [5]);
+        assert_eq!(map.screen_positions(4), [4]);
+        assert_eq!(map.screen_positions(5), [3]);
+        // And back: boundary 2 is logical 2 (after "b") or 6 (after the word's last letter).
+        assert_eq!(map.logical_positions(2), [2, 6]);
+        assert_eq!(map.logical_positions(6), [2]);
+        assert_eq!(map.logical_positions(0), [0]);
+        assert_eq!(map.logical_positions(1), [1]);
+        assert_eq!(map.logical_positions(3), [5]);
+        // Past the end counts as the end.
+        assert_eq!(map.screen_positions(99), [2]);
+        assert_eq!(map.logical_positions(99), [2]);
+        // The characters a selection between screen positions 1 and 4 covers: "b" and the two
+        // letters drawn after it, which are the word's last two.
+        assert_eq!(map.logical_of_screen(1..4), [1, 4, 5]);
+        assert_eq!(map.logical_of_screen(4..99), [2, 3]);
+        let reversed = std::ops::Range { start: 5, end: 2 };
+        assert!(map.logical_of_screen(reversed).is_empty());
+    }
+
+    #[test]
+    fn text_without_right_to_left_script_maps_to_itself() {
+        let map = screen_map("a\u{200E}b");
+        assert_eq!(map.shaper, "a\u{200E}b");
+        assert_eq!(map.shown, [0, 1, 2]);
+        assert_eq!(map.screen_positions(2), [2]);
+        assert_eq!(map.logical_positions(2), [2]);
+        assert_eq!(screen_map("").screen_positions(0), [0]);
+        assert_eq!(screen_map("").logical_positions(0), [0]);
+    }
+
+    #[test]
+    fn caret_positions_round_trip_on_every_text() {
+        for text in corpus() {
+            let map = screen_map(&text);
+            let (m, n) = (map.logical_len(), map.screen_len());
+            for v in 0..=n {
+                let logical = map.logical_positions(v);
+                assert!(!logical.is_empty() && logical.len() <= 2, "{text:?} {v}");
+                for l in logical {
+                    assert!(l <= m, "{text:?} {v} -> {l}");
+                    assert!(map.screen_positions(l).contains(&v), "{text:?}: screen {v} -> logical {l} -> {:?}", map.screen_positions(l));
+                }
+            }
+            for l in 0..=m {
+                let screen = map.screen_positions(l);
+                assert!(!screen.is_empty() && screen.len() <= 2, "{text:?} {l}");
+                assert!(screen.iter().all(|&v| v <= n), "{text:?} {l} -> {screen:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn screen_maps_survive_odd_and_long_input() {
+        let long = "\u{627} \u{628}1 ".repeat(20_000);
+        for text in [long.as_str(), "\u{64B}", "\u{64B}\u{64C} \u{301}", "\u{202E}", "\u{200F}", "\n\n", "\u{10FFFF}\u{627}\u{E000}"] {
+            let map = screen_map(text);
+            assert!(map.screen_len() <= map.logical_len(), "{:?}", text.chars().take(8).collect::<String>());
+            assert_eq!(map.shaper, visual(text));
+            let end = map.logical_len();
+            assert!(!map.screen_positions(end).is_empty() && !map.logical_positions(map.screen_len()).is_empty());
+            assert!(map.logical_of_screen(0..usize::MAX).len() == map.screen_len());
+            let _ = (map.screen_positions(usize::MAX), map.logical_positions(usize::MAX));
+        }
+        // Direction controls are not drawn, so a text with them has fewer characters on screen;
+        // without right-to-left script nothing is reordered or dropped.
+        let wrapped = screen_map("\u{202B}\u{627}\u{202C}");
+        assert_eq!((wrapped.screen_len(), wrapped.logical_len()), (1, 3));
+        assert_eq!((wrapped.shown.clone(), wrapped.to_screen.clone()), (vec![1], vec![None, Some(0), None]));
+        // Both ends of the text are at the one drawn character's edges: the right edge of an
+        // Arabic letter is where it begins.
+        assert_eq!(wrapped.screen_positions(0), [1]);
+        assert_eq!(wrapped.screen_positions(3), [0]);
+        let plain = screen_map("\u{202B}\u{202C}");
+        assert_eq!((plain.screen_len(), plain.logical_len()), (2, 2));
+    }
+
+    /// With an Arabic face the glyphs of the galley egui builds from the shaper text come in
+    /// screen order, left to right: the glyphs that have a width are the characters of `drawn`,
+    /// and x never decreases. (egui adds more zero-width glyphs after every right-to-left run, so
+    /// their number is not `N`; the text field aligns them, see `widgets::bidi_edit`.)
+    #[test]
+    fn egui_galleys_are_in_screen_order() {
+        let Some(fonts) = arabic_test_fonts() else { return };
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts);
+        // Without lam-alef ligatures, which draw two characters as one glyph.
+        let texts = [
+            "ab\u{643}\u{62A}\u{627}\u{628}",
+            "\u{648}\u{627}\u{62D}\u{62F} \u{627}\u{62B}\u{646}\u{64A}\u{646}",
+            "x \u{633}\u{645}\u{627}\u{645} 12 y",
+            "\u{633}\u{627}\u{644} \u{6F1}\u{6F4}\u{6F0}\u{6F2} \u{634}\u{645}\u{633}\u{6CC}",
+        ];
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for text in texts {
+                let map = screen_map(text);
+                let galley = ui.painter().layout_no_wrap(map.shaper.clone(), egui::FontId::proportional(14.0), egui::Color32::WHITE);
+                assert_eq!(galley.rows.len(), 1, "{text:?}");
+                let glyphs = &galley.rows[0].glyphs;
+                assert!(glyphs.len() >= map.screen_len(), "{text:?}");
+                let wide: Vec<&_> = glyphs.iter().filter(|g| g.advance_width > 0.0).collect();
+                let chars: Vec<char> = wide.iter().map(|g| g.chr).collect();
+                assert_eq!(chars, map.drawn, "{text:?}: glyphs with a width, left to right");
+                for pair in wide.windows(2) {
+                    assert!(pair[1].pos.x >= pair[0].pos.x - 0.01, "{text:?}: x runs backwards: {} then {}", pair[0].pos.x, pair[1].pos.x);
+                }
+            }
+        });
+        output.drop_without_applying_deltas();
     }
 }

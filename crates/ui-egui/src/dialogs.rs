@@ -1750,7 +1750,7 @@ fn password_modal(
         ui.add_space(6.0);
         widgets::body_text(ui, message);
         ui.add_space(8.0);
-        let r = ui.add(widgets::line(input).password(true).hint_text(tl!("Password")).desired_width(f32::INFINITY));
+        let r = ui.add(widgets::plain_line(input).password(true).hint_text(tl!("Password")).desired_width(f32::INFINITY));
         // Enter submits. The field keeps focus (we request it every frame), so check the key
         // while it is focused as well as on the frame focus is lost.
         if (r.has_focus() || r.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {

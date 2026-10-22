@@ -993,7 +993,8 @@ fn unlock_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 crate::widgets::begin_dialog(ui);
-                let field = ui.add(crate::widgets::line(&mut prompt.input.0).password(!prompt.show).hint_text(tl!("Password")).desired_width(290.0));
+                let field =
+                    ui.add(crate::widgets::plain_line(&mut prompt.input.0).password(!prompt.show).hint_text(tl!("Password")).desired_width(290.0));
                 if !prompt.focused {
                     field.request_focus();
                     prompt.focused = true;

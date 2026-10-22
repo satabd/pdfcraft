@@ -162,6 +162,27 @@ fn dragging_over_another_fields_text_focuses_it_and_selects_from_the_press() {
 }
 
 #[test]
+fn arabic_typed_into_a_form_field_is_committed_in_typing_order() {
+    let mut h = harness();
+    click_field(&mut h, "name", 0);
+    let id = {
+        let s = h.state();
+        egui::Id::new(("form-field", s.views[0].id.0, "name", 0usize))
+    };
+    for typed in ["Ada ", "\u{639}", "\u{644}", "\u{64A}"] {
+        h.event(egui::Event::Text(typed.into()));
+        h.run_steps(2);
+    }
+    // The editor's cursor counts the letters as they are drawn: "Ada " then the word reversed,
+    // so the next letter appears right after the space.
+    let range = egui::TextEdit::load_state(&h.ctx, id).and_then(|s| s.cursor.char_range()).expect("a cursor in the field");
+    assert_eq!(range.primary.index.0, "Ada ".chars().count(), "{range:?}");
+    h.key_press(egui::Key::Tab);
+    h.run_steps(4);
+    assert_eq!(value(&h, "name"), ["Ada \u{639}\u{644}\u{64A}"], "the value is committed in typing order");
+}
+
+#[test]
 fn date_fields_offer_a_calendar() {
     use egui_kittest::kittest::Queryable;
     let mut h = harness();

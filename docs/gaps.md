@@ -303,9 +303,13 @@ update the numbers.
 - **Done (2026-10-22, later):** every caption-and-field dialog form is a `widgets::form_grid`, every menu and
   context menu has its label at the start and its shortcut at the end, dialog titles and tab strips start at
   the right, and truncated tool rows and the search box cut in logical order.
+- **Done (2026-10-22, typing):** single-line text fields edit right-to-left script in display order
+  (`widgets::BidiEdit` over `bidi::ScreenMap`: the `widgets::line` fields, the palette, the bookmark search, Find and the
+  on-page form editor): caret, click, drag selection, Left/Right, Backspace/Delete, copy, undo and input methods
+  work on what is drawn and what is stored stays in typing order.
 - **Missing:** the rest of the right-to-left layout (the side a submenu opens on, scrollbars, the dock's
   tab bars, the data tables that stay `egui::Grid`s, the Comments, Signatures and Compare panel bodies, the
-  order of document tabs, the canvas), bidirectional text in the text layout itself (text being typed); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+  order of document tabs, the canvas), bidirectional text in multi-line fields (wrapping) and in the Add text and Edit text boxes; catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
   Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
   like other non-English languages (no translated help; engine/OS details stay English).

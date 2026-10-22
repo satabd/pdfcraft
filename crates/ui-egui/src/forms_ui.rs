@@ -504,7 +504,8 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
                 let font = (field_text_size(ui.painter(), f, w, &fx.text) * zoom).clamp(3.0, 64.0);
                 // The field is pale yellow in every theme, so the caret must not follow the theme (pale in dark mode) (#655).
                 ui.visuals_mut().text_cursor.stroke.color = crate::edit_text_ui::caret_color_on(FIELD_FILL);
-                let mut te = if multiline { egui::TextEdit::multiline(&mut fx.text) } else { egui::TextEdit::singleline(&mut fx.text) };
+                let mut te =
+                    if multiline { crate::widgets::BidiEdit::multiline(&mut fx.text) } else { crate::widgets::BidiEdit::singleline(&mut fx.text) };
                 te = te
                     // Wraps (inside the 3 px side margins) at the width the size was fitted to:
                     // the box less 3 pt each side, scaled.

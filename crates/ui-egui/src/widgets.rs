@@ -5,7 +5,9 @@ use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, Response, Sense, 
 use crate::theme::{self, Tokens};
 use crate::{PdfCraftApp, icons, rtl};
 
+mod bidi_edit;
 mod form;
+pub use bidi_edit::BidiEdit;
 pub use form::{FormRows, form_grid, start_block};
 
 /// Horizontal and vertical inset of a single-line field.
@@ -81,14 +83,30 @@ pub(crate) fn field_align(text: &str) -> egui::Align {
     }
 }
 
-/// A single-line field tall enough to read and to click.
-pub fn line(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+/// A single-line field tall enough to read and to click. Right-to-left script in it is shown and
+/// edited in display order ([`BidiEdit`]); text without any, and a [`BidiEdit::password`], make it
+/// a plain `egui::TextEdit`.
+pub fn line(text: &mut String) -> BidiEdit<'_> {
+    let align = field_align(text.as_str());
+    BidiEdit::singleline(text).margin(FIELD_MARGIN).min_size(vec2(0.0, FIELD_MIN_HEIGHT)).horizontal_align(align)
+}
+
+/// A multiline field with the same horizontal inset as [`line`]. egui wraps its lines in logical
+/// order, so right-to-left text in it is aligned against the right edge but not reordered.
+pub fn block(text: &mut String) -> BidiEdit<'_> {
+    let align = field_align(text.as_str());
+    BidiEdit::multiline(text).margin(egui::Margin::symmetric(10, 6)).horizontal_align(align)
+}
+
+/// [`line`] as a plain `egui::TextEdit` on any buffer, for what is typed as it is stored: passwords.
+pub fn plain_line(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
     let align = field_align(text.as_str());
     egui::TextEdit::singleline(text).margin(FIELD_MARGIN).min_size(vec2(0.0, FIELD_MIN_HEIGHT)).horizontal_align(align)
 }
 
-/// A multiline field with the same horizontal inset as [`line`].
-pub fn block(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+/// [`block`] as a plain `egui::TextEdit`, for code (`code_editor()`): a script is typed and shown
+/// in the order it is written.
+pub fn plain_block(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
     let align = field_align(text.as_str());
     egui::TextEdit::multiline(text).margin(egui::Margin::symmetric(10, 6)).horizontal_align(align)
 }

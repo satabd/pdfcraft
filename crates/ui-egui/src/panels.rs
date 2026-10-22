@@ -637,7 +637,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         let width = ui.available_width() - CLEAR - ui.spacing().item_spacing.x;
                         let align = widgets::field_align(&bookmark_query);
                         let response = ui
-                            .add(egui::TextEdit::singleline(&mut bookmark_query).desired_width(width).horizontal_align(align))
+                            .add(widgets::BidiEdit::singleline(&mut bookmark_query).desired_width(width).horizontal_align(align))
                             .labelled_by(label.id);
                         response.widget_info(|| {
                             let mut info = egui::WidgetInfo::text_edit(ui.is_enabled(), &previous, &bookmark_query, "");
