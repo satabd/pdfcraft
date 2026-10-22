@@ -45,12 +45,15 @@ fn pixels(bytes: Arc<Vec<u8>>) -> Vec<u8> {
     assert!(p.warnings.is_empty(), "{:?}", p.warnings);
     p.rgba.to_vec()
 }
-fn exercise(font: Vec<u8>, text: &str, expected_family: &str) {
+/// `expected_family` is the base font every edited line must carry; `None` takes the face name the
+/// editor registers the font under (for a face named by `PDFCRAFT_TEST_ARABIC_FONT`, whatever it is).
+fn exercise(font: Vec<u8>, text: &str, expected_family: Option<&str>) {
     let mut s = Session::new();
     let id = s.open("source.pdf", None, document(), None).unwrap();
     let original = pixels(s.get(id).unwrap().display.clone());
     s.apply(id, Edit::RegisterTextFont { page: 0, bytes: Arc::new(font.clone()) }).unwrap();
-    let resource = s.get(id).unwrap().text_editor_fonts(0).into_iter().find(|f| f.bytes == font).unwrap().resource;
+    let registered = s.get(id).unwrap().text_editor_fonts(0).into_iter().find(|f| f.bytes == font).unwrap();
+    let (resource, expected_family) = (registered.resource, expected_family.unwrap_or(registered.face.as_str()).to_owned());
     let style = BlockStyle { resource: Some(resource), width: Some(240.0), ..Default::default() };
     s.apply(id, Edit::EditTextBlock { page: 0, block: 0, text: text.into(), style: style.clone() }).unwrap();
     let edited = s.get(id).unwrap();
@@ -80,12 +83,13 @@ fn exercise(font: Vec<u8>, text: &str, expected_family: &str) {
 }
 #[test]
 fn opentype_cff_document_font_preserves_program_codes_and_rendering_after_reopen() {
-    exercise(support::font_fixture::cff_font(), "A A", "RectFont-Regular");
+    exercise(support::font_fixture::cff_font(), "A A", Some("RectFont-Regular"));
 }
 #[test]
 fn contextual_arabic_marks_ligatures_and_mixed_bidi_keep_logical_text_after_reopen() {
     if let Some(path) = std::env::var_os("PDFCRAFT_TEST_ARABIC_FONT") {
-        exercise(std::fs::read(path).unwrap(), "سَلَام 123", "NotoSansArabic-Regular");
+        // Any complete static face that draws Arabic (CI points this at DejaVu Sans).
+        exercise(std::fs::read(path).unwrap(), "سَلَام 123", None);
         return;
     }
     let Some(font) = pdfcraft_fonts::document_arabic_font() else {
@@ -96,5 +100,5 @@ fn contextual_arabic_marks_ligatures_and_mixed_bidi_keep_logical_text_after_reop
         eprintln!("set PDFCRAFT_TEST_ARABIC_FONT to an openly licensed static Noto Sans Arabic face");
         return;
     }
-    exercise(font.bytes.to_vec(), "سَلَام 123", "NotoSansArabic-Regular");
+    exercise(font.bytes.to_vec(), "سَلَام 123", Some("NotoSansArabic-Regular"));
 }
