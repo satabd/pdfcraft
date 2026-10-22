@@ -448,7 +448,6 @@ impl ScreenMap {
     /// logical order (see `push_for_shaper`); this does the same to the logical indices, so
     /// character `i` of the shaper text is character `shaper_source()[i]` of the stored text,
     /// except that a bracket drawn mirrored in a right-to-left run is the mirror of its source.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor styles the shaper text by the stored text's characters"))]
     pub fn shaper_source(&self) -> Vec<usize> {
         // The shaper text is built from the drawn characters and nothing else, so one entry for
         // each of them, permuted the way `push_for_shaper` permutes the characters.
@@ -757,6 +756,13 @@ fn is_rtl_script(c: char) -> bool {
 /// run is shaped right to left, with the glyph accounting that goes with it.
 pub(crate) fn is_shaped_rtl(c: char) -> bool {
     is_rtl_script(c) || is_joiner(c)
+}
+
+/// Whether `c` belongs to a script whose letters join their neighbours (Arabic and the scripts written
+/// like it), so that a font must shape a stretch of them as one: Hebrew, whose letters stand alone, does
+/// not. Includes the joiners inside a word.
+pub(crate) fn is_joining_script(c: char) -> bool {
+    matches!(u32::from(c), 0x0600..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFC) || is_joiner(c)
 }
 
 /// The zero-width (non-)joiners inside a word (Persian `می‌روم`): egui shapes them with the

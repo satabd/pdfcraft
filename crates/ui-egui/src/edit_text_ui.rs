@@ -11,7 +11,9 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Stroke};
 use pdfcraft_engine::{Edit, ObjectKind, ObjectTarget};
 use pdfcraft_render::DocInfo;
 
+use crate::bidi::{self, ScreenMap};
 use crate::canvas::{DocView, PageXform};
+use crate::widgets::{self, LayoutCtx, RowSlot};
 
 const ACCENT: Color32 = Color32::from_rgb(0x14, 0x73, 0xE6);
 
@@ -1151,71 +1153,161 @@ pub(crate) fn install_source_fonts(ctx: &egui::Context, doc: &pdfcraft_engine::D
     }
     families
 }
+/// The look source line `line` is drawn in, with the Format text panel's changes applied.
+fn line_look(ed: &LineEditor, line: &pdfcraft_engine::TextLine) -> pdfcraft_engine::AddedText {
+    let mut look = source_look(&line.base_font, line.size, line.color, line.bold, line.italic);
+    look.size = line.size;
+    if ed.look.family != ed.look0.family {
+        look.family = ed.look.family;
+    }
+    if ed.look.bold != ed.look0.bold {
+        look.bold = ed.look.bold;
+    }
+    if ed.look.italic != ed.look0.italic {
+        look.italic = ed.look.italic;
+    }
+    if ed.look.color != ed.look0.color {
+        look.color = ed.look.color;
+    }
+    if ed.look.size != ed.look0.size {
+        look.size = ed.look.size;
+    }
+    look
+}
 
-fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    // An unchanged PDF row already has an authoritative line break. Do not rewrap it
-    // because font rounding or a fallback face measures a fraction of a pixel wider.
-    job.wrap.max_width = if text == ed.original && ed.look == ed.look0 && ed.extras == ed.extras0 { f32::INFINITY } else { width };
-    if let Some((block, lines)) = &ed.source {
-        let lefts: Vec<_> = block.rows.iter().filter_map(|r| r.first().and_then(|i| lines.get(*i)).map(|l| l.rect[0])).collect();
-        let left_span = lefts.iter().copied().fold(f64::NEG_INFINITY, f64::max) - lefts.iter().copied().fold(f64::INFINITY, f64::min);
-        let centered = block.rows.len() > 1
-            && left_span > block.size * 0.5
-            && block.rows.iter().all(|row| {
-                let rect = row
-                    .iter()
-                    .filter_map(|i| lines.get(*i))
-                    .map(|l| l.rect)
-                    .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]);
-                rect.is_some_and(|r| ((r[0] + r[2] - block.rect[0] - block.rect[2]) / 2.0).abs() < block.size)
-            });
-        if centered {
-            job.halign = egui::Align::Center;
+/// The two ways a source line is drawn in the editor: for ordinary text, and for the letters of a script
+/// that joins (Arabic), which the page writes in a face of its own, with no letter spacing.
+struct LineFormats {
+    plain: egui::TextFormat,
+    joined: egui::TextFormat,
+}
+
+/// The formats of source line `line`. `rtl_script`: the draft holds right-to-left script, which the page writes
+/// in a face of its own and without the letter spacing that stretches the interface face to the width of the
+/// line it replaces.
+fn line_formats(ctx: &egui::Context, ed: &LineEditor, line: &pdfcraft_engine::TextLine, scale: f32, rtl_script: bool) -> LineFormats {
+    let look = line_look(ed, line);
+    let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
+    // Joined letters are drawn by the interface's Arabic face (the one the page's shaper uses): a source
+    // subset may carry the letters' codes without the shaping that joins them.
+    let joined_font = font.clone();
+    let original_face = ed.look.family == ed.look0.family && ed.look.bold == ed.look0.bold && ed.look.italic == ed.look0.italic;
+    let embedded = original_face && ed.fonts.contains_key(&line.font);
+    if embedded && let Some(name) = ed.fonts.get(&line.font) {
+        font.family = FontFamily::Name(name.clone().into());
+    }
+    let spacing = if rtl_script {
+        0.0
+    } else {
+        let native_width = ctx.fonts_mut(|f| f.layout_no_wrap(line.text.clone(), font.clone(), Color32::BLACK).size().x);
+        let target_width = ((line.rect[2] - line.rect[0]) * look.size / line.size.max(0.01)) as f32 * scale;
+        let fit = if original_face { (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32 } else { 0.0 };
+        fit + ed.extras.char_spacing as f32 * scale
+    };
+    LineFormats {
+        plain: egui::TextFormat {
+            font_id: font,
+            extra_letter_spacing: spacing,
+            color: color32(look.color),
+            italics: look.italic && !embedded,
+            ..Default::default()
+        },
+        joined: egui::TextFormat { font_id: joined_font, color: color32(look.color), ..Default::default() },
+    }
+}
+
+/// The source line whose look each character of the shaper text of `map` takes (see [`style_runs`]).
+///
+/// Every character of the stored `text` has the look of one source line (`spans`, from
+/// [`pdfcraft_engine::TextBlock::edited_spans`]); the shaper text has them in another order, so each of its
+/// characters takes the look of the stored character it was drawn from (`ScreenMap::shaper_source`). The line
+/// break a wrapped text makes belongs to no character and takes the look of the one before it (the first one
+/// of the text, of the one after). A look never changes inside a stretch of right-to-left script, which the
+/// text engine shapes as a whole: the stretch takes the look of its first letter.
+fn shaper_styles(spans: &[(std::ops::Range<usize>, usize)], text: &str, map: &ScreenMap) -> Vec<usize> {
+    let fallback = spans.first().map_or(0, |(_, line)| *line);
+    let mut stored: Vec<usize> = Vec::with_capacity(map.logical_len());
+    for (range, line) in spans {
+        let count = text.get(range.clone()).map_or(0, |piece| piece.chars().count());
+        stored.extend(std::iter::repeat_n(*line, count));
+    }
+    let mut styles: Vec<Option<usize>> = map
+        .shaper_source()
+        .into_iter()
+        .map(|at| if at == bidi::VIRTUAL { None } else { Some(stored.get(at).copied().unwrap_or(fallback)) })
+        .collect();
+    // A look never changes inside a stretch of right-to-left script: its letters take their first one's.
+    let mut previous: Option<(char, usize)> = None;
+    for (c, style) in map.shaper.chars().zip(styles.iter_mut()) {
+        if let (Some(line), Some((before, first))) = (style.as_mut(), previous)
+            && bidi::is_shaped_rtl(before)
+            && bidi::is_shaped_rtl(c)
+        {
+            *line = first;
         }
-        for (range, index) in block.edited_spans(text) {
-            let Some(line) = lines.get(index) else { continue };
-            let mut look = source_look(&line.base_font, line.size, line.color, line.bold, line.italic);
-            look.size = line.size;
-            if ed.look.family != ed.look0.family {
-                look.family = ed.look.family;
-            }
-            if ed.look.bold != ed.look0.bold {
-                look.bold = ed.look.bold;
-            }
-            if ed.look.italic != ed.look0.italic {
-                look.italic = ed.look.italic;
-            }
-            if ed.look.color != ed.look0.color {
-                look.color = ed.look.color;
-            }
-            if ed.look.size != ed.look0.size {
-                look.size = ed.look.size;
-            }
-            let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
-            let original_face = ed.look.family == ed.look0.family && ed.look.bold == ed.look0.bold && ed.look.italic == ed.look0.italic;
-            let embedded = original_face && ed.fonts.contains_key(&line.font);
-            if embedded && let Some(name) = ed.fonts.get(&line.font) {
-                font.family = FontFamily::Name(name.clone().into());
-            }
-            let native_width = ui.fonts_mut(|f| f.layout_no_wrap(line.text.clone(), font.clone(), Color32::BLACK).size().x);
-            let target_width = ((line.rect[2] - line.rect[0]) * look.size / line.size.max(0.01)) as f32 * scale;
-            let spacing = if original_face { (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32 } else { 0.0 };
-            job.append(
-                text.get(range).unwrap_or_default(),
-                0.0,
-                egui::TextFormat {
-                    font_id: font,
-                    extra_letter_spacing: spacing + ed.extras.char_spacing as f32 * scale,
-                    color: color32(look.color),
-                    italics: look.italic && !embedded,
-                    ..Default::default()
-                },
-            );
+        previous = style.map(|line| (c, line));
+    }
+    // A break takes the look of the character before it.
+    let mut before = None;
+    for style in &mut styles {
+        match *style {
+            Some(line) => before = Some(line),
+            None => *style = before,
+        }
+    }
+    // A break at the very start takes that of the character after it.
+    let mut after = None;
+    for style in styles.iter_mut().rev() {
+        match *style {
+            Some(line) => after = Some(line),
+            None => *style = after,
+        }
+    }
+    styles.into_iter().map(|line| line.unwrap_or(fallback)).collect()
+}
+
+/// The shaper text of `map` cut into runs of one look: `(source line, joins, text)`. The letters of a script
+/// that joins are a run of their own, as they are drawn in another face than the characters around them.
+fn style_runs(spans: &[(std::ops::Range<usize>, usize)], text: &str, map: &ScreenMap) -> Vec<(usize, bool, String)> {
+    let mut runs: Vec<(usize, bool, String)> = Vec::new();
+    for (c, line) in map.shaper.chars().zip(shaper_styles(spans, text, map)) {
+        let joins = bidi::is_joining_script(c);
+        match runs.last_mut() {
+            Some((last, was, run)) if *last == line && *was == joins => run.push(c),
+            _ => runs.push((line, joins, c.to_string())),
+        }
+    }
+    runs
+}
+
+/// Whether nothing in the editor differs from the paragraph as the page has it, `text` being the draft.
+fn is_pristine(ed: &LineEditor, text: &str) -> bool {
+    text == ed.original && ed.look == ed.look0 && ed.extras == ed.extras0
+}
+
+/// The job that lays out `map`, the draft `text` as it is put on screen, in the looks of the page's text.
+/// `wrap` is where egui breaks a line; a text the field has already broken into lines is given `INFINITY`.
+fn editor_job(ctx: &egui::Context, ed: &LineEditor, text: &str, map: &ScreenMap, scale: f32, wrap: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap;
+    if let Some((block, lines)) = &ed.source {
+        let rtl_script = text.chars().any(bidi::is_shaped_rtl);
+        let mut formats: BTreeMap<usize, LineFormats> = BTreeMap::new();
+        for (index, joins, run) in style_runs(&block.edited_spans(text), text, map) {
+            let Some(line) = lines.get(index) else {
+                job.append(
+                    &run,
+                    0.0,
+                    egui::TextFormat { font_id: editor_font(&ed.look, ed.size), color: color32(ed.look.color), ..Default::default() },
+                );
+                continue;
+            };
+            let format = formats.entry(index).or_insert_with(|| line_formats(ctx, ed, line, scale, rtl_script));
+            job.append(&run, 0.0, if joins { format.joined.clone() } else { format.plain.clone() });
         }
     } else {
         job.append(
-            text,
+            &map.shaper,
             0.0,
             egui::TextFormat {
                 font_id: editor_font(&ed.look, ed.size),
@@ -1228,67 +1320,171 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
     job
 }
 
-/// Align the editable galley's baselines to the source rows instead of egui's interface
-/// leading. Glyphs, meshes, caret and selection receive the same transform.
-fn editor_galley(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32) -> Arc<egui::Galley> {
-    let mut job = editor_job(ui, ed, text, scale, width);
-    let centered = job.halign == egui::Align::Center;
-    job.halign = egui::Align::LEFT;
-    let mut galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-    let Some((block, lines)) = &ed.source else { return galley };
-    let sources: Vec<_> = block
-        .rows
-        .iter()
-        .filter_map(|row| {
-            let first = row.first().and_then(|i| lines.get(*i))?;
+/// Whether the rows of the block are centred on its middle (a centred title or paragraph).
+fn is_centered(block: &pdfcraft_engine::TextBlock, lines: &[pdfcraft_engine::TextLine]) -> bool {
+    let lefts: Vec<_> = block.rows.iter().filter_map(|r| r.first().and_then(|i| lines.get(*i)).map(|l| l.rect[0])).collect();
+    let left_span = lefts.iter().copied().fold(f64::NEG_INFINITY, f64::max) - lefts.iter().copied().fold(f64::INFINITY, f64::min);
+    block.rows.len() > 1
+        && left_span > block.size * 0.5
+        && block.rows.iter().all(|row| {
             let rect = row
                 .iter()
                 .filter_map(|i| lines.get(*i))
                 .map(|l| l.rect)
-                .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])?;
-            Some((first.baseline()[1], rect))
+                .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]);
+            rect.is_some_and(|r| ((r[0] + r[2] - block.rect[0] - block.rect[2]) / 2.0).abs() < block.size)
         })
-        .collect();
-    let Some((first_baseline, first_rect)) = sources.first().copied() else { return galley };
-    let leading = if ed.extras.line_spacing > 0.0 {
-        ed.extras.line_spacing * ed.look.size
-    } else {
-        let fallback = if block.lines.len() == 1 && !text.contains('\n') {
-            block.lines.first().and_then(|i| lines.get(*i)).map_or(block.size * 1.2, |line| line.wrap_leading())
+}
+
+/// Where the rows of the paragraph are on the page: each source row's baseline and box, and the leading
+/// that places the rows the draft adds below them.
+struct RowGeometry {
+    sources: Vec<(f64, [f64; 4])>,
+    leading: f64,
+}
+
+/// What a row of the editor is placed by.
+struct RowSource {
+    /// The baseline the row sits on.
+    baseline: f64,
+    /// The box of the source row it stands for (the last one's for a row the draft adds).
+    rect: [f64; 4],
+    /// The baseline the row's height above and below it is measured from.
+    extent: f64,
+}
+
+impl RowGeometry {
+    /// `None` when the paragraph has no row.
+    fn new(ed: &LineEditor, block: &pdfcraft_engine::TextBlock, lines: &[pdfcraft_engine::TextLine], text: &str) -> Option<Self> {
+        let sources: Vec<_> = block
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let first = row.first().and_then(|i| lines.get(*i))?;
+                let rect = row
+                    .iter()
+                    .filter_map(|i| lines.get(*i))
+                    .map(|l| l.rect)
+                    .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])?;
+                Some((first.baseline()[1], rect))
+            })
+            .collect();
+        sources.first()?;
+        let leading = if ed.extras.line_spacing > 0.0 {
+            ed.extras.line_spacing * ed.look.size
         } else {
-            block.size * 1.5
+            let fallback = if block.lines.len() == 1 && !text.contains('\n') {
+                block.lines.first().and_then(|i| lines.get(*i)).map_or(block.size * 1.2, |line| line.wrap_leading())
+            } else {
+                block.size * 1.5
+            };
+            sources.windows(2).map(|r| (r[0].0 - r[1].0).abs()).rfind(|v| *v > 0.0).unwrap_or(fallback)
         };
-        sources.windows(2).map(|r| (r[0].0 - r[1].0).abs()).rfind(|v| *v > 0.0).unwrap_or(fallback)
+        Some(Self { sources, leading })
+    }
+
+    fn at(&self, index: usize) -> RowSource {
+        let (last_baseline, last_rect) = self.sources.last().copied().unwrap_or_default();
+        match self.sources.get(index) {
+            Some(&(baseline, rect)) => RowSource { baseline, rect, extent: baseline },
+            None => RowSource {
+                baseline: last_baseline - index.saturating_add(1).saturating_sub(self.sources.len()) as f64 * self.leading,
+                rect: last_rect,
+                extent: last_baseline,
+            },
+        }
+    }
+}
+
+/// Moves the vertices of `row` that belong to each glyph down by that glyph's `dy`: a glyph owns the
+/// vertices from its first up to the first of the next glyph that has any (a glyph the face draws in two
+/// pieces, or with marks, owns more than one quad; a space, none).
+fn shift_glyph_vertices(row: &mut egui::epaint::text::Row, dy: &[f32]) {
+    let end = row.visuals.glyph_vertex_range.end.min(row.visuals.mesh.vertices.len());
+    let mut current: Option<(usize, f32)> = None;
+    let shift = |vertices: &mut [egui::epaint::Vertex], from: usize, to: usize, by: f32| {
+        if by != 0.0
+            && let Some(owned) = vertices.get_mut(from..to)
+        {
+            for vertex in owned {
+                vertex.pos.y += by;
+            }
+        }
     };
+    for (glyph, by) in row.glyphs.iter().zip(dy) {
+        let at = (glyph.first_vertex as usize).min(end);
+        if let Some((from, was)) = current {
+            shift(&mut row.visuals.mesh.vertices, from, at, was);
+        }
+        current = Some((at, *by));
+    }
+    if let Some((from, was)) = current {
+        shift(&mut row.visuals.mesh.vertices, from, end, was);
+    }
+}
+
+/// The galley of the draft `ctx.text`, shown as `map` says, in the looks of the page's text, with every row
+/// on its source row's baseline instead of at egui's interface leading, glyphs, meshes, caret and
+/// selection receiving the same transform. A row that reads right to left ends where the page will
+/// write it: at the right edge of the source row while nothing has changed, at the right edge of the box
+/// (or where the alignment asked for in the Format text panel puts it) after.
+fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &ScreenMap, scale: f32) -> Arc<egui::Galley> {
+    let text = ctx.text;
+    // The field has broken the lines already; an unchanged PDF row has an authoritative line break of its own
+    // and is not wrapped again because font rounding measures a fraction of a pixel wider.
+    let wrap = if ctx.prewrapped || is_pristine(ed, text) { f32::INFINITY } else { ctx.wrap_width.unwrap_or(f32::INFINITY) };
+    let mut job = editor_job(ui.ctx(), ed, text, map, scale, wrap);
+    // The rows of lines the field wrapped keep the spaces at their ends, as the field's own layout does.
+    job.keep_trailing_whitespace = ctx.prewrapped;
+    let mut galley = ctx.lay_out(ui, map, job);
+    let Some((block, lines)) = &ed.source else { return ctx.place_rows(ui, galley, map) };
+    let Some(geometry) = RowGeometry::new(ed, block, lines, text) else { return ctx.place_rows(ui, galley, map) };
+    let width = ctx.wrap_width.unwrap_or_else(|| galley.rect.width());
+    let centered = is_centered(block, lines);
+    if map.row_rtl.iter().any(|rtl| *rtl) {
+        let pristine = is_pristine(ed, text);
+        let align = (ed.look.align != ed.look0.align).then_some(ed.look.align);
+        galley = ctx.place_rows_with(ui, galley, map, |slot: RowSlot| {
+            if !slot.rtl {
+                return None;
+            }
+            let flush = slot.field_width - slot.width;
+            Some(match (pristine, align) {
+                // As the page has it: against the right edge of the source row.
+                (true, _) => (((geometry.at(slot.index).rect[2] - block.rect[0]) as f32 * scale) - slot.width).min(flush),
+                (false, Some(pdfcraft_engine::TextAlign::Left)) => 0.0,
+                (false, Some(pdfcraft_engine::TextAlign::Center)) => flush / 2.0,
+                // Right-to-left text is right-aligned unless an alignment is asked for (and a justified
+                // row, which a screen cannot stretch, is flush against the edge it starts from).
+                (false, _) => flush,
+            })
+        });
+    }
+    let changed_size = ed.look.size != ed.look0.size;
+    let ratio = if changed_size { ed.look.size / ed.look0.size.max(0.01) } else { 1.0 };
     let g = Arc::make_mut(&mut galley);
     let mut bounds = Rect::NOTHING;
     let mut meshes = Rect::NOTHING;
     for (index, placed) in g.rows.iter_mut().enumerate() {
-        let (last_baseline, last_rect) = sources.last().copied().unwrap_or((first_baseline, first_rect));
-        let (baseline, source_rect) = sources
-            .get(index)
-            .copied()
-            .unwrap_or((last_baseline - index.saturating_add(1).saturating_sub(sources.len()) as f64 * leading, last_rect));
-        let changed_size = ed.look.size != ed.look0.size;
-        let ratio = if changed_size { ed.look.size / ed.look0.size.max(0.01) } else { 1.0 };
-        let ascent = (source_rect[3] - sources.get(index).map_or(last_baseline, |s| s.0)) as f32 * scale * ratio as f32;
-        let descent = (sources.get(index).map_or(last_baseline, |s| s.0) - source_rect[1]) as f32 * scale * ratio as f32;
-        let base_y = (block.rect[3] - baseline) as f32 * scale;
+        let source = geometry.at(index);
+        let ascent = (source.rect[3] - source.extent) as f32 * scale * ratio as f32;
+        let descent = (source.extent - source.rect[1]) as f32 * scale * ratio as f32;
+        let base_y = (block.rect[3] - source.baseline) as f32 * scale;
+        let rtl = map.row_is_rtl(index);
         let row = Arc::make_mut(&mut placed.row);
         placed.pos.y = base_y - ascent;
-        placed.pos.x = if centered { (width - row.size.x) / 2.0 } else { (source_rect[0] - block.rect[0]) as f32 * scale };
+        if !rtl {
+            placed.pos.x = if centered { (width - row.size.x) / 2.0 } else { (source.rect[0] - block.rect[0]) as f32 * scale };
+        }
+        let mut dy = Vec::with_capacity(row.glyphs.len());
         for glyph in &mut row.glyphs {
-            let dy = ascent - glyph.pos.y;
+            dy.push(ascent - glyph.pos.y);
             glyph.pos.y = ascent;
             glyph.font_ascent = ascent;
             glyph.font_height = ascent + descent;
             glyph.line_height = ascent + descent;
-            if !glyph.uv_rect.is_nothing() {
-                for vertex in row.visuals.mesh.vertices.iter_mut().skip(glyph.first_vertex as usize).take(4) {
-                    vertex.pos.y += dy;
-                }
-            }
         }
+        shift_glyph_vertices(row, &dy);
         row.size.y = (ascent + descent).max(1.0);
         row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
         bounds = bounds.union(Rect::from_min_size(placed.pos, row.size));
@@ -1297,6 +1493,76 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: 
     g.rect = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(bounds.right().max(0.0), bounds.bottom().max(0.0)));
     g.mesh_bounds = meshes;
     galley
+}
+
+/// The map of the draft `text` as the editor lays it out in one piece (not wrapped), in the direction the
+/// page will write it.
+fn unwrapped_map(text: &str) -> ScreenMap {
+    if bidi::has_rtl(text) {
+        bidi::wrapped_screen_map(text, crate::rtl::mirrored(), Some(pdfcraft_engine::rtl_base(text)), |_| true)
+    } else {
+        ScreenMap::identity(text)
+    }
+}
+
+/// How wide the draft would be on one line.
+fn natural_width(ctx: &egui::Context, ed: &LineEditor, scale: f32) -> f32 {
+    let job = editor_job(ctx, ed, &ed.text, &unwrapped_map(&ed.text), scale, f32::INFINITY);
+    ctx.fonts_mut(|f| f.layout_job(job)).size().x
+}
+
+/// How the page will wrap a line of the draft: the width of a line in the first source row's font and size,
+/// which is how the page writes a block that reads right to left (in the first row's look).
+fn line_measure(ed: &LineEditor, scale: f32) -> Option<impl Fn(&egui::Context, &str) -> f32 + 'static> {
+    let (block, lines) = ed.source.as_ref()?;
+    let first = block.lines.first().and_then(|i| lines.get(*i))?;
+    let look = line_look(ed, first);
+    let font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
+    Some(move |ctx: &egui::Context, line: &str| {
+        ctx.fonts_mut(|f| {
+            let galley = f.layout_no_wrap(line.to_owned(), font.clone(), Color32::WHITE);
+            galley.rows.first().map_or(0.0, |row| row.glyphs.iter().map(|g| g.pos.x + g.advance_width).fold(0.0, f32::max))
+        })
+    })
+}
+
+/// The selection `chars`, a range of the draft's characters (what `BidiOutput::logical_range`
+/// says), as the byte range the Format text panel and the engine count in. `None` for a caret (or nothing).
+fn selection_bytes(text: &str, chars: std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+    let byte = |index: usize| text.char_indices().nth(index).map_or(text.len(), |(at, _)| at);
+    let range = byte(chars.start)..byte(chars.end);
+    (!range.is_empty()).then_some(range)
+}
+
+/// Where the editor breaks lines of the draft `text` in a box `width` wide: not at all while the paragraph is
+/// as it was (it already has its line breaks), at the box's width after.
+fn editor_wrap(ed: &LineEditor, text: &str, width: f32) -> f32 {
+    if is_pristine(ed, text) { f32::INFINITY } else { width }
+}
+
+/// The field the paragraph is edited in: `text` is the draft and `ed` the editor as it is before the frame's
+/// typing, `width` the box's width and `wrap` where its lines break. Right-to-left script is edited in display order (see [`widgets::BidiEdit`]) and the hook lays the
+/// text out in the looks of the page's text, in whichever order it is put on screen.
+fn text_field<'t>(text: &'t mut String, ed: LineEditor, scale: f32, width: f32, wrap: f32, font: FontId, color: Color32) -> widgets::BidiEdit<'t> {
+    // The direction the page writes the block in: the one most of its letters read in.
+    let rtl = pdfcraft_engine::rtl_base(text);
+    // Lines break where the page will break them (`wrap`), measured in the font it writes a block in.
+    let measure = line_measure(&ed, scale);
+    let field = widgets::BidiEdit::multiline(text)
+        .id(egui::Id::new("edit-text-line-input"))
+        .font(font)
+        .margin(egui::Margin::ZERO)
+        .text_color(color)
+        .frame(egui::Frame::NONE)
+        .desired_width(width)
+        .desired_rows(1)
+        .wrap_at(wrap)
+        .forced_rtl(Some(rtl))
+        .layout(move |ui, map, ctx| editor_galley(ui, &ed, ctx, map, scale));
+    match measure {
+        Some(measure) => field.measure(measure),
+        None => field,
+    }
 }
 
 /// The inline editor; returns the edit once the text is applied.
@@ -1336,89 +1602,89 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo) -
         ed.source.as_ref().and_then(|(block, lines)| block.lines.iter().filter_map(|i| lines.get(*i)).map(|l| l.size as f32).reduce(f32::min));
     let font = editor_font(&ed.look, smallest.map_or(ed.size, |s| (s * scale * 0.5).clamp(1.0, 300.0).min(ed.size)));
     let text_color = color32(ed.look.color);
+    // A line that reads right to left keeps its right edge as it grows, as the page does it.
+    let anchored_right = pdfcraft_engine::rtl_base(&ed.text);
+    // The editor opens at the source size. Once text changes, show the real draft extent: single rows grow
+    // toward the page edge (to the left for a line that reads right to left), paragraphs rewrap at their source
+    // width, and the visible frame grows/shrinks vertically with their rows. An OCR phrase (several stretched
+    // words on one scanned line) also grows rightwards.
+    let single_run = ed.source.as_ref().is_some_and(|(block, _)| block.rows.len() == 1 || block.invisible);
+    let (width, wrap) = if !ed.multiline && single_run && !ed.text.contains('\n') && ed.has_changes() {
+        let room = if anchored_right { ed.rect.right() - xf.rect.left() } else { xf.rect.right() - ed.rect.left() } - 36.0 * scale;
+        let (natural, cap) = (natural_width(ctx, ed, scale), room.max(ed.rect.width()));
+        let width = natural.max(ed.size * 0.4).min(cap);
+        // The line grows to its natural width: it breaks only where it reaches the page's margin.
+        (width, if natural <= cap { f32::INFINITY } else { width })
+    } else {
+        let width = ed.rect.width().max(1.0);
+        (width, editor_wrap(ed, &ed.text, width))
+    };
+    // (and keeps its right edge where the page's paragraph has it, whatever the width of the text)
+    let origin = Pos2::new(if anchored_right { ed.rect.right() - width } else { ed.rect.left() }, ed.rect.top());
     let mut done = None;
-    egui::Area::new(egui::Id::new("edit-text-line")).order(egui::Order::Foreground).fixed_pos(Pos2::new(ed.rect.left(), ed.rect.top())).show(
-        ctx,
-        |ui| {
-            // The editor opens at the source size. Once text changes, show the real draft
-            // extent: single rows grow toward the page edge, paragraphs rewrap at their
-            // source width, and the visible frame grows/shrinks vertically with their rows.
-            // An OCR phrase (several stretched words on one scanned line) also grows rightwards.
-            let single_run = ed.source.as_ref().is_some_and(|(block, _)| block.rows.len() == 1 || block.invisible);
-            let width = if !ed.multiline && single_run && !ed.text.contains('\n') && ed.has_changes() {
-                let job = editor_job(ui, ed, &ed.text, scale, f32::INFINITY);
-                let natural = ui.fonts_mut(|f| f.layout_job(job)).size().x;
-                natural.max(ed.size * 0.4).min((xf.rect.right() - ed.rect.left() - 36.0 * scale).max(ed.rect.width()))
-            } else {
-                ed.rect.width().max(1.0)
-            };
-            ui.set_width(width);
-            let measured = editor_galley(ui, ed, &ed.text, scale, width);
-            ed.overflow = ed.has_changes() && (measured.rect.width() > ed.rect.width() + 1.5 || measured.rect.height() > ed.rect.height() + 1.5);
-            let visible = Rect::from_min_size(ed.rect.min, measured.rect.size().max(egui::vec2(1.0, 1.0)));
-            // Unsupported source programs use an interface fallback whose glyph advances
-            // can differ from the PDF's. Keep every visible row inside the growing frame.
-            let live = draft_rect.map_or(visible, |bounds| bounds.union(visible));
-            ui.painter().rect_stroke(live.expand(2.0), CornerRadius::ZERO, Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
-            // On the frame, a press takes hold of the box (a click selects it, a drag moves it):
-            // the pointer says so there, and reads as text inside.
-            if let Some(p) = ui.input(|i| i.pointer.hover_pos())
-                && live.expand(2.0 + FRAME_REACH).contains(p)
-                && !live.expand(2.0).contains(p)
-            {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+    egui::Area::new(egui::Id::new("edit-text-line")).order(egui::Order::Foreground).fixed_pos(origin).show(ctx, |ui| {
+        ui.set_width(width);
+        // The frame is drawn here, under the cover and the text, once the text has been laid out.
+        let frame_slot = ui.painter().add(egui::Shape::Noop);
+        // White, unless the text is too pale to read on white (white text from a coloured
+        // banner, #913): then a dark box, with a caret that shows on it.
+        let fill = if background_ready { Color32::TRANSPARENT } else { editor_fill(text_color) };
+        // Until the background worker finishes, cover the entire source box, including
+        // lines the draft no longer occupies. Shrinking the text must never expose a copy.
+        if !background_ready {
+            ui.painter().rect_filled(ed.rect.expand(1.0), CornerRadius::ZERO, fill);
+        }
+        let mut painted = None;
+        let mut hovered = false;
+        egui::Frame::NONE.fill(fill).show(ui, |ui| {
+            // A textless PDF preview keeps its real page background through the transparent editor.
+            // The temporary opaque cover uses the shared caret-contrast rule.
+            ui.visuals_mut().text_cursor.stroke.color =
+                if background_ready { if luminance(text_color) < 0.5 { Color32::BLACK } else { Color32::WHITE } } else { caret_color_on(fill) };
+            let snapshot = ed.clone();
+            let edit = text_field(&mut ed.text, snapshot, scale, width, wrap, font.clone(), text_color);
+            let output = edit.show_mapped(ui);
+            if let Some(selected) = output.logical_range() {
+                ed.selection = selection_bytes(&ed.text, selected);
             }
-            // White, unless the text is too pale to read on white (white text from a coloured
-            // banner, #913): then a dark box, with a caret that shows on it.
-            let fill = if background_ready { Color32::TRANSPARENT } else { editor_fill(text_color) };
-            // Until the background worker finishes, cover the entire source box, including
-            // lines the draft no longer occupies. Shrinking the text must never expose a copy.
-            if !background_ready {
-                ui.painter().rect_filled(ed.rect.expand(1.0), CornerRadius::ZERO, fill);
+            painted = Some(Arc::clone(&output.out.galley));
+            let r = output.out.response;
+            hovered = r.hovered();
+            if r.changed() {
+                // The next pass measures the updated draft with the Apply/Save rewrite.
+                ctx.request_repaint();
             }
-            egui::Frame::NONE.fill(fill).show(ui, |ui| {
-                // A textless PDF preview keeps its real page background through the transparent editor.
-                // The temporary opaque cover uses the shared caret-contrast rule.
-                ui.visuals_mut().text_cursor.stroke.color =
-                    if background_ready { if luminance(text_color) < 0.5 { Color32::BLACK } else { Color32::WHITE } } else { caret_color_on(fill) };
-                let rows = 1;
-                let snapshot = ed.clone();
-                let mut layouter =
-                    |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| editor_galley(ui, &snapshot, text.as_str(), scale, wrap_width);
-                let output = egui::TextEdit::multiline(&mut ed.text)
-                    .id(egui::Id::new("edit-text-line-input"))
-                    .font(font.clone())
-                    .margin(egui::Margin::ZERO)
-                    .layouter(&mut layouter)
-                    .text_color(text_color)
-                    .frame(egui::Frame::NONE)
-                    .desired_width(width)
-                    .desired_rows(rows)
-                    .show(ui);
-                if let Some(cursor) = output.cursor_range {
-                    let selected = cursor.as_sorted_char_range();
-                    let byte = |index| ed.text.char_indices().nth(index).map_or(ed.text.len(), |(at, _)| at);
-                    ed.selection = (!selected.is_empty()).then(|| byte(selected.start.into())..byte(selected.end.into()));
-                }
-                let r = output.response;
-                if r.changed() {
-                    // The next pass measures the updated draft with the Apply/Save rewrite.
-                    ctx.request_repaint();
-                }
-                if ed.focus {
-                    r.request_focus();
-                    ed.focus = false;
-                }
-                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                let apply = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
-                if esc {
-                    done = Some(false);
-                } else if apply || (r.lost_focus() && !outside && !hold) {
-                    done = Some(true);
-                }
-            });
-        },
-    );
+            if ed.focus {
+                r.request_focus();
+                ed.focus = false;
+            }
+            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let apply = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+            if esc {
+                done = Some(false);
+            } else if apply || (r.lost_focus() && !outside && !hold) {
+                done = Some(true);
+            }
+        });
+        // What the draft takes up, from the galley the field drew.
+        let measured = painted.map_or(Rect::from_min_size(Pos2::ZERO, egui::vec2(1.0, 1.0)), |galley| galley.rect);
+        ed.overflow = ed.has_changes() && (measured.width() > ed.rect.width() + 1.5 || measured.height() > ed.rect.height() + 1.5);
+        let visible = Rect::from_min_size(origin, measured.size().max(egui::vec2(1.0, 1.0)));
+        // Unsupported source programs use an interface fallback whose glyph advances
+        // can differ from the PDF's. Keep every visible row inside the growing frame.
+        let live = draft_rect.map_or(visible, |bounds| bounds.union(visible));
+        ui.painter()
+            .set(frame_slot, egui::Shape::rect_stroke(live.expand(2.0), CornerRadius::ZERO, Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside));
+        // On the frame, a press takes hold of the box (a click selects it, a drag moves it):
+        // the pointer says so there, and reads as text inside.
+        if !hovered
+            && let Some(p) = ui.input(|i| i.pointer.hover_pos())
+            && live.expand(2.0 + FRAME_REACH).contains(p)
+            && !live.expand(2.0).contains(p)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+        }
+    });
     match done {
         Some(apply) => {
             let ed = view.line_editor.take()?;
@@ -1478,6 +1744,485 @@ mod tests {
             extras0: Extras::default(),
         };
         (app, ed)
+    }
+
+    /// "Hi there everyone" in red over "Yo there everyone" in blue, in Helvetica 12 pt: one paragraph of two rows.
+    fn two_style_pdf() -> Vec<u8> {
+        let body = "BT /F1 12 Tf 1 0 0 rg 20 150 Td (Hi there everyone) Tj ET\nBT /F1 12 Tf 0 0 1 rg 20 135 Td (Yo there everyone) Tj ET";
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 /MediaBox [0 0 200 300] >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> >> >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{body}\nendstream", body.len()),
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+        out
+    }
+
+    /// An editor on the two-row paragraph of [`two_style_pdf`], holding `draft`, at 3 screen points to the
+    /// page's point; `pristine`: the draft is also what the paragraph was.
+    fn styled_editor(draft: &str, pristine: bool) -> (crate::PdfCraftApp, LineEditor) {
+        let mut app = crate::PdfCraftApp::new();
+        app.open_bytes("styled.pdf", None, two_style_pdf()).unwrap();
+        let doc = app.session.get(app.views[0].id).unwrap();
+        let block = doc.text_blocks(0).remove(0);
+        let lines = doc.text_lines(0);
+        assert_eq!((block.rows.len(), block.editor_text.as_str()), (2, ORIGINAL), "the fixture is one paragraph of two rows");
+        let size = egui::vec2((block.rect[2] - block.rect[0]) as f32 * 3.0, (block.rect[3] - block.rect[1]) as f32 * 3.0);
+        let ed = LineEditor {
+            selection: None,
+            font_resource: None,
+            page: 0,
+            block: 0,
+            text: draft.to_owned(),
+            original: if pristine { draft.to_owned() } else { block.editor_text.clone() },
+            rect: Rect::from_min_size(Pos2::ZERO, size),
+            source_rect: block.rect.map(|v| v as f32),
+            multiline: true,
+            source: Some((block.clone(), lines)),
+            fonts: BTreeMap::new(),
+            overflow: false,
+            max_width: size.x,
+            size: block.size as f32,
+            focus: true,
+            look: look_of(&block),
+            look0: look_of(&block),
+            extras: Extras::default(),
+            extras0: Extras::default(),
+        };
+        (app, ed)
+    }
+
+    const SCALE: f32 = 3.0;
+    const ORIGINAL: &str = "Hi there everyone\nYo there everyone";
+
+    /// The editor's field in an egui context of its own, shown by hand.
+    struct Rig {
+        ctx: egui::Context,
+        ed: LineEditor,
+        time: f64,
+        width: f32,
+    }
+
+    impl Rig {
+        fn new(fonts: egui::FontDefinitions, pixels_per_point: f32, ed: LineEditor) -> Self {
+            let ctx = egui::Context::default();
+            ctx.set_os(egui::os::OperatingSystem::Nix);
+            ctx.set_fonts(fonts);
+            ctx.set_pixels_per_point(pixels_per_point);
+            let width = ed.rect.width();
+            let mut rig = Self { ctx, ed, time: 0.0, width };
+            // The pixel ratio and the fonts take effect from the second frame.
+            rig.frame(vec![]);
+            rig
+        }
+
+        /// A rig with the Arabic face, or `None` (the test skips).
+        fn arabic(ed: LineEditor) -> Option<Self> {
+            Some(Self::new(bidi::arabic_test_fonts()?, 1.0, ed))
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> (egui::text_edit::TextEditOutput, std::sync::Arc<ScreenMap>) {
+            self.time += 0.1;
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(3000.0, 1000.0))),
+                events,
+                time: Some(self.time),
+                ..Default::default()
+            };
+            let (width, ed) = (self.width, &mut self.ed);
+            let mut out = None;
+            let frame = self.ctx.run_ui(raw, |ui| {
+                let id = egui::Id::new("edit-text-line-input");
+                ui.memory_mut(|m| m.request_focus(id));
+                let snapshot = ed.clone();
+                let wrap = editor_wrap(&snapshot, &snapshot.text, width);
+                let field = text_field(&mut ed.text, snapshot, SCALE, width, wrap, FontId::proportional(8.0), Color32::BLACK);
+                let shown = field.show_mapped(ui);
+                if let Some(range) = shown.logical_range() {
+                    ed.selection = selection_bytes(&ed.text, range);
+                }
+                out = Some((shown.out, shown.map));
+            });
+            frame.drop_without_applying_deltas();
+            out.expect("the field is shown every frame")
+        }
+    }
+
+    const SALAM: &str = "\u{633}\u{644}\u{627}\u{645}";
+    const ALAYKUM: &str = "\u{639}\u{644}\u{64A}\u{643}\u{645}";
+
+    /// The colour of the section of `galley`'s job that holds character `i` of its text.
+    fn section_color(galley: &egui::Galley, i: usize) -> Color32 {
+        let byte = galley.job.text.char_indices().nth(i).map(|(at, _)| at).expect("a character of the text");
+        galley.job.sections.iter().find(|s| s.byte_range.start.0 <= byte && byte < s.byte_range.end.0).expect("a section holds it").format.color
+    }
+
+    /// The colour each character of the draft is drawn in: its source row's.
+    fn logical_colors(ed: &LineEditor) -> Vec<Color32> {
+        let (block, lines) = ed.source.as_ref().expect("a source");
+        let mut out = Vec::new();
+        for (range, line) in block.edited_spans(&ed.text) {
+            out.extend(std::iter::repeat_n(color32(lines[line].color), ed.text.get(range).map_or(0, |s| s.chars().count())));
+        }
+        out
+    }
+
+    /// The characters the galley draws, row by row (the line breaks are no glyphs).
+    fn drawn(galley: &egui::Galley) -> Vec<char> {
+        galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|g| g.chr)).collect()
+    }
+
+    /// `draft` (more Arabic letters than Latin ones) starts with a word in the first row's red and ends with one
+    /// in the second row's blue; every character of the display text is in the colour of the character of the
+    /// draft it was drawn from.
+    fn check_looks_follow_the_words(draft: &str, rows: usize) {
+        let (_app, ed) = styled_editor(draft, false);
+        let Some(mut rig) = Rig::arabic(ed) else { return };
+        rig.width = 2000.0;
+        let (out, map) = rig.frame(vec![]);
+        assert_eq!(map.row_rtl, vec![true; rows], "most of the letters read right to left, so every row does");
+        assert_ne!(map.shaper, draft, "the words are in display order");
+        assert_eq!(out.galley.job.text, map.shaper);
+        let (red, blue) = (color32([1.0, 0.0, 0.0]), color32([0.0, 0.0, 1.0]));
+        let colors = logical_colors(&rig.ed);
+        let word = SALAM.chars().count();
+        assert!(colors[..word].iter().all(|c| *c == red), "the first word is in the first row's colour: {colors:?}");
+        assert!(colors[colors.len() - ALAYKUM.chars().count()..].iter().all(|c| *c == blue), "the last in the second row's: {colors:?}");
+        // Every character of the display text is in the colour of the character of the draft it was drawn from.
+        for (i, source) in map.shaper_source().into_iter().enumerate() {
+            if source == bidi::VIRTUAL {
+                continue;
+            }
+            assert_eq!(section_color(&out.galley, i), colors[source], "character {i} ({:?}) of {:?}", map.shaper.chars().nth(i), map.shaper);
+        }
+        // Both Arabic words are there, one in each colour, and every character has a glyph.
+        let salam_at = map.shaper.find(SALAM).expect("the first word, joined as the shaper wants it");
+        let alaykum_at = map.shaper.find(ALAYKUM).expect("the second word");
+        let chars_before = |byte: usize| map.shaper[..byte].chars().count();
+        assert_eq!(section_color(&out.galley, chars_before(salam_at)), red);
+        assert_eq!(section_color(&out.galley, chars_before(alaykum_at)), blue);
+        assert_eq!(drawn(&out.galley), map.drawn.iter().copied().filter(|c| *c != '\n').collect::<Vec<_>>(), "a glyph for every drawn character");
+        // The sections are cut at the letters of the script that joins and at the changes of look, nowhere else.
+        let cuts: Vec<usize> = out.galley.job.sections.iter().map(|s| s.byte_range.start.0).collect();
+        for cut in cuts.into_iter().skip(1) {
+            let (before, after) =
+                (map.shaper[..cut].chars().next_back().expect("a character"), map.shaper[cut..].chars().next().expect("a character"));
+            assert!(!(bidi::is_joining_script(before) && bidi::is_joining_script(after)), "a cut inside a word between {before:?} and {after:?}");
+        }
+    }
+
+    #[test]
+    fn a_styled_arabic_word_keeps_its_own_style_after_the_words_are_put_in_display_order() {
+        // "salam" (red, in front of "Hi") and "alaykum" (blue, after "Yo"), in two rows.
+        check_looks_follow_the_words(&format!("{SALAM} Hi\nYo {ALAYKUM}"), 2);
+    }
+
+    #[test]
+    fn a_row_of_two_looks_keeps_each_words_look_when_the_words_swap_places() {
+        // One row: red "salam Hi" then blue "Yo alaykum", which is drawn the other way round, blue first from the left.
+        check_looks_follow_the_words(&format!("{SALAM} Hi Yo {ALAYKUM}"), 1);
+    }
+
+    #[test]
+    fn a_line_break_the_wrapping_makes_takes_the_look_of_the_character_before_it() {
+        let text = "ab \u{633}\u{644}\u{627}\u{645} cd";
+        let spans = [(0..3, 0), (3..text.len(), 1)];
+        let map = bidi::wrapped_screen_map(text, false, Some(true), |line: &str| line.chars().count() <= 4);
+        assert!(map.shown.contains(&bidi::VIRTUAL), "the paragraph is wrapped: {:?}", map.shaper);
+        let styles = shaper_styles(&spans, text, &map);
+        let source = map.shaper_source();
+        assert_eq!((styles.len(), source.len()), (map.shaper.chars().count(), map.shaper.chars().count()));
+        for (i, (&style, &at)) in styles.iter().zip(&source).enumerate() {
+            if at == bidi::VIRTUAL {
+                assert_eq!(Some(&style), i.checked_sub(1).and_then(|before| styles.get(before)), "the break at {i} follows its neighbour");
+            } else {
+                assert_eq!(style, usize::from(at >= 3), "character {i} was drawn from character {at}");
+            }
+        }
+        // A break first of all takes the look of what comes after it.
+        let mut map = map;
+        map.shaper.insert(0, '\n');
+        map.shown.insert(0, bidi::VIRTUAL);
+        map.drawn.insert(0, '\n');
+        assert_eq!(shaper_styles(&spans, text, &map).first(), shaper_styles(&spans, text, &map).get(1));
+    }
+
+    #[test]
+    fn a_look_never_changes_inside_a_joined_stretch() {
+        // The styles of "salam" differ letter by letter, as an edit that inserts into a word could make them.
+        let text = format!("x {SALAM} y");
+        let mut spans = Vec::new();
+        for (at, c) in text.char_indices() {
+            spans.push((at..at + c.len_utf8(), if at < 2 { 0 } else { at }));
+        }
+        let map = bidi::screen_map(&text);
+        let styles = shaper_styles(&spans, &text, &map);
+        let word: Vec<usize> = map.shaper.chars().zip(&styles).filter(|(c, _)| bidi::is_joining_script(*c)).map(|(_, s)| *s).collect();
+        assert_eq!(word.len(), 4);
+        assert!(word.iter().all(|s| *s == word[0]), "{word:?}");
+        // …and Latin letters keep theirs.
+        assert_ne!(styles[0], styles[map.shaper.chars().count() - 1]);
+    }
+
+    #[test]
+    fn styles_follow_the_stored_characters_whatever_the_text() {
+        // Pseudo-random text of both directions, brackets and breaks, with a style for every character.
+        let alphabet: Vec<char> = "ab xyz()[]\n\u{633}\u{644}\u{627}\u{645}\u{5D0}\u{5D1}\u{200C}1 ".chars().collect();
+        let mut seed = 0x2545_F491_u64;
+        let mut next = move |n: usize| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap_or(0) % n
+        };
+        for case in 0..300 {
+            let len = next(24);
+            let text: String = (0..len).map(|_| alphabet[next(alphabet.len())]).collect();
+            let stored: Vec<usize> = text.chars().map(|_| next(3)).collect();
+            let mut spans: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+            for ((at, c), style) in text.char_indices().zip(&stored) {
+                match spans.last_mut() {
+                    Some((range, last)) if last == style => range.end = at + c.len_utf8(),
+                    _ => spans.push((at..at + c.len_utf8(), *style)),
+                }
+            }
+            let forced = [None, Some(false), Some(true)][next(3)];
+            let width = 2 + next(8);
+            let map = if next(2) == 0 {
+                bidi::wrapped_screen_map(&text, false, forced, |line: &str| line.chars().count() <= width)
+            } else {
+                bidi::screen_map(&text)
+            };
+            let styles = shaper_styles(&spans, &text, &map);
+            let shaper: Vec<char> = map.shaper.chars().collect();
+            let source = map.shaper_source();
+            assert_eq!(styles.len(), shaper.len(), "case {case}: {text:?}");
+            for i in 0..shaper.len() {
+                let joined = i > 0 && bidi::is_shaped_rtl(shaper[i]) && bidi::is_shaped_rtl(shaper[i - 1]);
+                let expected = if joined {
+                    styles[i - 1]
+                } else if source[i] == bidi::VIRTUAL {
+                    if i > 0 { styles[i - 1] } else { styles.get(1).copied().unwrap_or(0) }
+                } else {
+                    stored[source[i]]
+                };
+                assert_eq!(styles[i], expected, "case {case}: {text:?} character {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_editor_reads_a_block_in_the_direction_the_page_writes_it() {
+        // More Arabic letters than Latin ones: right to left, though the first strong letter is Latin.
+        let more_arabic = format!("Hi {SALAM} {ALAYKUM}");
+        // More Latin letters than Arabic ones: left to right, though the first strong letter is Arabic.
+        let more_latin = format!("{SALAM} Hello Yo");
+        for (draft, rtl) in [(&more_arabic, true), (&more_latin, false)] {
+            let (_app, ed) = styled_editor(draft, false);
+            let Some(mut rig) = Rig::arabic(ed) else { return };
+            let (_, map) = rig.frame(vec![]);
+            assert_eq!(pdfcraft_engine::rtl_base(draft), rtl);
+            assert_eq!(map.row_rtl.first(), Some(&rtl), "{draft:?} reads {}", if rtl { "right to left" } else { "left to right" });
+            assert_eq!(rig.ed.text, *draft);
+        }
+    }
+
+    #[test]
+    fn a_changed_arabic_block_wraps_at_the_boxs_width_and_each_row_ends_at_its_right_edge() {
+        let paragraph = format!("{SALAM} {ALAYKUM} ").repeat(6);
+        let (_app, ed) = styled_editor(paragraph.trim_end(), false);
+        let Some(mut rig) = Rig::arabic(ed) else { return };
+        let (out, map) = rig.frame(vec![]);
+        let width = rig.width;
+        assert!(out.galley.rows.len() >= 3, "the paragraph wraps in {width}: {} rows", out.galley.rows.len());
+        assert!(map.row_rtl.iter().all(|rtl| *rtl));
+        for (i, placed) in out.galley.rows.iter().enumerate() {
+            let right = placed.pos.x + placed.row.size.x;
+            assert!((right - width).abs() <= 1.0, "row {i} ends at {right}, the box at {width}");
+            // The line is no wider than the box, once the space it keeps at its end is left out.
+            let ink = placed.row.size.x - placed.row.glyphs.iter().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
+            assert!(ink <= width + 1.0, "row {i} is {ink} wide in {width}");
+        }
+        assert!((out.galley.rect.width() - width).abs() <= 1.0, "{:?}", out.galley.rect);
+        // The rows are on the baselines the paragraph has, the extra ones below at its leading.
+        let (block, lines) = rig.ed.source.as_ref().expect("a source");
+        for (i, placed) in out.galley.rows.iter().enumerate().take(2) {
+            let baseline = placed.pos.y + placed.row.glyphs[0].pos.y;
+            let source = &lines[block.rows[i][0]];
+            let expected = (block.rect[3] - source.baseline()[1]) as f32 * SCALE;
+            assert!((baseline - expected).abs() < 1.5, "row {i} sits on the page's baseline: {baseline} against {expected}");
+        }
+    }
+
+    #[test]
+    fn an_unchanged_arabic_block_is_not_wrapped_and_keeps_the_right_edges_of_the_pages_rows() {
+        // A first row that fits the box and a second one that does not.
+        let long = format!("{SALAM} {ALAYKUM} ").repeat(6);
+        let draft = format!("{SALAM} {ALAYKUM}\n{}", long.trim_end());
+        let (_app, ed) = styled_editor(&draft, true);
+        let Some(mut rig) = Rig::arabic(ed) else { return };
+        let (out, map) = rig.frame(vec![]);
+        assert_eq!(out.galley.rows.len(), 2, "a row for each line of the page, wrapped by nothing");
+        assert_eq!(map.shaper.matches('\n').count(), 1);
+        assert!(out.galley.rows[1].row.size.x > rig.width, "the second row is wider than the box");
+        let (block, lines) = rig.ed.source.as_ref().expect("a source");
+        let placed = &out.galley.rows[0];
+        let expected = (lines[block.rows[0][0]].rect[2] - block.rect[0]) as f32 * SCALE;
+        let right = placed.pos.x + placed.row.size.x;
+        assert!((right - expected).abs() <= 1.0, "the first row ends at {right}, where the page's row does ({expected})");
+        // Once the text changes, the rows are the box's: wrapped at its width and against its right edge.
+        rig.ed.original.push('x');
+        let (out, _) = rig.frame(vec![]);
+        assert!(out.galley.rows.len() > 2, "the long row wraps now: {} rows", out.galley.rows.len());
+        for (i, placed) in out.galley.rows.iter().enumerate() {
+            let right = placed.pos.x + placed.row.size.x;
+            assert!((right - rig.width).abs() <= 1.0, "row {i} ends at {right}, the box at {}", rig.width);
+        }
+    }
+
+    #[test]
+    fn the_alignment_asked_for_places_the_rows_that_read_right_to_left() {
+        let draft = format!("{SALAM} {ALAYKUM}\n{SALAM}");
+        for (align, left, right) in [
+            (pdfcraft_engine::TextAlign::Left, true, false),
+            (pdfcraft_engine::TextAlign::Center, false, false),
+            (pdfcraft_engine::TextAlign::Right, false, true),
+            (pdfcraft_engine::TextAlign::Justify, false, true),
+        ] {
+            let (_app, mut ed) = styled_editor(&draft, false);
+            // (What the paragraph had is another alignment, so this one is a change.)
+            ed.look0.align =
+                if align == pdfcraft_engine::TextAlign::Left { pdfcraft_engine::TextAlign::Right } else { pdfcraft_engine::TextAlign::Left };
+            ed.look.align = align;
+            let Some(mut rig) = Rig::arabic(ed) else { return };
+            let (out, _) = rig.frame(vec![]);
+            let width = rig.width;
+            for (i, placed) in out.galley.rows.iter().enumerate() {
+                let (x, end) = (placed.pos.x, placed.pos.x + placed.row.size.x);
+                let what = format!("{align:?}: row {i} is {x}..{end} in {width}");
+                if left {
+                    assert!(x.abs() <= 1.0, "{what}");
+                } else if right {
+                    assert!((end - width).abs() <= 1.0, "{what}");
+                } else {
+                    assert!((x - (width - end)).abs() <= 1.5, "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn latin_text_is_laid_out_as_the_page_has_it() {
+        let (_app, ed) = styled_editor(ORIGINAL, true);
+        let mut rig = Rig::new(crate::theme::font_definitions(), 1.0, ed);
+        let (out, map) = rig.frame(vec![]);
+        assert_eq!(*map, ScreenMap::identity(ORIGINAL));
+        let galley = &out.galley;
+        assert_eq!(galley.rows.len(), 2);
+        let (red, blue) = (color32([1.0, 0.0, 0.0]), color32([0.0, 0.0, 1.0]));
+        assert_eq!((section_color(galley, 0), section_color(galley, ORIGINAL.chars().position(|c| c == 'Y').unwrap_or(0))), (red, blue));
+        assert_eq!(galley.job.sections.len(), 2, "one section for each source row");
+        let (block, lines) = rig.ed.source.as_ref().expect("a source");
+        for (i, placed) in galley.rows.iter().enumerate() {
+            let source = &lines[block.rows[i][0]];
+            let baseline = placed.pos.y + placed.row.glyphs[0].pos.y;
+            let expected = (block.rect[3] - source.baseline()[1]) as f32 * SCALE;
+            assert!((baseline - expected).abs() < 0.01, "row {i} on the page's baseline: {baseline} against {expected}");
+            assert!((placed.pos.x - (source.rect[0] - block.rect[0]) as f32 * SCALE).abs() < 0.01, "row {i} starts where the page's row does");
+            // The glyphs' pictures moved with them.
+            let top = placed.row.visuals.mesh.vertices.iter().map(|v| v.pos.y).fold(f32::MAX, f32::min);
+            assert!(top < placed.row.glyphs[0].pos.y, "row {i}: the picture is above the baseline");
+        }
+        assert!(galley.job.wrap.max_width.is_infinite(), "an unchanged paragraph is not wrapped");
+        // Changed, it wraps at the box's width.
+        rig.ed.original.push('x');
+        rig.frame(vec![]);
+        let (out, _) = rig.frame(vec![]);
+        assert!((out.galley.job.wrap.max_width - rig.width).abs() < 0.5, "{}", out.galley.job.wrap.max_width);
+    }
+
+    #[test]
+    fn typing_arabic_in_the_editor_keeps_the_draft_in_typing_order_and_the_selection_in_stored_indices() {
+        let (_app, ed) = styled_editor("Hi\nYo", false);
+        let Some(mut rig) = Rig::arabic(ed) else { return };
+        let typed = format!("{SALAM} {ALAYKUM}");
+        rig.frame(vec![egui::Event::Text(typed.clone())]);
+        let (out, map) = rig.frame(vec![]);
+        // At the end of the block (or where the caret was), in the order it was typed.
+        assert!(rig.ed.text.contains(&typed), "{:?}", rig.ed.text);
+        assert_eq!(map.logical_len(), rig.ed.text.chars().count());
+        assert_eq!(out.galley.job.text, map.shaper);
+        // Select all: the selection counts the draft's own characters, bytes of the draft.
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: Some(egui::Key::A),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        rig.frame(vec![select_all]);
+        assert_eq!(rig.ed.selection, Some(0..rig.ed.text.len()));
+        // Backspace removes the letter typed last.
+        let backspace = |key| egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        rig.frame(vec![egui::Event::Text(typed.clone())]);
+        rig.frame(vec![backspace(egui::Key::Backspace)]);
+        assert_eq!(rig.ed.text, typed.chars().take(typed.chars().count() - 1).collect::<String>());
+    }
+
+    #[test]
+    fn hebrew_is_edited_in_display_order_too() {
+        let hebrew = "\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD}";
+        let (_app, ed) = styled_editor(hebrew, false);
+        let Some(mut rig) = Rig::arabic(ed) else { return };
+        rig.width = 2000.0;
+        let (out, map) = rig.frame(vec![]);
+        assert_eq!(map.row_rtl, [true]);
+        assert_ne!(map.shaper, hebrew, "the words are in display order");
+        assert_eq!(drawn(&out.galley).len(), hebrew.chars().count());
+        let placed = &out.galley.rows[0];
+        assert!((placed.pos.x + placed.row.size.x - rig.width).abs() <= 1.0);
+    }
+
+    #[test]
+    fn the_editor_lays_out_at_every_pixel_ratio_and_scale() {
+        let draft = format!("{SALAM} {ALAYKUM} Hi\n{ALAYKUM} Yo {SALAM} {ALAYKUM} {SALAM}");
+        for ppp in [1.0, 1.5, 2.0] {
+            for width_scale in [0.5_f32, 1.0, 2.0] {
+                let (_app, ed) = styled_editor(&draft, false);
+                let Some(fonts) = bidi::arabic_test_fonts() else { return };
+                let mut rig = Rig::new(fonts, ppp, ed);
+                rig.width = (rig.ed.rect.width() * width_scale).round();
+                let (out, map) = rig.frame(vec![]);
+                for (i, placed) in out.galley.rows.iter().enumerate() {
+                    if map.row_is_rtl(i) {
+                        let right = placed.pos.x + placed.row.size.x;
+                        assert!((right - rig.width).abs() <= 1.0 / ppp + 0.5, "row {i} ends at {right} in {} ({ppp} px per point)", rig.width);
+                    }
+                }
+                assert_eq!(drawn(&out.galley).len(), map.drawn.iter().filter(|c| **c != '\n').count());
+            }
+        }
+    }
+
+    #[test]
+    fn a_selection_of_characters_is_a_range_of_bytes_of_the_draft() {
+        let text = "a\u{633}\u{644}b";
+        assert_eq!(selection_bytes(text, 0..0), None);
+        assert_eq!(selection_bytes(text, 1..3), Some(1..5));
+        assert_eq!(selection_bytes(text, 0..4), Some(0..text.len()));
+        assert_eq!(selection_bytes(text, 2..99), Some(3..text.len()), "past the end is the end");
+        assert_eq!(selection_bytes("", 0..3), None, "nothing to select");
     }
 
     #[test]

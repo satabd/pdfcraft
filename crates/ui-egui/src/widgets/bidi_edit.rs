@@ -895,7 +895,6 @@ pub struct BidiEdit<'t> {
 }
 
 /// What [`BidiEdit::show_mapped`] returns: egui's output, and how the text was put on screen.
-#[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor reads its selection from the map"))]
 pub struct BidiOutput {
     /// What `egui::TextEdit::show` returns. Its cursor counts characters of the screen text
     /// (`map.shaper` is its text).
@@ -911,7 +910,6 @@ impl BidiOutput {
     /// characters between the cursor's ends, which for a selection that crosses a change of
     /// direction also covers characters it does not (they are not contiguous in the text). Empty,
     /// at the caret, when nothing is selected. `None` if the field has no cursor (it has not been focused).
-    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor reads its selection from the map"))]
     pub fn logical_range(&self) -> Option<std::ops::Range<usize>> {
         let range = self.out.state.cursor.char_range()?;
         let [low, high] = range.sorted_cursors();
@@ -1044,7 +1042,6 @@ impl<'t> BidiEdit<'t> {
     /// Wrap a multi-line text at `width` instead of the width egui gives the field, `f32::INFINITY`
     /// for not at all (only the text's own line breaks end a line). The galley is still placed for
     /// the width egui gives ([`LayoutCtx::wrap_width`]).
-    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text field wraps at the source's width"))]
     pub fn wrap_at(mut self, width: f32) -> Self {
         self.s.wrap_override = Some(width);
         self
@@ -1054,7 +1051,6 @@ impl<'t> BidiEdit<'t> {
     /// order) instead of the field's font, for an owner whose text is set in other fonts. The
     /// answer must depend on the line alone (and what the owner keeps fixed): the field keeps the
     /// wrapping it made of a text for as long as the text and the width stay the same.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text field measures lines as the page will"))]
     pub fn measure(mut self, measure: impl Fn(&egui::Context, &str) -> f32 + 'static) -> Self {
         self.s.measure = Some(Rc::new(measure));
         self
@@ -1062,7 +1058,6 @@ impl<'t> BidiEdit<'t> {
 
     /// Read every paragraph of a multi-line text right to left (`Some(true)`) or left to right,
     /// whatever its first strong character says; for an owner whose text has a direction of its own.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text field reads a block in the direction the page writes it"))]
     pub fn forced_rtl(mut self, rtl: Option<bool>) -> Self {
         self.s.forced_rtl = rtl;
         self
@@ -1076,7 +1071,6 @@ impl<'t> BidiEdit<'t> {
 
     /// [`Self::show`], with the map of how the text was put on screen, which relates the cursor
     /// to the stored text ([`BidiOutput::logical_range`]).
-    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor reads its selection from the map"))]
     pub fn show_mapped(self, ui: &mut Ui) -> BidiOutput {
         self.run(ui, true)
     }
@@ -1100,7 +1094,7 @@ impl<'t> BidiEdit<'t> {
                     let look = Look::of(ui, &s);
                     let mut layouter = |ui: &Ui, buffer: &dyn TextBuffer, width: f32| -> Arc<Galley> {
                         let map = ScreenMap::identity(buffer.as_str());
-                        hook(ui, &map, &LayoutCtx { wrap_width: multiline.then_some(width), prewrapped: false, look: &look })
+                        hook(ui, &map, &LayoutCtx { wrap_width: multiline.then_some(width), prewrapped: false, text: buffer.as_str(), look: &look })
                     };
                     edit.layouter(&mut layouter).show(ui)
                 }
@@ -1315,6 +1309,9 @@ pub struct LayoutCtx<'a> {
     /// Not set for a field drawn as a plain `egui::TextEdit` (no right-to-left script), whose
     /// galley egui wraps at [`Self::wrap_width`].
     pub prewrapped: bool,
+    /// The stored text the map shows, in logical order: for a hook whose look depends on the characters of
+    /// the text rather than their place on screen (a style per character, see [`ScreenMap::shaper_source`]).
+    pub text: &'a str,
     look: &'a Look,
 }
 
@@ -1454,8 +1451,8 @@ type LayoutHook<'t> = Box<dyn FnMut(&Ui, &ScreenMap, &LayoutCtx<'_>) -> Arc<Gall
 /// The galley of `map` for `egui::TextEdit`: the hook's, or the field's own. A single line (`wrap_width`
 /// `None`) is laid out as a `TextEdit::singleline` does; with a width, the lines the map is wrapped
 /// into (see [`bidi::wrapped_screen_map`]) one to a row, each against the edge its paragraph reads from.
-fn galley_of(hook: &mut Option<LayoutHook<'_>>, look: &Look, ui: &Ui, map: &ScreenMap, wrap_width: Option<f32>) -> Arc<Galley> {
-    let ctx = LayoutCtx { wrap_width, prewrapped: wrap_width.is_some(), look };
+fn galley_of(hook: &mut Option<LayoutHook<'_>>, look: &Look, ui: &Ui, text: &str, map: &ScreenMap, wrap_width: Option<f32>) -> Arc<Galley> {
+    let ctx = LayoutCtx { wrap_width, prewrapped: wrap_width.is_some(), text, look };
     match hook {
         Some(hook) => hook(ui, map, &ctx),
         None => ctx.layout(ui, map),
@@ -1670,7 +1667,7 @@ fn show_reordered(
         let logical_len = map.logical_len();
         let (plain_arrows, only_motion) = ui.input(|i| (i.events.iter().any(is_plain_arrow), i.events.iter().all(|e| !edits_text(e))));
         let stops: Vec<Pos2> = if plain_arrows && only_motion {
-            let galley = galley_of(hook, &look, ui, &map, egui_width);
+            let galley = galley_of(hook, &look, ui, text, &map, egui_width);
             (0..=map.screen_len()).map(|v| galley.pos_from_cursor(CCursor::new(v)).min).collect()
         } else {
             Vec::new()
@@ -1730,7 +1727,7 @@ fn show_reordered(
             layout_seen.set(Some(width));
         }
         let map = map_of(&layout_cache, buffer.as_str());
-        galley_of(layout_hook, &layout_look, ui, &map, multiline.then_some(width))
+        galley_of(layout_hook, &layout_look, ui, buffer.as_str(), &map, multiline.then_some(width))
     };
 
     let mut out = {
