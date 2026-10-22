@@ -5,6 +5,9 @@ use egui::{Align2, Color32, CornerRadius, Rect, Response, Sense, Stroke, vec2};
 use crate::theme::{self, Tokens};
 use crate::{PdfCraftApp, icons, rtl};
 
+mod form;
+pub use form::{FormRows, form_grid};
+
 /// Horizontal and vertical inset of a single-line field.
 const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
 /// Outer height of a single-line field, including its inset.
@@ -32,7 +35,9 @@ pub fn modal(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug) ->
 ///
 /// A dialog's body keeps the top-down left layout in every language: its width is only known
 /// once the dialog has set it, and an `egui::Grid` laid out against a right edge measures
-/// infinite. Its rows and footer are mirrored by [`rtl::horizontal`] and [`rtl::end`].
+/// infinite. Its rows and footer are mirrored by [`rtl::horizontal`] and [`rtl::end`], and a
+/// form of captions and fields by [`form_grid`], which is a grid in English and hand-laid rows
+/// when mirrored.
 pub fn show_modal<R>(ctx: &egui::Context, id: &str, content: impl FnOnce(&mut egui::Ui) -> R) -> egui::ModalResponse<R> {
     let stored = egui::Id::new(id);
     modal(ctx, id).show(ctx, |ui| {
@@ -271,7 +276,55 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, width: f32) -> Response 
 }
 
 pub fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> Response {
-    ui.add(egui::Button::new(label).shortcut_text(shortcut))
+    menu_entry(ui, true, label, Some(shortcut))
+}
+
+/// An entry of a menu: `label` at the start edge and the `shortcut` (`None` for an entry that has
+/// no place for one) at the end.
+///
+/// In English that is `Button::new(label)`, with `.shortcut_text(shortcut)` for a `Some` (an empty
+/// one too: it keeps the entry as wide as its siblings that have a shortcut). Mirrored, the label is flush
+/// right and the shortcut at the left end, and the accessible name stays "label shortcut". The
+/// button fills the menu's width either way, so the whole row is the hit rectangle.
+pub fn menu_entry(ui: &mut egui::Ui, enabled: bool, label: &str, shortcut: Option<&str>) -> Response {
+    if !rtl::mirrored() {
+        let button = egui::Button::new(label);
+        return ui.add_enabled(
+            enabled,
+            match shortcut {
+                Some(shortcut) => button.shortcut_text(shortcut),
+                None => button,
+            },
+        );
+    }
+    let mut atoms = egui::Atoms::new(label);
+    atoms.push_left(egui::Atom::grow());
+    let shortcut = shortcut.unwrap_or_default();
+    if !shortcut.is_empty() {
+        atoms.push_left(egui::RichText::new(shortcut).weak());
+    }
+    let resp = ui.add_enabled(enabled, egui::Button::new(atoms));
+    let name = if shortcut.is_empty() { label.to_owned() } else { format!("{label} {shortcut}") };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &name));
+    resp
+}
+
+/// A submenu button inside a menu (a top-level menu button elsewhere). Mirrored, its label is
+/// flush right with the arrow at the left; the submenu itself still opens to the right of the
+/// button, or to the left where there is no room (egui fixes its side).
+pub fn sub_menu<R>(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    use egui::containers::menu::{SubMenuButton, is_in_menu};
+    if !(rtl::mirrored() && is_in_menu(ui)) {
+        return ui.menu_button(label, add_contents);
+    }
+    let mut atoms = egui::Atoms::new(label);
+    atoms.push_left(egui::Atom::grow());
+    atoms.push_left("\u{23F4}");
+    let (resp, inner) = SubMenuButton::from_button(egui::Button::new(atoms)).ui(ui, add_contents);
+    let name = format!("{label} {}", SubMenuButton::RIGHT_ARROW);
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &name));
+    egui::InnerResponse::new(inner.map(|i| i.inner), resp)
 }
 
 /// Corner radius of a checkbox's box. With the widgets' radius (`Tokens::radius`, 6) egui's 14 px

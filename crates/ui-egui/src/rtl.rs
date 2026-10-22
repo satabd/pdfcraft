@@ -10,11 +10,17 @@
 //! [`caption_value`] follow the reading order of the language.
 //!
 //! Every helper is the identity when [`mirrored`] is false, so the English layout cannot change.
+//! The captions of a dialog form sit at the right of their fields ([`crate::widgets::form_grid`]
+//! builds the rows by hand, because `egui::Grid` cannot sit against a right edge), and the
+//! entries of the main menu put their label at the right and their shortcut at the left
+//! ([`crate::widgets::menu_entry`]).
+//!
 //! What stays physical: the window controls, scrollbars, the document canvas and its overlays,
-//! menus and submenus (their layout is justified towards the left), `egui::Grid` dialogs, the
-//! order of the document tabs, and the explicit "Tools panel side" preference.
+//! the side a submenu opens on, the order of the document tabs, and the explicit "Tools panel
+//! side" preference. What is not mirrored yet: the other `egui::Grid` users (panels, tool pages,
+//! the Preferences and signing dialogs) and context menus built from plain `ui.button`s.
 
-use egui::{Align, Align2, InnerResponse, Layout, Margin, Pos2, Rect, Ui, Vec2, pos2, vec2};
+use egui::{Align, Align2, InnerResponse, Layout, Margin, Pos2, Rect, Ui, UiBuilder, Vec2, pos2, vec2};
 
 /// Whether the interface language is written right to left ([`crate::i18n::current`], set at the
 /// start of every frame from the language preference).
@@ -72,6 +78,11 @@ pub fn page<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
 pub fn vertical<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
     let width = ui.available_size_before_wrap().x;
     if mirrored() && width.is_finite() {
+        if ui.layout().is_horizontal() {
+            // In a row a block of no height yet would be centred on the row's middle line and grow
+            // down from there. Put it where `ui.vertical` does: at the row's top.
+            return ui.scope_builder(UiBuilder::new().layout(page_layout()), add_contents);
+        }
         ui.allocate_ui_with_layout(vec2(width, 0.0), page_layout(), add_contents)
     } else {
         ui.vertical(add_contents)
@@ -333,6 +344,28 @@ mod tests {
             });
             out.textures_delta.clear();
             assert_eq!(xs.0 < xs.1, !arabic, "first item left of the second only in English: {xs:?}");
+        }
+    }
+
+    /// A block in a row grows down from the row's top, as `ui.vertical` does, not from the middle
+    /// line of the row.
+    #[test]
+    fn a_block_in_a_row_starts_at_the_top_of_the_row() {
+        for arabic in [false, true] {
+            let _guard = arabic.then(Arabic::on);
+            let ctx = egui::Context::default();
+            let mut tops = (0.0, 0.0);
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let row = Rect::from_min_size(ui.cursor().min, vec2(300.0, 90.0));
+                    ui.scope_builder(UiBuilder::new().max_rect(row).layout(start_layout(Align::Center)), |ui| {
+                        tops.0 = row.top();
+                        tops.1 = vertical(ui, |ui| ui.allocate_space(vec2(20.0, 60.0))).response.rect.top();
+                    });
+                });
+            });
+            out.textures_delta.clear();
+            assert!((tops.1 - tops.0).abs() < 0.5, "arabic {arabic}: the block starts at {} in a row from {}", tops.1, tops.0);
         }
     }
 

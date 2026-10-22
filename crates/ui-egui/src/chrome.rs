@@ -585,10 +585,10 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     popup.show(|ui| {
         scroll_menu(ui, |ui| {
             ui.set_min_width(230.0);
-            ui.menu_button(tl!("File"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "File")));
-            ui.menu_button(tl!("Edit"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Edit")));
-            ui.menu_button(tl!("Pages"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Pages")));
-            ui.menu_button(tl!("View"), |ui| {
+            widgets::sub_menu(ui, tl!("File"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "File")));
+            widgets::sub_menu(ui, tl!("Edit"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Edit")));
+            widgets::sub_menu(ui, tl!("Pages"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Pages")));
+            widgets::sub_menu(ui, tl!("View"), |ui| {
                 scroll_menu(ui, |ui| {
                     if let Some(i) = app.active {
                         let v = &mut app.views[i];
@@ -628,10 +628,10 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         }
                         ui.separator();
                         ui.label(egui::RichText::new(tl!("Page navigation")).color(t.text_faint).small());
-                        if ui.add_enabled(!v.back.is_empty(), egui::Button::new(tl!("Previous view")).shortcut_text(key(PREV_VIEW))).clicked() {
+                        if widgets::menu_entry(ui, !v.back.is_empty(), tl!("Previous view"), Some(&key(PREV_VIEW))).clicked() {
                             v.view_history(false);
                         }
-                        if ui.add_enabled(!v.forward.is_empty(), egui::Button::new(tl!("Next view")).shortcut_text(key(NEXT_VIEW))).clicked() {
+                        if widgets::menu_entry(ui, !v.forward.is_empty(), tl!("Next view"), Some(&key(NEXT_VIEW))).clicked() {
                             v.view_history(true);
                         }
                         ui.separator();
@@ -641,8 +641,8 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         ui.separator();
                     }
                     crate::commands::registry_menu(app, ui, "View");
-                    ui.menu_button(tl!("Display theme"), |ui| theme_menu(app, ui));
-                    ui.menu_button(tl!("Side panels"), |ui| {
+                    widgets::sub_menu(ui, tl!("Display theme"), |ui| theme_menu(app, ui));
+                    widgets::sub_menu(ui, tl!("Side panels"), |ui| {
                         scroll_menu(ui, |ui| {
                             for (p, label) in [
                                 (RightPanel::Comments, tl!("Comments")),
@@ -665,7 +665,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     });
                 })
             });
-            ui.menu_button(tl!("Help"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Help")));
+            widgets::sub_menu(ui, tl!("Help"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Help")));
         })
     });
 }

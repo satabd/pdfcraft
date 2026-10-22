@@ -304,3 +304,77 @@ fn every_screen_stays_inside_the_window() {
         assert_on_screen(&h, &format!("{lang} home"));
     }
 }
+
+/// The caption label `caption` and the `field_role` node on its row.
+fn row_pair(h: &Harness<'static, PdfCraftApp>, caption: &str, field_role: Role) -> (egui::Rect, egui::Rect) {
+    let label = h.get_by_role_and_label(Role::Label, caption).rect();
+    let field = h
+        .query_all_by_role(field_role)
+        .map(|n| n.rect())
+        .filter(|r| (r.center().y - label.center().y).abs() < 12.0)
+        .min_by(|a, b| (a.center().y - label.center().y).abs().total_cmp(&(b.center().y - label.center().y).abs()))
+        .unwrap_or_else(|| panic!("no {field_role:?} on the row of {caption:?} at {label:?}"));
+    (label, field)
+}
+
+/// A dialog's caption rows read from the start edge: the caption is to the right of its field in
+/// Arabic and to the left of it in English.
+#[test]
+fn a_dialog_caption_sits_at_the_start_side_of_its_field() {
+    for (language, caption) in [("ar", ar("Author")), ("en", "Author")] {
+        let h = harness(language, |app| app.set_option("dialog", "properties").unwrap());
+        let (label, field) = row_pair(&h, caption, Role::TextInput);
+        if language == "ar" {
+            assert!(label.left() >= field.right(), "ar: the caption {label:?} is right of its field {field:?}");
+            assert!(label.right() > WIDTH / 2.0 + 200.0, "ar: and at the right edge of the dialog: {label:?}");
+        } else {
+            assert!(label.right() <= field.left(), "en: the caption {label:?} is left of its field {field:?}");
+            assert!(label.left() < WIDTH / 2.0 - 200.0, "en: and at the left edge of the dialog: {label:?}");
+        }
+        assert_on_screen(&h, &format!("{language} properties"));
+    }
+}
+
+/// The main menu's File submenu open, in `language`.
+fn file_menu(language: &'static str) -> Harness<'static, PdfCraftApp> {
+    let tr = |english: &str| if language == "ar" { ar(english).to_owned() } else { english.to_owned() };
+    let mut h = harness(language, |_| {});
+    h.get_by_role_and_label(Role::Button, &tr("Menu")).click();
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, &format!("{} \u{23F5}", tr("File"))).click();
+    h.run_steps(6);
+    h
+}
+
+/// A menu entry has its label at the start edge and its shortcut at the end: the label right of
+/// the shortcut in Arabic, left of it in English. Every entry fills the menu's width, so the
+/// whole row is clickable, and the accessible name stays "label shortcut".
+#[test]
+fn a_menu_entry_has_its_label_at_the_start_and_its_shortcut_at_the_end() {
+    use egui_kittest::kittest::NodeT as _;
+    for language in ["ar", "en"] {
+        let h = file_menu(language);
+        let open = if language == "ar" { ar("Open…") } else { "Open…" };
+        let shown = painted_text(&h);
+        let label = shown.iter().find(|(text, _)| text == open).unwrap_or_else(|| panic!("{language}: {open:?} is painted: {shown:?}")).1;
+        let shortcut = shown
+            .iter()
+            .find(|(text, r)| text.ends_with("+O") && (r.center().y - label.center().y).abs() < 4.0)
+            .unwrap_or_else(|| panic!("{language}: the shortcut of {open:?} is painted on its row: {shown:?}"))
+            .1;
+        if language == "ar" {
+            assert!(label.left() >= shortcut.right(), "ar: the label {label:?} is right of its shortcut {shortcut:?}");
+        } else {
+            assert!(label.right() <= shortcut.left(), "en: the label {label:?} is left of its shortcut {shortcut:?}");
+        }
+        // The entry is one button across the menu, named as in English.
+        let entry = h
+            .query_all_by_role(Role::Button)
+            .find(|n| n.accesskit_node().label().is_some_and(|l| l.starts_with(open) && l.contains("+O")))
+            .unwrap_or_else(|| panic!("{language}: a button named {open:?} and its shortcut"))
+            .rect();
+        assert!(entry.contains_rect(label) && entry.contains_rect(shortcut), "{language}: the entry {entry:?} holds both texts");
+        assert!(entry.width() > label.width() + shortcut.width(), "{language}: and spans the menu");
+        assert_on_screen(&h, &format!("{language} file menu"));
+    }
+}

@@ -778,17 +778,17 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
         // Clear Recent Files at the foot empties the list (#430).
         if spec.id == "file.open_recent" {
             if app.recent.is_empty() {
-                ui.add_enabled(false, egui::Button::new(label));
+                widgets::menu_entry(ui, false, &label, None);
                 continue;
             }
             let mut open: Option<String> = None;
             let mut clear = false;
-            ui.menu_button(label, |ui| {
+            widgets::sub_menu(ui, &label, |ui| {
                 crate::chrome::scroll_menu(ui, |ui| {
                     for r in &app.recent {
                         let shown = crate::bidi::visual(&r.name);
                         let reordered = matches!(shown, std::borrow::Cow::Owned(_));
-                        let resp = ui.button(shown.as_ref());
+                        let resp = widgets::menu_entry(ui, true, shown.as_ref(), None);
                         if reordered {
                             // Painted in display order; the accessible name stays the file's own.
                             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &r.name));
@@ -799,7 +799,7 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
                         }
                     }
                     ui.separator();
-                    if ui.button(tl!("Clear Recent Files")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Clear Recent Files"), None).clicked() {
                         clear = true;
                         ui.close();
                     }
@@ -820,7 +820,7 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
         // Undo and Redo name the last action, which may be a document's text; painted in display order.
         let painted = widgets::visual_sentence(&label);
         let reordered = matches!(painted, std::borrow::Cow::Owned(_));
-        let resp = ui.add_enabled(enabled, egui::Button::new(painted.as_ref()).shortcut_text(shortcut));
+        let resp = widgets::menu_entry(ui, enabled, painted.as_ref(), Some(&shortcut));
         if reordered {
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label));
         }

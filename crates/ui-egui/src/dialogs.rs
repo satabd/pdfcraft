@@ -96,7 +96,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 return;
             }
             Dialog::Properties(tab) => {
-                ui.label(egui::RichText::new(tl!("Document Properties")).font(theme::semibold(18.0)));
+                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Document Properties")).font(theme::semibold(18.0))));
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
                     for (tb, label) in [
@@ -118,169 +118,183 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let i = &doc.info;
                 // `reorder`: the value is document text in logical order (a title), put in display
                 // order by its own direction; the others (a file name, a path) already are.
-                let row_with = |ui: &mut egui::Ui, k: &str, v: String, reorder: bool| {
+                let row_with = |rows: &mut widgets::FormRows<'_>, k: &str, v: String, reorder: bool| {
                     // Row labels are UI chrome; values are document data and stay as they are.
-                    ui.label(egui::RichText::new(tl!(k)).color(t.text_muted));
-                    ui.scope(|ui| {
-                        ui.set_max_width(420.0);
-                        if reorder && !v.is_empty() {
-                            let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
-                            widgets::wrapped_text(ui, &v, font, colour, false);
-                            return;
-                        }
-                        ui.add(
-                            egui::Label::new(if v.is_empty() { egui::RichText::new("—").color(t.text_faint) } else { egui::RichText::new(v) }).wrap(),
-                        );
-                    });
-                    ui.end_row();
+                    rows.row_styled(
+                        tl!(k),
+                        |caption| caption.color(t.text_muted),
+                        |ui, _| {
+                            ui.scope(|ui| {
+                                ui.set_max_width(420.0);
+                                if reorder && !v.is_empty() {
+                                    let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                                    widgets::wrapped_text(ui, &v, font, colour, false);
+                                    return;
+                                }
+                                ui.add(
+                                    egui::Label::new(if v.is_empty() {
+                                        egui::RichText::new("—").color(t.text_faint)
+                                    } else {
+                                        egui::RichText::new(v)
+                                    })
+                                    .wrap(),
+                                );
+                            });
+                        },
+                    );
                 };
-                let row = |ui: &mut egui::Ui, k: &str, v: String| row_with(ui, k, v, false);
-                let row_doc = |ui: &mut egui::Ui, k: &str, v: String| row_with(ui, k, v, true);
+                let row = |rows: &mut widgets::FormRows<'_>, k: &str, v: String| row_with(rows, k, v, false);
+                let row_doc = |rows: &mut widgets::FormRows<'_>, k: &str, v: String| row_with(rows, k, v, true);
                 egui::ScrollArea::vertical().max_height(460.0).auto_shrink([false, true]).show(ui, |ui| {
-                    egui::Grid::new("props").num_columns(2).spacing([18.0, 8.0]).min_col_width(140.0).show(ui, |ui| match tab {
+                    widgets::form_grid(ui, "props", [18.0, 8.0], Some(140.0), |rows| match tab {
                         PropsTab::Description => {
-                            row(ui, "File", crate::bidi::visual(&doc.name).into_owned());
+                            row(rows, "File", crate::bidi::visual(&doc.name).into_owned());
                             match app.props_draft.as_mut() {
                                 Some((_, draft)) if doc.allows_modification() => {
                                     for (k, v) in INFO_KEYS.iter().zip(draft.iter_mut()) {
-                                        let l = ui.label(egui::RichText::new(tl!(k)).color(t.text_muted));
-                                        ui.add(widgets::line(v).desired_width(420.0).background_color(t.field).id_salt(("info", *k)))
-                                            .labelled_by(l.id);
-                                        ui.end_row();
+                                        rows.row_styled(
+                                            tl!(k),
+                                            |caption| caption.color(t.text_muted),
+                                            |ui, l| {
+                                                ui.add(widgets::line(v).desired_width(420.0).background_color(t.field).id_salt(("info", *k)))
+                                                    .labelled_by(l.id);
+                                            },
+                                        );
                                     }
                                 }
                                 _ => {
-                                    row_doc(ui, "Title", i.title.clone().unwrap_or_default());
-                                    row_doc(ui, "Author", i.author.clone().unwrap_or_default());
-                                    row_doc(ui, "Subject", i.subject.clone().unwrap_or_default());
-                                    row_doc(ui, "Keywords", i.keywords.clone().unwrap_or_default());
+                                    row_doc(rows, "Title", i.title.clone().unwrap_or_default());
+                                    row_doc(rows, "Author", i.author.clone().unwrap_or_default());
+                                    row_doc(rows, "Subject", i.subject.clone().unwrap_or_default());
+                                    row_doc(rows, "Keywords", i.keywords.clone().unwrap_or_default());
                                 }
                             }
-                            row_doc(ui, "Application", i.creator.clone().unwrap_or_default());
-                            row_doc(ui, "PDF producer", i.producer.clone().unwrap_or_default());
+                            row_doc(rows, "Application", i.creator.clone().unwrap_or_default());
+                            row_doc(rows, "PDF producer", i.producer.clone().unwrap_or_default());
                         }
                         PropsTab::InitialView => {
                             use pdfcraft_engine::{InitialLayout as L, Magnification as M, Navigation as N};
                             let editable = doc.allows_modification();
                             let pages = i.pages.len();
                             let Some((_, v)) = app.view_draft.as_mut() else { return };
-                            ui.label(egui::RichText::new(tl!("Layout and Magnification")).font(theme::semibold(12.5)));
-                            ui.end_row();
-                            ui.label(tl!("Navigation tab"));
-                            ui.add_enabled_ui(editable, |ui| {
-                                egui::ComboBox::from_id_salt("iv-nav")
-                                    .selected_text(tl!(format!("{:?}", v.navigation)
-                                        .replace("PageOnly", "Page Only")
-                                        .replace("Pages", "Pages Panel and Page")
-                                        .as_str()))
-                                    .show_ui(ui, |ui| {
-                                        for (n, l) in [
-                                            (N::PageOnly, tl!("Page Only")),
-                                            (N::Bookmarks, tl!("Bookmarks Panel and Page")),
-                                            (N::Pages, tl!("Pages Panel and Page")),
-                                            (N::Attachments, tl!("Attachments Panel and Page")),
-                                            (N::Layers, tl!("Layers Panel and Page")),
-                                        ] {
-                                            ui.selectable_value(&mut v.navigation, n, l);
-                                        }
-                                    });
-                            });
-                            ui.end_row();
-                            ui.label(tl!("Page layout"));
-                            ui.add_enabled_ui(editable, |ui| {
-                                let names = [
-                                    (L::Default, tl!("Default")),
-                                    (L::SinglePage, tl!("Single Page")),
-                                    (L::SinglePageContinuous, tl!("Single Page Continuous")),
-                                    (L::TwoUp, tl!("Two-Up (Facing)")),
-                                    (L::TwoUpContinuous, tl!("Two-Up Continuous (Facing)")),
-                                    (L::TwoUpCoverPage, tl!("Two-Up (Cover Page)")),
-                                    (L::TwoUpContinuousCoverPage, tl!("Two-Up Continuous (Cover Page)")),
-                                ];
-                                let shown = names.iter().find(|(l, _)| *l == v.layout).map_or(tl!("Default"), |(_, n)| n);
-                                egui::ComboBox::from_id_salt("iv-layout").selected_text(shown).show_ui(ui, |ui| {
-                                    for (l, n) in names {
-                                        ui.selectable_value(&mut v.layout, l, n);
-                                    }
+                            rows.heading(egui::RichText::new(tl!("Layout and Magnification")).font(theme::semibold(12.5)));
+                            rows.row(tl!("Navigation tab"), |ui, _| {
+                                ui.add_enabled_ui(editable, |ui| {
+                                    egui::ComboBox::from_id_salt("iv-nav")
+                                        .selected_text(tl!(format!("{:?}", v.navigation)
+                                            .replace("PageOnly", "Page Only")
+                                            .replace("Pages", "Pages Panel and Page")
+                                            .as_str()))
+                                        .show_ui(ui, |ui| {
+                                            for (n, l) in [
+                                                (N::PageOnly, tl!("Page Only")),
+                                                (N::Bookmarks, tl!("Bookmarks Panel and Page")),
+                                                (N::Pages, tl!("Pages Panel and Page")),
+                                                (N::Attachments, tl!("Attachments Panel and Page")),
+                                                (N::Layers, tl!("Layers Panel and Page")),
+                                            ] {
+                                                ui.selectable_value(&mut v.navigation, n, l);
+                                            }
+                                        });
                                 });
                             });
-                            ui.end_row();
-                            ui.label(tl!("Magnification"));
-                            ui.add_enabled_ui(editable, |ui| {
-                                rtl::horizontal(ui, |ui| {
+                            rows.row(tl!("Page layout"), |ui, _| {
+                                ui.add_enabled_ui(editable, |ui| {
                                     let names = [
-                                        (M::Default, tl!("Default")),
-                                        (M::ActualSize, tl!("Actual Size")),
-                                        (M::FitPage, tl!("Fit Page")),
-                                        (M::FitWidth, tl!("Fit Width")),
-                                        (M::FitHeight, tl!("Fit Height")),
-                                        (M::FitVisible, tl!("Fit Visible")),
+                                        (L::Default, tl!("Default")),
+                                        (L::SinglePage, tl!("Single Page")),
+                                        (L::SinglePageContinuous, tl!("Single Page Continuous")),
+                                        (L::TwoUp, tl!("Two-Up (Facing)")),
+                                        (L::TwoUpContinuous, tl!("Two-Up Continuous (Facing)")),
+                                        (L::TwoUpCoverPage, tl!("Two-Up (Cover Page)")),
+                                        (L::TwoUpContinuousCoverPage, tl!("Two-Up Continuous (Cover Page)")),
                                     ];
-                                    let shown = match v.magnification {
-                                        M::Percent(p) => format!("{p:.0}%"),
-                                        m => names.iter().find(|(x, _)| *x == m).map_or(tl!("Default").to_string(), |(_, n)| n.to_string()),
-                                    };
-                                    egui::ComboBox::from_id_salt("iv-mag").selected_text(shown).show_ui(ui, |ui| {
-                                        for (m, n) in names {
-                                            ui.selectable_value(&mut v.magnification, m, n);
-                                        }
-                                        for p in [50.0, 75.0, 125.0, 150.0, 200.0] {
-                                            ui.selectable_value(&mut v.magnification, M::Percent(p), format!("{p:.0}%"));
+                                    let shown = names.iter().find(|(l, _)| *l == v.layout).map_or(tl!("Default"), |(_, n)| n);
+                                    egui::ComboBox::from_id_salt("iv-layout").selected_text(shown).show_ui(ui, |ui| {
+                                        for (l, n) in names {
+                                            ui.selectable_value(&mut v.layout, l, n);
                                         }
                                     });
                                 });
                             });
-                            ui.end_row();
-                            ui.label(tl!("Open to page"));
-                            ui.add_enabled_ui(editable, |ui| {
-                                let mut p = v.page + 1;
-                                if ui.add(egui::DragValue::new(&mut p).range(1..=pages.max(1))).changed() {
-                                    v.page = p - 1;
-                                }
-                                ui.label(crate::i18n::fmt(tl!("of {pages}"), &[("pages", &pages.to_string())]));
-                            });
-                            ui.end_row();
-                            ui.label(egui::RichText::new(tl!("Window Options")).font(theme::semibold(12.5)));
-                            ui.end_row();
-                            ui.label("");
-                            ui.add_enabled_ui(editable, |ui| {
-                                ui.vertical(|ui| {
-                                    ui.add(widgets::checkbox(&mut v.fit_window, tl!("Resize window to initial page")));
-                                    ui.add(widgets::checkbox(&mut v.center_window, tl!("Center window on screen")));
-                                    ui.add(widgets::checkbox(&mut v.full_screen, tl!("Open in Full Screen mode")));
+                            rows.row(tl!("Magnification"), |ui, _| {
+                                ui.add_enabled_ui(editable, |ui| {
                                     rtl::horizontal(ui, |ui| {
-                                        ui.label(tl!("Show:"));
-                                        widgets::radio_value(ui, &mut v.display_title, false, tl!("File Name"));
-                                        widgets::radio_value(ui, &mut v.display_title, true, tl!("Document Title"));
+                                        let names = [
+                                            (M::Default, tl!("Default")),
+                                            (M::ActualSize, tl!("Actual Size")),
+                                            (M::FitPage, tl!("Fit Page")),
+                                            (M::FitWidth, tl!("Fit Width")),
+                                            (M::FitHeight, tl!("Fit Height")),
+                                            (M::FitVisible, tl!("Fit Visible")),
+                                        ];
+                                        let shown = match v.magnification {
+                                            M::Percent(p) => format!("{p:.0}%"),
+                                            m => names.iter().find(|(x, _)| *x == m).map_or(tl!("Default").to_string(), |(_, n)| n.to_string()),
+                                        };
+                                        egui::ComboBox::from_id_salt("iv-mag").selected_text(shown).show_ui(ui, |ui| {
+                                            for (m, n) in names {
+                                                ui.selectable_value(&mut v.magnification, m, n);
+                                            }
+                                            for p in [50.0, 75.0, 125.0, 150.0, 200.0] {
+                                                ui.selectable_value(&mut v.magnification, M::Percent(p), format!("{p:.0}%"));
+                                            }
+                                        });
                                     });
                                 });
                             });
-                            ui.end_row();
-                            ui.label(egui::RichText::new(tl!("User Interface Options")).font(theme::semibold(12.5)));
-                            ui.end_row();
-                            ui.label("");
-                            ui.add_enabled_ui(editable, |ui| {
-                                ui.vertical(|ui| {
-                                    ui.add(widgets::checkbox(&mut v.hide_menubar, tl!("Hide menu bar")));
-                                    ui.add(widgets::checkbox(&mut v.hide_toolbar, tl!("Hide toolbars")));
-                                    ui.add(widgets::checkbox(&mut v.hide_window_ui, tl!("Hide window controls")));
+                            rows.row(tl!("Open to page"), |ui, _| {
+                                ui.add_enabled_ui(editable, |ui| {
+                                    let mut p = v.page + 1;
+                                    if ui.add(egui::DragValue::new(&mut p).range(1..=pages.max(1))).changed() {
+                                        v.page = p - 1;
+                                    }
+                                    ui.label(crate::i18n::fmt(tl!("of {pages}"), &[("pages", &pages.to_string())]));
                                 });
                             });
-                            ui.end_row();
+                            rows.heading(egui::RichText::new(tl!("Window Options")).font(theme::semibold(12.5)));
+                            rows.row("", |ui, _| {
+                                ui.add_enabled_ui(editable, |ui| {
+                                    rtl::vertical(ui, |ui| {
+                                        ui.add(widgets::checkbox(&mut v.fit_window, tl!("Resize window to initial page")));
+                                        ui.add(widgets::checkbox(&mut v.center_window, tl!("Center window on screen")));
+                                        ui.add(widgets::checkbox(&mut v.full_screen, tl!("Open in Full Screen mode")));
+                                        rtl::horizontal(ui, |ui| {
+                                            ui.label(tl!("Show:"));
+                                            widgets::radio_value(ui, &mut v.display_title, false, tl!("File Name"));
+                                            widgets::radio_value(ui, &mut v.display_title, true, tl!("Document Title"));
+                                        });
+                                    });
+                                });
+                            });
+                            rows.heading(egui::RichText::new(tl!("User Interface Options")).font(theme::semibold(12.5)));
+                            rows.row("", |ui, _| {
+                                ui.add_enabled_ui(editable, |ui| {
+                                    rtl::vertical(ui, |ui| {
+                                        ui.add(widgets::checkbox(&mut v.hide_menubar, tl!("Hide menu bar")));
+                                        ui.add(widgets::checkbox(&mut v.hide_toolbar, tl!("Hide toolbars")));
+                                        ui.add(widgets::checkbox(&mut v.hide_window_ui, tl!("Hide window controls")));
+                                    });
+                                });
+                            });
                         }
                         PropsTab::Security => match doc.security_summary() {
                             None => {
-                                row(ui, "Security method", tl!("No security").to_string());
-                                row(ui, "Restrictions", tl!("None — everything is allowed").to_string());
-                                if doc.allows_security_change() && ui.button(tl!("Protect using password…")).clicked() {
-                                    link_command = Some("protect.password");
+                                row(rows, "Security method", tl!("No security").to_string());
+                                row(rows, "Restrictions", tl!("None — everything is allowed").to_string());
+                                if doc.allows_security_change() {
+                                    rows.full_row(|ui| {
+                                        if ui.button(tl!("Protect using password…")).clicked() {
+                                            link_command = Some("protect.password");
+                                        }
+                                    });
                                 }
                             }
                             Some(sec) => {
-                                row(ui, "Security method", tl!("Password security").to_string());
-                                row(ui, "Encryption", sec.method.clone());
+                                row(rows, "Security method", tl!("Password security").to_string());
+                                row(rows, "Encryption", sec.method.clone());
                                 row(
-                                    ui,
+                                    rows,
                                     "Opened with",
                                     if sec.pending {
                                         tl!("— (protection is applied when you save)").to_string()
@@ -292,22 +306,24 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                                 );
                                 // A restricted document asks for its permissions password first.
                                 if doc.allows_security_change() || doc.can_unlock() {
-                                    rtl::horizontal(ui, |ui| {
-                                        if doc.can_unlock() && ui.button(tl!("Unlock…")).clicked() {
-                                            link_command = Some("protect.unlock");
-                                        }
-                                        if ui.button(tl!("Change settings…")).clicked() {
-                                            link_command = Some("protect.password");
-                                        }
-                                        if ui.button(tl!("Remove security")).clicked() {
-                                            link_command = Some("protect.remove");
-                                        }
+                                    rows.full_row(|ui| {
+                                        rtl::horizontal(ui, |ui| {
+                                            if doc.can_unlock() && ui.button(tl!("Unlock…")).clicked() {
+                                                link_command = Some("protect.unlock");
+                                            }
+                                            if ui.button(tl!("Change settings…")).clicked() {
+                                                link_command = Some("protect.password");
+                                            }
+                                            if ui.button(tl!("Remove security")).clicked() {
+                                                link_command = Some("protect.remove");
+                                            }
+                                        });
                                     });
                                 }
                                 let p = sec.permissions;
                                 let yes = |b: bool| tl!(if b { "Allowed" } else { "Not allowed" }).to_string();
                                 row(
-                                    ui,
+                                    rows,
                                     "Printing",
                                     if !p.print() {
                                         tl!("Not allowed").to_string()
@@ -317,17 +333,17 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                                         tl!("Low resolution").to_string()
                                     },
                                 );
-                                row(ui, "Changing the document", yes(p.modify()));
-                                row(ui, "Document assembly", yes(p.assemble()));
-                                row(ui, "Content copying", yes(p.copy()));
-                                row(ui, "Content copying for accessibility", yes(p.extract_for_accessibility()));
-                                row(ui, "Commenting", yes(p.annotate()));
-                                row(ui, "Filling of form fields", yes(p.fill_forms()));
+                                row(rows, "Changing the document", yes(p.modify()));
+                                row(rows, "Document assembly", yes(p.assemble()));
+                                row(rows, "Content copying", yes(p.copy()));
+                                row(rows, "Content copying for accessibility", yes(p.extract_for_accessibility()));
+                                row(rows, "Commenting", yes(p.annotate()));
+                                row(rows, "Filling of form fields", yes(p.fill_forms()));
                             }
                         },
                         PropsTab::Fonts => {
                             if i.fonts.is_empty() {
-                                row(ui, "Fonts", tl!("No fonts are referenced by the pages.").to_string());
+                                row(rows, "Fonts", tl!("No fonts are referenced by the pages.").to_string());
                             }
                             for f in &i.fonts {
                                 let mut detail = f.kind.clone();
@@ -341,76 +357,90 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                                 } else {
                                     " · Not embedded (substituted)"
                                 });
-                                row(ui, &crate::bidi::visual(&f.name), detail);
+                                row(rows, &crate::bidi::visual(&f.name), detail);
                             }
                         }
                         PropsTab::Advanced => {
-                            row(ui, "PDF version", i.pdf_version.clone());
-                            row(ui, "Location", crate::bidi::visual(doc.path.as_deref().unwrap_or_default()).into_owned());
-                            row(ui, "File size", format!("{} ({})", human_size(i.file_size), crate::panels::byte_count(i.file_size)));
-                            let p = &i.pages[0];
-                            row(ui, "Page size", units.size(f64::from(p.width), f64::from(p.height)));
-                            row(ui, "Number of pages", i.pages.len().to_string());
-                            row(ui, "Tagged PDF", yes(i.tagged));
-                            row(ui, "Form fields", i.fields.len().to_string());
-                            row(ui, "Comments", i.annotations.len().to_string());
-                            row(ui, "Layers", i.layers.len().to_string());
-                            row(ui, "Attachments", i.attachments.len().to_string());
-                            row(ui, "JavaScript", yes(i.has_javascript));
+                            row(rows, "PDF version", i.pdf_version.clone());
+                            row(rows, "Location", crate::bidi::visual(doc.path.as_deref().unwrap_or_default()).into_owned());
+                            row(rows, "File size", format!("{} ({})", human_size(i.file_size), crate::panels::byte_count(i.file_size)));
+                            // A document can have no pages at all (hostile input): then there is no size to show.
+                            if let Some(p) = i.pages.first() {
+                                row(rows, "Page size", units.size(f64::from(p.width), f64::from(p.height)));
+                            }
+                            row(rows, "Number of pages", i.pages.len().to_string());
+                            row(rows, "Tagged PDF", yes(i.tagged));
+                            row(rows, "Form fields", i.fields.len().to_string());
+                            row(rows, "Comments", i.annotations.len().to_string());
+                            row(rows, "Layers", i.layers.len().to_string());
+                            row(rows, "Attachments", i.attachments.len().to_string());
+                            row(rows, "JavaScript", yes(i.has_javascript));
                             // Each incremental update is a revision; earlier ones open as their own document.
                             let ends = doc.revision_ends();
                             if ends.len() > 1 {
-                                ui.label(egui::RichText::new(tl!("Revisions")).color(t.text_muted));
-                                // Reserve the full wrapped height before the grid starts the next row.
-                                ui.vertical(|ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(ends.len().to_string());
-                                        for n in (1..ends.len()).rev().take(12) {
-                                            if ui
-                                                .small_button(crate::i18n::fmt(tl!("View revision {n}"), &[("n", &n.to_string())]))
-                                                .on_hover_text(tl!("Open the file as it was saved then"))
-                                                .clicked()
-                                            {
-                                                open_revision = Some(n);
-                                            }
-                                        }
-                                    });
-                                });
-                                ui.end_row();
+                                rows.row_styled(
+                                    tl!("Revisions"),
+                                    |caption| caption.color(t.text_muted),
+                                    |ui, _| {
+                                        // Reserve the full wrapped height before the grid starts the next row.
+                                        rtl::vertical(ui, |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(ends.len().to_string());
+                                                for n in (1..ends.len()).rev().take(12) {
+                                                    if ui
+                                                        .small_button(crate::i18n::fmt(tl!("View revision {n}"), &[("n", &n.to_string())]))
+                                                        .on_hover_text(tl!("Open the file as it was saved then"))
+                                                        .clicked()
+                                                    {
+                                                        open_revision = Some(n);
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    },
+                                );
                             }
                             // Reading Options: binding and language.
                             if let Some((_, v)) = app.view_draft.as_mut() {
                                 let editable = doc.allows_modification();
-                                ui.label(egui::RichText::new(tl!("Binding")).color(t.text_muted));
-                                ui.add_enabled_ui(editable, |ui| {
-                                    rtl::horizontal(ui, |ui| {
-                                        widgets::radio_value(ui, &mut v.right_to_left, false, tl!("Left Edge"));
-                                        widgets::radio_value(ui, &mut v.right_to_left, true, tl!("Right Edge"));
-                                    });
-                                });
-                                ui.end_row();
-                                let l = ui.label(egui::RichText::new(tl!("Language")).color(t.text_muted));
-                                let mut lang = v.language.clone().unwrap_or_default();
-                                if ui
-                                    .add_enabled(editable, widgets::line(&mut lang).hint_text(tl!("e.g. en-US")).desired_width(160.0))
-                                    .labelled_by(l.id)
-                                    .changed()
-                                {
-                                    v.language = (!lang.trim().is_empty()).then(|| lang.trim().to_string());
-                                }
-                                ui.end_row();
+                                rows.row_styled(
+                                    tl!("Binding"),
+                                    |caption| caption.color(t.text_muted),
+                                    |ui, _| {
+                                        ui.add_enabled_ui(editable, |ui| {
+                                            rtl::horizontal(ui, |ui| {
+                                                widgets::radio_value(ui, &mut v.right_to_left, false, tl!("Left Edge"));
+                                                widgets::radio_value(ui, &mut v.right_to_left, true, tl!("Right Edge"));
+                                            });
+                                        });
+                                    },
+                                );
+                                rows.row_styled(
+                                    tl!("Language"),
+                                    |caption| caption.color(t.text_muted),
+                                    |ui, l| {
+                                        let mut lang = v.language.clone().unwrap_or_default();
+                                        if ui
+                                            .add_enabled(editable, widgets::line(&mut lang).hint_text(tl!("e.g. en-US")).desired_width(160.0))
+                                            .labelled_by(l.id)
+                                            .changed()
+                                        {
+                                            v.language = (!lang.trim().is_empty()).then(|| lang.trim().to_string());
+                                        }
+                                    },
+                                );
                             }
                             // What was repaired while reading a damaged file (fidelity: never silent).
                             let repairs = doc.repair_log();
-                            row(ui, "Repairs", if repairs.is_empty() { tl!("None").to_string() } else { repairs.len().to_string() });
+                            row(rows, "Repairs", if repairs.is_empty() { tl!("None").to_string() } else { repairs.len().to_string() });
                             if !repairs.is_empty() {
-                                ui.label("");
-                                egui::CollapsingHeader::new(tl!("Repair log")).show(ui, |ui| {
-                                    for r in &repairs {
-                                        ui.add(egui::Label::new(egui::RichText::new(r).small()).wrap());
-                                    }
+                                rows.row("", |ui, _| {
+                                    egui::CollapsingHeader::new(tl!("Repair log")).show(ui, |ui| {
+                                        for r in &repairs {
+                                            ui.add(egui::Label::new(egui::RichText::new(r).small()).wrap());
+                                        }
+                                    });
                                 });
-                                ui.end_row();
                             }
                         }
                     })
@@ -624,61 +654,61 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 use pdfcraft_engine::{PageOrientation as O, PageParity as P};
                 let n = app.active_ids().and_then(|(_, id)| app.session.get(id)).map_or(1, |d| d.info.pages.len());
                 let d = &mut app.rotate_draft;
-                ui.label(egui::RichText::new(tl!("Rotate Pages")).font(theme::semibold(18.0)));
+                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Rotate Pages")).font(theme::semibold(18.0))));
                 ui.add_space(8.0);
-                egui::Grid::new("rotate-pages").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label(tl!("Direction:"));
-                    egui::ComboBox::from_id_salt("rotate-dir")
-                        .selected_text(match d.degrees {
-                            270 => tl!("Counterclockwise 90 degrees"),
-                            180 => tl!("180 degrees"),
-                            _ => tl!("Clockwise 90 degrees"),
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut d.degrees, 90, tl!("Clockwise 90 degrees"));
-                            ui.selectable_value(&mut d.degrees, 270, tl!("Counterclockwise 90 degrees"));
-                            ui.selectable_value(&mut d.degrees, 180, tl!("180 degrees"));
-                        });
-                    ui.end_row();
-                    ui.label(tl!("Pages:"));
-                    ui.vertical(|ui| {
-                        widgets::radio_value(ui, &mut d.which, 0, tl!("All"));
-                        widgets::radio_value(ui, &mut d.which, 1, tl!("Selection"));
-                        rtl::horizontal(ui, |ui| {
-                            widgets::radio_value(ui, &mut d.which, 2, tl!("From"));
-                            ui.add_enabled(d.which == 2, egui::DragValue::new(&mut d.from).range(1..=n));
-                            ui.label(tl!("to"));
-                            ui.add_enabled(d.which == 2, egui::DragValue::new(&mut d.to).range(1..=n));
-                            ui.label(crate::i18n::fmt(tl!("of {name}"), &[("name", &n.to_string())]));
+                widgets::form_grid(ui, "rotate-pages", [12.0, 8.0], None, |rows| {
+                    rows.row(tl!("Direction:"), |ui, _| {
+                        egui::ComboBox::from_id_salt("rotate-dir")
+                            .selected_text(match d.degrees {
+                                270 => tl!("Counterclockwise 90 degrees"),
+                                180 => tl!("180 degrees"),
+                                _ => tl!("Clockwise 90 degrees"),
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut d.degrees, 90, tl!("Clockwise 90 degrees"));
+                                ui.selectable_value(&mut d.degrees, 270, tl!("Counterclockwise 90 degrees"));
+                                ui.selectable_value(&mut d.degrees, 180, tl!("180 degrees"));
+                            });
+                    });
+                    rows.row(tl!("Pages:"), |ui, _| {
+                        rtl::vertical(ui, |ui| {
+                            widgets::radio_value(ui, &mut d.which, 0, tl!("All"));
+                            widgets::radio_value(ui, &mut d.which, 1, tl!("Selection"));
+                            rtl::horizontal(ui, |ui| {
+                                widgets::radio_value(ui, &mut d.which, 2, tl!("From"));
+                                ui.add_enabled(d.which == 2, egui::DragValue::new(&mut d.from).range(1..=n));
+                                ui.label(tl!("to"));
+                                ui.add_enabled(d.which == 2, egui::DragValue::new(&mut d.to).range(1..=n));
+                                ui.label(crate::i18n::fmt(tl!("of {name}"), &[("name", &n.to_string())]));
+                            });
                         });
                     });
-                    ui.end_row();
-                    ui.label(tl!("Rotate:"));
-                    egui::ComboBox::from_id_salt("rotate-parity")
-                        .selected_text(match d.parity {
-                            P::Both => tl!("Even and Odd Pages"),
-                            P::Even => tl!("Even Pages Only"),
-                            P::Odd => tl!("Odd Pages Only"),
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut d.parity, P::Both, tl!("Even and Odd Pages"));
-                            ui.selectable_value(&mut d.parity, P::Even, tl!("Even Pages Only"));
-                            ui.selectable_value(&mut d.parity, P::Odd, tl!("Odd Pages Only"));
-                        });
-                    ui.end_row();
-                    ui.label("");
-                    egui::ComboBox::from_id_salt("rotate-orient")
-                        .selected_text(match d.orientation {
-                            O::Both => tl!("Landscape and Portrait Pages"),
-                            O::Landscape => tl!("Landscape Pages"),
-                            O::Portrait => tl!("Portrait Pages"),
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut d.orientation, O::Both, tl!("Landscape and Portrait Pages"));
-                            ui.selectable_value(&mut d.orientation, O::Landscape, tl!("Landscape Pages"));
-                            ui.selectable_value(&mut d.orientation, O::Portrait, tl!("Portrait Pages"));
-                        });
-                    ui.end_row();
+                    rows.row(tl!("Rotate:"), |ui, _| {
+                        egui::ComboBox::from_id_salt("rotate-parity")
+                            .selected_text(match d.parity {
+                                P::Both => tl!("Even and Odd Pages"),
+                                P::Even => tl!("Even Pages Only"),
+                                P::Odd => tl!("Odd Pages Only"),
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut d.parity, P::Both, tl!("Even and Odd Pages"));
+                                ui.selectable_value(&mut d.parity, P::Even, tl!("Even Pages Only"));
+                                ui.selectable_value(&mut d.parity, P::Odd, tl!("Odd Pages Only"));
+                            });
+                    });
+                    rows.row("", |ui, _| {
+                        egui::ComboBox::from_id_salt("rotate-orient")
+                            .selected_text(match d.orientation {
+                                O::Both => tl!("Landscape and Portrait Pages"),
+                                O::Landscape => tl!("Landscape Pages"),
+                                O::Portrait => tl!("Portrait Pages"),
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut d.orientation, O::Both, tl!("Landscape and Portrait Pages"));
+                                ui.selectable_value(&mut d.orientation, O::Landscape, tl!("Landscape Pages"));
+                                ui.selectable_value(&mut d.orientation, O::Portrait, tl!("Portrait Pages"));
+                            });
+                    });
                 });
                 d.to = d.to.max(d.from);
                 ui.add_space(12.0);
@@ -1020,44 +1050,44 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
             }
             Dialog::NumberPages => {
                 use pdfcraft_engine::LabelStyle as L;
-                ui.label(egui::RichText::new(tl!("Number pages")).font(theme::semibold(18.0)));
+                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Number pages")).font(theme::semibold(18.0))));
                 ui.add_space(8.0);
                 let Some((_, id)) = app.active_ids() else { return };
                 let n = app.session.get(id).map(|d| d.info.pages.len()).unwrap_or(1).max(1);
                 let d = &mut app.number_draft;
                 d.to = d.to.clamp(1, n);
                 d.from = d.from.clamp(1, d.to);
-                egui::Grid::new("number_pages").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                    ui.label(tl!("Pages"));
-                    rtl::horizontal(ui, |ui| {
-                        ui.add(egui::DragValue::new(&mut d.from).range(1..=n));
-                        ui.label(tl!("to"));
-                        ui.add(egui::DragValue::new(&mut d.to).range(1..=n));
-                        ui.label(egui::RichText::new(crate::i18n::fmt(tl!("of {name}"), &[("name", &n.to_string())])).color(t.text_muted));
+                widgets::form_grid(ui, "number_pages", [12.0, 8.0], None, |rows| {
+                    rows.row(tl!("Pages"), |ui, _| {
+                        rtl::horizontal(ui, |ui| {
+                            ui.add(egui::DragValue::new(&mut d.from).range(1..=n));
+                            ui.label(tl!("to"));
+                            ui.add(egui::DragValue::new(&mut d.to).range(1..=n));
+                            ui.label(egui::RichText::new(crate::i18n::fmt(tl!("of {name}"), &[("name", &n.to_string())])).color(t.text_muted));
+                        });
                     });
-                    ui.end_row();
-                    ui.label(tl!("Style"));
-                    let styles = [
-                        (L::Decimal, "1, 2, 3"),
-                        (L::LowerRoman, "i, ii, iii"),
-                        (L::UpperRoman, "I, II, III"),
-                        (L::LowerAlpha, "a, b, c"),
-                        (L::UpperAlpha, "A, B, C"),
-                        (L::None, tl!("None (prefix only)")),
-                    ];
-                    let current = styles.iter().find(|(s, _)| *s == d.style).map_or("1, 2, 3", |(_, l)| *l);
-                    egui::ComboBox::from_id_salt("label_style").selected_text(current).show_ui(ui, |ui| {
-                        for (s, l) in styles {
-                            ui.selectable_value(&mut d.style, s, l);
-                        }
+                    rows.row(tl!("Style"), |ui, _| {
+                        let styles = [
+                            (L::Decimal, "1, 2, 3"),
+                            (L::LowerRoman, "i, ii, iii"),
+                            (L::UpperRoman, "I, II, III"),
+                            (L::LowerAlpha, "a, b, c"),
+                            (L::UpperAlpha, "A, B, C"),
+                            (L::None, tl!("None (prefix only)")),
+                        ];
+                        let current = styles.iter().find(|(s, _)| *s == d.style).map_or("1, 2, 3", |(_, l)| *l);
+                        egui::ComboBox::from_id_salt("label_style").selected_text(current).show_ui(ui, |ui| {
+                            for (s, l) in styles {
+                                ui.selectable_value(&mut d.style, s, l);
+                            }
+                        });
                     });
-                    ui.end_row();
-                    let l = ui.label(tl!("Prefix"));
-                    ui.add(widgets::line(&mut d.prefix).desired_width(160.0)).labelled_by(l.id);
-                    ui.end_row();
-                    ui.label(tl!("Start"));
-                    ui.add(egui::DragValue::new(&mut d.start).range(1..=99_999));
-                    ui.end_row();
+                    rows.row(tl!("Prefix"), |ui, l| {
+                        ui.add(widgets::line(&mut d.prefix).desired_width(160.0)).labelled_by(l.id);
+                    });
+                    rows.row(tl!("Start"), |ui, _| {
+                        ui.add(egui::DragValue::new(&mut d.start).range(1..=99_999));
+                    });
                 });
                 d.to = d.to.max(d.from);
                 let label = |k: u32| format!("{}{}", d.prefix, d.style.format(k));
@@ -1082,9 +1112,8 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 widgets::body_text(ui, &tl_logical!("PdfCraft didn't shut down normally. These documents had changes that were autosaved:"));
                 ui.add_space(8.0);
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                egui::Grid::new("recoverable").num_columns(2).spacing([18.0, 6.0]).show(ui, |ui| {
+                widgets::form_grid(ui, "recoverable", [18.0, 6.0], None, |rows| {
                     for m in &app.recoverable {
-                        ui.label(egui::RichText::new(crate::bidi::visual(&m.name)).font(theme::medium(13.0)));
                         let mins = now.saturating_sub(m.saved_at) / 60;
                         let when = match mins {
                             0 => tl!("just now").to_string(),
@@ -1094,13 +1123,16 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                         // The catalog entry keeps its separator at its edge; the join supplies it.
                         let lock = tl!(" · password-protected").trim_start_matches(|c: char| c.is_whitespace() || c == '·');
                         let line = if m.encrypted { rtl::join(&[&when, lock], " · ") } else { when };
-                        ui.label(egui::RichText::new(line).color(t.text_muted));
-                        ui.end_row();
+                        // A file name, not a caption: painted as it is, whatever it ends with.
+                        rows.row_with(
+                            |ui| ui.label(egui::RichText::new(crate::bidi::visual(&m.name)).font(theme::medium(13.0))),
+                            |ui, _| _ = ui.label(egui::RichText::new(line).color(t.text_muted)),
+                        );
                     }
                 });
             }
             Dialog::Shortcuts => {
-                ui.label(egui::RichText::new(tl!("Keyboard shortcuts")).font(theme::semibold(18.0)));
+                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Keyboard shortcuts")).font(theme::semibold(18.0))));
                 ui.add_space(8.0);
                 use crate::commands::{
                     ACTUAL_SIZE, COPY, FIND_NEXT, FIND_PREV, FIT_WIDTH, PAGE_LEVEL, PAGE_NEXT, PAGE_PREV, ROTATE_CCW, ROTATE_CW, SELECT_ALL, ZOOM_IN,
@@ -1142,11 +1174,10 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     rows.push((k, v));
                 }
                 egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
-                    egui::Grid::new("keys").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
+                    widgets::form_grid(ui, "keys", [24.0, 6.0], None, |form| {
                         for (k, v) in &rows {
-                            ui.label(egui::RichText::new(k).font(egui::FontId::monospace(12.5)));
-                            ui.label(v);
-                            ui.end_row();
+                            // A key name, not a caption: painted as it is.
+                            form.row_with(|ui| ui.label(egui::RichText::new(k).font(egui::FontId::monospace(12.5))), |ui, _| _ = ui.label(v));
                         }
                     });
                 });
@@ -1171,20 +1202,22 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     _ => {
                         rtl::horizontal(ui, |ui| {
                             widgets::artcraft_mark(ui, 40.0);
-                            ui.vertical(|ui| {
+                            rtl::vertical(ui, |ui| {
                                 ui.label(egui::RichText::new("PdfCraft").font(theme::semibold(20.0)));
                                 ui.label(crate::i18n::fmt(tl!("Version {v}"), &[("v", &pdfcraft_engine::build_info::version())]));
                             });
                         });
                         ui.add_space(6.0);
                         widgets::body_text(ui, &tl_logical!("A clean-room, open-source PDF application written in Rust. MIT OR Apache-2.0."));
-                        ui.label(
-                            egui::RichText::new(
-                                "Rendering: hayro (bootstrap) · UI: egui · Icons: Lucide (ISC) · Fonts: Inter, JetBrains Mono, Dancing Script (OFL)",
+                        rtl::page(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Rendering: hayro (bootstrap) · UI: egui · Icons: Lucide (ISC) · Fonts: Inter, JetBrains Mono, Dancing Script (OFL)",
+                                )
+                                .color(t.text_muted)
+                                .small(),
                             )
-                            .color(t.text_muted)
-                            .small(),
-                        );
+                        });
                         ui.add_space(12.0);
                         rtl::horizontal(ui, |ui| {
                             ui.label(egui::RichText::new(tl!("Part of")).color(t.text_muted));
