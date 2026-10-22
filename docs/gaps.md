@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (gap 12: reading order is scored, not just word F1) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (M1: raw-deflate fallback preserves decoding-limit errors; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (gap 14: the Arabic frame is mirrored (panes, rail, mode bar, tab strip, rows, dialog footers); menus, dialog bodies and the canvas are not yet; Arabic tooltips, dialog text and notes wrap in typing order, document text in the panels is in display order, Find ignores harakat; gap 3: Edit text shapes Arabic replacement text; the mirrored layout and typed text remain) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (gap 14: the Arabic frame, dialog forms, menus, submenus and panel scrollbars are mirrored; interface text wraps in typing order, document text in the panels is in display order, Find ignores harakat; every text field, the Add text box and the Edit text box edit Arabic in display order and break lines where the page will; the dock's tab bars, the document-tab order, the canvas and a few data tables remain; gap 3: Edit text and Add text shape Arabic; Hebrew points remain) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (gap 6: #1910 Organize Pages opens on the current page; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1398 stamps read upright on rotated pages; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1317, #1327, #1302, #1315 and #1340; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -99,8 +99,8 @@ update the numbers.
   baseline is still replaced. Estimates are unchanged.
 
 - **Missing:** robust in-place editing of text PdfCraft didn't write: subset fonts without the
-  needed glyphs, CJK text (Arabic replacement text is now shaped with the craft-fonts face;
-  Hebrew points and bidi caret/selection are not), rotated text, lists, superscript/subscript, keeping
+  needed glyphs, CJK text (Arabic replacement text is shaped with the craft-fonts face and edited in display
+  order in the Edit text box; Hebrew points are not, and the editor draws Arabic in the interface's face), rotated text, lists, superscript/subscript, keeping
   structure tags, find and replace in edit mode; vector and object editing; arrange and align.
 - **Evidence:** `edit.text-edit` is partial (font reused or Helvetica substituted);
   `edit.rtl-cjk-editing`, `edit.rotated-text-editing`, `edit.keep-tags-on-edit`,
@@ -307,15 +307,23 @@ update the numbers.
   (`widgets::BidiEdit` over `bidi::ScreenMap`: the `widgets::line` fields, the palette, the bookmark search, Find and the
   on-page form editor): caret, click, drag selection, Left/Right, Backspace/Delete, copy, undo and input methods
   work on what is drawn and what is stored stays in typing order.
-- **Missing:** the rest of the right-to-left layout (the scrollbars of the document view, Home and the dialog lists, the dock's
-  tab bars, the data tables that stay `egui::Grid`s, the Comments, Signatures and Compare panel bodies, the
-  order of document tabs, the canvas), bidirectional text in the Add text and Edit text boxes (multi-line fields wrap and edit in display order since 2026-10-22); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+- **Done (2026-10-22, later still):** submenus open to the start side and the panels' and menus' scroll areas put
+  their bar at the start edge (`widgets::sub_menu`, `widgets::scroll_area`); multi-line fields, the Add text box and the
+  Edit text box edit Arabic and Hebrew in display order and break their lines where the page will write them
+  (`BidiEdit` layout hook, `edit::added::LineMeasure`, `TextDraftProbe`), with the draft, the saved text and
+  `/ActualText` in typing order.
+- **Missing:** the rest of the right-to-left layout (the scrollbar of the document view, the dock's tab bars (craft-libs),
+  the data tables that stay `egui::Grid`s, the order of document tabs, the canvas), a selection that is logically rather
+  than screen contiguous, the page's own Arabic face in the Edit text box, Hebrew points (no Hebrew face in the pinned
+  craft-fonts); catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
   Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
   like other non-English languages (no translated help; engine/OS details stay English).
-- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` partial (mirrored frame; tooltips, dialog
-  text and notes wrap in typing order; document text in bookmarks, search, Properties, fields,
-  signatures and notices is in display order; Find ignores harakat and matches presentation forms).
+- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` partial (mirrored frame, dialog forms, menus,
+  submenus and panel scrollbars; tooltips, dialog text and notes wrap in typing order; document text in bookmarks,
+  search, Properties, fields, signatures and notices is in display order; Find ignores harakat and matches
+  presentation forms; text fields and the Add text and Edit text boxes edit Arabic in display order);
+  `edit.rtl-cjk-editing` and `edit.add-text` partial (kittests `edit_text_rtl`, `edit_text_latin`, `content`).
 - **Estimate:** 25–45 h (Arabic RTL 20–35, three catalogs 8–12 plus review). **Doc:**
   [localization-parity.md](localization-parity.md).
 
