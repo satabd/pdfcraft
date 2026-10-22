@@ -7049,3 +7049,89 @@ fn arabic_form_values_without_the_arabic_face_are_kept_marked_and_not_flattened(
     assert!(e.contains("nothing was flattened"), "{e}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Arabic in a text box, a Typewriter line and Fill & Sign text is drawn shaped (not `?`) by the
+/// annotation's own appearance: the page shows it, text extraction and search read it in the typed
+/// order, flattening keeps it, and saving and reopening keep the annotation and its look.
+#[test]
+fn arabic_free_text_is_drawn_shaped_flattened_and_kept_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in text boxes");
+        return;
+    }
+    let dir = workdir("free-text-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+
+    let typed = "مرحبا بالعالم";
+    let out =
+        ok(&mut a, "comment_add", json!({ "doc": doc, "page": 1, "type": "textbox", "rect": [20, 20, 180, 50], "contents": typed, "font_size": 12 }));
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    let boxed = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(boxed, empty, "the page shows the Arabic text box");
+    let mixed = "رقم 42 Report";
+    let out = ok(
+        &mut a,
+        "comment_add",
+        json!({ "doc": doc, "page": 1, "type": "textbox", "rect": [20, 60, 120, 120], "contents": mixed, "font_size": 12 }),
+    );
+    assert!(out.get("warnings").is_none(), "{out}");
+    let out = ok(&mut a, "fill_sign_add", json!({ "doc": doc, "page": 1, "type": "text", "at": [20, 150], "text": "السلام عليكم" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    let text = page_text(&mut a, doc)[0].clone();
+    assert!(text.contains(typed) && text.contains(mixed) && text.contains("السلام عليكم"), "{text:?}");
+    assert!(!text.contains('?'), "{text:?}");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "بالعالم" }))["matches"].as_array().unwrap().len(), 1);
+    let listed = ok(&mut a, "comment_list", json!({ "doc": doc }));
+    assert_eq!(listed["count"], 3, "{listed}");
+
+    // Saved and reopened: the same picture and text.
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "boxed.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "boxed.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains(typed));
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": re }))["count"], 3);
+
+    // Flattening is not refused (nothing is `?`): the annotations go, the text stays on the page.
+    ok(&mut a, "doc_flatten", json!({ "doc": doc, "comments": true, "fields": false }));
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": doc }))["count"], 0);
+    assert!(page_text(&mut a, doc)[0].contains(typed));
+    assert_eq!(a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap(), drawn, "flattened, the page looks the same");
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "flat.pdf" }));
+    let flat = ok(&mut a, "doc_open", json!({ "path": "flat.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, flat)[0].contains(typed));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The same text box in a build with no Arabic face keeps its text, draws `?`, says so, and
+/// refuses to flatten the `?` into the page.
+#[test]
+fn arabic_free_text_without_the_arabic_face_is_kept_marked_and_not_flattened() {
+    use pdfcraft_fonts::shaped_text::{Shaper, set_test_shaper};
+    struct NoFace;
+    impl Drop for NoFace {
+        fn drop(&mut self) {
+            set_test_shaper(None);
+        }
+    }
+    set_test_shaper(Some(Shaper {
+        shape: |_, _, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        has: |_, _| false,
+        outline: |_, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        arabic_available: || false,
+    }));
+    let _guard = NoFace;
+    let dir = workdir("free-text-arabic-no-face");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let typed = "مرحبا";
+    let out = ok(&mut a, "comment_add", json!({ "doc": doc, "page": 1, "type": "textbox", "rect": [20, 20, 180, 50], "contents": typed }));
+    let warned = out["warnings"].as_array().is_some_and(|w| w.iter().filter_map(Value::as_str).any(|m| m.contains("U+0645")));
+    assert!(warned, "{out}");
+    assert!(page_text(&mut a, doc)[0].contains('?'));
+    let e = err(&mut a, "doc_flatten", json!({ "doc": doc })).to_string();
+    assert!(e.contains("nothing was flattened"), "{e}");
+    std::fs::remove_dir_all(dir).unwrap();
+}

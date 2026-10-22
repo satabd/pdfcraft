@@ -49,7 +49,7 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
   fonts added in chunks with collision-free resource names) and `ShapedPlan::line_ops` returns the
   operators of one line as a `/Span <</ActualText …>> BDC … EMC` of `Tf`/`Tj` runs, as `TextOp`s
   (this crate sits below the content-stream crate); `Measure` gives line widths for wrapping and
-  alignment; `first_strong_is_rtl` gives a paragraph's direction. `Shaper` holds the face
+  alignment; `first_strong_is_rtl` gives a paragraph's direction. `cluster_paths` and `actual_text_bdc` draw clusters as filled paths inside a `/Span <</ActualText …>>` for writers that can add no font (annotation appearances built from a dictionary alone, `pdfcraft-annot`). `Shaper` holds the face
   functions as plain pointers; `set_test_shaper` (feature `test-shaper`, enabled by the
   dev-dependencies of the crates that test with a stand-in face) swaps them on a thread.
 - `document_japanese_font` / `japanese_glyph`: the face (Shippori Mincho, then BIZ UDMincho) whose

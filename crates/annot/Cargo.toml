@@ -16,3 +16,5 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 hayro-syntax = { workspace = true }
+# The stand-in for the Arabic face that the shaped-text tests use.
+pdfcraft-fonts = { workspace = true, features = ["test-shaper"] }
