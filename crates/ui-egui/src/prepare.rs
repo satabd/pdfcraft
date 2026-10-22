@@ -1208,7 +1208,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                     widgets::section_title(ui, tl!("Item List"));
                     let mut remove = None;
                     let mut up = None;
-                    egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                    crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(140.0), |ui| {
                         for (i, o) in d.options.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 ui.label(crate::bidi::visual_auto(o).as_ref());
@@ -1592,7 +1592,7 @@ fn calculate_tab(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Tokens
             });
             ui.label(tl!("of the following fields:"));
         });
-        egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
+        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(110.0), |ui| {
             for name in &d.others {
                 let mut on = fields.contains(name);
                 if ui.add(widgets::checkbox(&mut on, name)).changed() {

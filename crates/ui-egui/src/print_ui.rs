@@ -749,7 +749,7 @@ fn driver_options_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
             ui.label(egui::RichText::new(tl!("This printer offers no settings of its own.")).small().color(t.text_muted));
             return;
         }
-        egui::ScrollArea::vertical().id_salt("driver-options").max_height(240.0).show(ui, |ui| {
+        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().id_salt("driver-options").max_height(240.0), |ui| {
             for (n, chunk) in options.chunk_by(|a, b| a.group == b.group).enumerate() {
                 let group = chunk.first().map_or("", |o| o.group.as_str());
                 if !group.is_empty() {

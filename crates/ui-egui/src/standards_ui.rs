@@ -78,7 +78,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool
     ui.add_space(6.0);
     egui::Frame::new().fill(t.hover).corner_radius(egui::CornerRadius::same(6)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(260.0), |ui| {
             ui.set_min_height(120.0);
             match &app.pdfa.issues {
                 None => {

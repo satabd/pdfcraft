@@ -271,21 +271,23 @@ pub fn contributors_ui(ui: &mut egui::Ui) {
     let view_width = ui.available_width();
     // A table wider than the window starts at its right edge, where a mirrored table begins.
     let area = egui::ScrollArea::both().id_salt("credits_list").max_height(LIST_HEIGHT).auto_shrink([false, true]);
-    area.stick_to_right(rtl::mirrored()).show(ui, |ui| {
-        if list.is_empty() {
-            ui.label(crate::i18n::t("No contributor data was built into this copy."));
-        } else if v.table {
-            table(ui, &list, &mut v, view_width);
-        } else {
-            ui.horizontal_wrapped(|ui| {
-                for (i, c) in list.iter().enumerate() {
-                    if i > 0 {
-                        ui.label(RichText::new("·").color(t.text_faint));
+    crate::widgets::scroll_area_with(ui, area.stick_to_right(rtl::mirrored()), true, |area, ui| {
+        area.show(ui, |ui| {
+            if list.is_empty() {
+                ui.label(crate::i18n::t("No contributor data was built into this copy."));
+            } else if v.table {
+                table(ui, &list, &mut v, view_width);
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for (i, c) in list.iter().enumerate() {
+                        if i > 0 {
+                            ui.label(RichText::new("·").color(t.text_faint));
+                        }
+                        ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
                     }
-                    ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
-                }
-            });
-        }
+                });
+            }
+        })
     });
     ui.data_mut(|d| d.insert_temp(id, v));
 }
@@ -380,25 +382,27 @@ pub fn models_ui(ui: &mut egui::Ui) {
     let assisted: u64 = MODELS.iter().map(|m| m.commits).max().unwrap_or(0).max(1);
     let view_width = ui.available_width();
     let area = egui::ScrollArea::both().id_salt("credits_models").max_height(LIST_HEIGHT).auto_shrink([false, true]);
-    area.stick_to_right(rtl::mirrored()).show(ui, |ui| {
-        if rtl::mirrored() {
-            let heads: Vec<Head> = MODEL_COLUMNS.iter().map(|h| Head { text: crate::i18n::t(h).to_string(), tip: None, button: false }).collect();
-            let rows: Vec<Vec<Cell>> = MODELS.iter().map(|m| model_cells(m, assisted).into_iter().map(Cell::Text).collect()).collect();
-            mirrored_table(ui, "credits_models", &heads, &rows, view_width);
-            return;
-        }
-        egui::Grid::new("credits_models").striped(true).num_columns(6).show(ui, |ui| {
-            for h in MODEL_COLUMNS {
-                ui.label(RichText::new(crate::i18n::t(h)).strong());
+    crate::widgets::scroll_area_with(ui, area.stick_to_right(rtl::mirrored()), true, |area, ui| {
+        area.show(ui, |ui| {
+            if rtl::mirrored() {
+                let heads: Vec<Head> = MODEL_COLUMNS.iter().map(|h| Head { text: crate::i18n::t(h).to_string(), tip: None, button: false }).collect();
+                let rows: Vec<Vec<Cell>> = MODELS.iter().map(|m| model_cells(m, assisted).into_iter().map(Cell::Text).collect()).collect();
+                mirrored_table(ui, "credits_models", &heads, &rows, view_width);
+                return;
             }
-            ui.end_row();
-            for m in MODELS {
-                for text in model_cells(m, assisted) {
-                    ui.label(text);
+            egui::Grid::new("credits_models").striped(true).num_columns(6).show(ui, |ui| {
+                for h in MODEL_COLUMNS {
+                    ui.label(RichText::new(crate::i18n::t(h)).strong());
                 }
                 ui.end_row();
-            }
-        });
+                for m in MODELS {
+                    for text in model_cells(m, assisted) {
+                        ui.label(text);
+                    }
+                    ui.end_row();
+                }
+            });
+        })
     });
 }
 

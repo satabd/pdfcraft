@@ -1178,3 +1178,96 @@ fn the_contributor_table_runs_from_the_start_edge() {
         assert_on_screen(&h, &format!("{language} contributors"));
     }
 }
+
+/// Every vertical scrollbar on screen taller than 100 points: egui's own and the ones the panels
+/// and areas draw themselves when the interface is mirrored.
+fn tall_bars(h: &Harness<'static, PdfCraftApp>) -> Vec<egui::Rect> {
+    h.query_all_by_role(Role::ScrollBar).map(|n| n.rect()).filter(|r| r.width() < 24.0 && r.height() > 100.0).collect()
+}
+
+/// A harness on the app `setup` builds, in `language`, `size` big, after a few frames.
+fn bare(language: &'static str, size: egui::Vec2, setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harness<'static, PdfCraftApp> {
+    let mut h = Harness::builder().with_size(size).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", language).unwrap();
+        setup(&mut app);
+        app
+    });
+    h.run_steps(8);
+    h
+}
+
+/// The scroll area of `region` (the part of the screen it fills) has its one vertical bar against
+/// the region's start edge: the left when mirrored (and no bar at its right), the right in English.
+fn assert_bar_at_start_edge(language: &str, region: egui::Rect, bars: &[egui::Rect], what: &str) {
+    let inside: Vec<egui::Rect> = bars.iter().filter(|b| region.contains_rect(**b)).copied().collect();
+    assert_eq!(inside.len(), 1, "{language} {what}: one vertical bar in {region:?} among {bars:?}");
+    let bar = inside[0];
+    if language == "ar" {
+        assert!((bar.left() - region.left()).abs() < 12.0, "ar {what}: the bar {bar:?} is at the left edge of {region:?}");
+        assert!(bar.right() < region.center().x, "ar {what}: and is a thin strip: {bar:?}");
+    } else {
+        assert!((bar.right() - region.right()).abs() < 12.0, "en {what}: the bar {bar:?} is at the right edge of {region:?}");
+    }
+}
+
+/// The Home screen's scrollbar is at the start edge of the screen: the left in Arabic (egui puts
+/// its own at the right, so the screen draws a bar of its own), the right in English.
+#[test]
+fn the_home_screens_scrollbar_is_at_the_start_edge() {
+    /// The width of the tools pane, on the right when mirrored and on the left in English.
+    const TOOLS: f32 = 272.0;
+    for language in ["ar", "en"] {
+        // Short enough that the welcome page outgrows the window.
+        let h = bare(language, egui::vec2(WIDTH, 300.0), |_| {});
+        let home = if language == "ar" {
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(WIDTH - TOOLS, 300.0))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(TOOLS, 0.0), egui::pos2(WIDTH, 300.0))
+        };
+        assert_bar_at_start_edge(language, home, &tall_bars(&h), "home");
+    }
+}
+
+/// The Combine grid's scrollbar is at the start edge of the grid: the left in Arabic (the grid
+/// draws a bar of its own), the right in English.
+#[test]
+fn the_combine_grids_scrollbar_is_at_the_start_edge() {
+    for language in ["ar", "en"] {
+        let h = bare(language, egui::vec2(WIDTH, 700.0), |app| {
+            // Far more cards than fit: several rows of them.
+            let files: Vec<(String, Vec<u8>)> = (1..=60).map(|i| (format!("file-{i}.pdf"), fixture())).collect();
+            app.use_files(pdfcraft_ui_egui::FilePurpose::Combine, files);
+        });
+        // The Combine page is inset 28 points from the sides of the screen; the tools pane is
+        // 272 wide, on the right when mirrored and on the left in English.
+        let grid = if language == "ar" {
+            egui::Rect::from_min_max(egui::pos2(28.0, 0.0), egui::pos2(WIDTH - 272.0, 700.0))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(272.0, 0.0), egui::pos2(WIDTH - 28.0, 700.0))
+        };
+        assert_bar_at_start_edge(language, grid, &tall_bars(&h), "combine grid");
+    }
+}
+
+/// A dialog's scrollbar is at the start side of the dialog: the left of the Keyboard Shortcuts
+/// list in Arabic (the list draws a bar of its own, and no egui bar is at its right), the right
+/// of it in English.
+#[test]
+fn a_dialogs_scrollbar_is_at_the_start_edge() {
+    for language in ["ar", "en"] {
+        let h = harness(language, |app| app.set_option("dialog", "shortcuts").unwrap());
+        let card: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("dialog").with("card"))).expect("the dialog is open");
+        let bars: Vec<egui::Rect> = tall_bars(&h).into_iter().filter(|b| card.contains_rect(*b)).collect();
+        assert_eq!(bars.len(), 1, "{language}: one vertical bar in the dialog {card:?} among {bars:?}");
+        let bar = bars[0];
+        if language == "ar" {
+            // The card's padding is 20 points.
+            assert!(bar.left() - card.left() < 32.0, "ar: the bar {bar:?} is against the left edge of the dialog {card:?}");
+            assert!(bar.center().x < card.center().x, "ar: and not at its right");
+        } else {
+            assert!(bar.center().x > card.center().x, "en: the bar {bar:?} is in the right half of the dialog {card:?}");
+        }
+        assert_on_screen(&h, &format!("{language} shortcuts"));
+    }
+}

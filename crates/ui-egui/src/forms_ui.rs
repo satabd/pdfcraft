@@ -616,7 +616,7 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_min_width(rect.width().max(160.0));
                         ui.label(egui::RichText::new(crate::bidi::visual_auto(&f.name)).small().color(t.text_faint));
-                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(260.0), |ui| {
                             for (export, display) in &f.options {
                                 let on = f.value.first() == Some(export);
                                 if ui.selectable_label(on, crate::bidi::visual_auto(display).as_ref()).clicked() {

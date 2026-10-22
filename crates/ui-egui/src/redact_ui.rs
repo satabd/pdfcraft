@@ -392,7 +392,7 @@ pub(crate) fn search_body(ui: &mut egui::Ui, d: &mut SearchDraft, t: &Tokens) ->
     widgets::radio_value(ui, &mut d.mode, SearchMode::Words, tl!("Multiple words or phrases"));
     let mut import = false;
     ui.add_enabled_ui(d.mode == SearchMode::Words, |ui| {
-        egui::ScrollArea::vertical().id_salt("redact-words").max_height(120.0).show(ui, |ui| {
+        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().id_salt("redact-words").max_height(120.0), |ui| {
             // One phrase per line, each read from its first strong letter (an Arabic phrase from the right).
             let align = widgets::field_align(&d.words);
             ui.add(

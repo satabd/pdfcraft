@@ -297,7 +297,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
         }
     });
     ui.separator();
-    egui::ScrollArea::vertical().max_height(430.0).auto_shrink([false, true]).show(ui, |ui| {
+    crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(430.0).auto_shrink([false, true]), |ui| {
         // A form of three cells (the checkbox with the property's name, its editor, the tag): in
         // Arabic the checkbox is at the right, then the editor, then the tag at its left.
         widgets::form_grid_of(ui, "bulk-field-properties", [16.0, 10.0], None, 3, |ui| match d.tab {

@@ -592,6 +592,7 @@ Newest first: the date, what moved, and the new overall estimate.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | M14: Home, the Combine grid and the scrolled lists inside the dialogs and panels (Document Properties, Keyboard Shortcuts, link prompts, JavaScript, measurements, tags, Prepare Form, Search & Redact, printer options, PDF/A report, digital IDs, Shared Field Properties, About tables) paint their vertical scrollbar at the left edge under the Arabic interface (`widgets::scroll_area` / `scroll_area_with`; English is `ScrollArea::show` as before). The Organize page grid (`canvas.rs`) and the horizontal-only areas keep egui's bar. Estimates unchanged. |
 | 2026-10-22 | minor | M6: right-to-left tables read right to left in the Word (`bidiVisual`), PowerPoint, HTML and RTF exports. Estimates unchanged. |
 | 2026-10-22 | minor | M14: single-line fields read from their first strong letter and the last plain text fields (Fill & Sign box, tag search and values, extract name, Search & Redact word list) edit Arabic in display order. Estimates unchanged. |
 | 2026-10-22 | minor | M6: Arabic in XFA text drawn shaped through Flatten and static conversion; Office, HTML and RTF exports mark right-to-left paragraphs. Estimates unchanged. |

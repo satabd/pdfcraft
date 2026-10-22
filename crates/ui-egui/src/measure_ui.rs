@@ -397,7 +397,7 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
                 ui.colored_label(Color32::from_rgb(190, 120, 30), format!("{}: {}", tl!("Unsupported measurements"), listing.unsupported.len()))
                     .on_hover_text(reasons.join("\n"));
             }
-            egui::ScrollArea::vertical().id_salt("measurement-list").max_height(140.0).show(ui, |ui| {
+            crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().id_salt("measurement-list").max_height(140.0), |ui| {
                 for m in &listing.measurements {
                     if ui
                         .button(format!("{} {}: {} {}", tl!("Page"), m.page.saturating_add(1), m.reading.label, crate::bidi::visual_auto(&m.label)))

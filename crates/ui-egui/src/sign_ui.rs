@@ -691,7 +691,7 @@ fn choose(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     let ids = app.digital_ids.clone();
     let Some(d) = app.sign_draft.as_mut() else { return true };
     let mut close = false;
-    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+    crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(220.0), |ui| {
         for (i, e) in ids.iter().enumerate() {
             let selected = d.selected == Some(i);
             let usable = e.unusable.is_none();

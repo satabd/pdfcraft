@@ -145,7 +145,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 };
                 let row = |rows: &mut widgets::FormRows<'_>, k: &str, v: String| row_with(rows, k, v, false);
                 let row_doc = |rows: &mut widgets::FormRows<'_>, k: &str, v: String| row_with(rows, k, v, true);
-                egui::ScrollArea::vertical().max_height(460.0).auto_shrink([false, true]).show(ui, |ui| {
+                crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(460.0).auto_shrink([false, true]), |ui| {
                     widgets::form_grid(ui, "props", [18.0, 8.0], Some(140.0), |rows| match tab {
                         PropsTab::Description => {
                             row(rows, "File", crate::bidi::visual(&doc.name).into_owned());
@@ -1175,7 +1175,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 ] {
                     rows.push((k, v));
                 }
-                egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+                crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(460.0), |ui| {
                     widgets::form_grid(ui, "keys", [24.0, 6.0], None, |form| {
                         for (k, v) in &rows {
                             // A key name, not a caption: painted as it is.
@@ -1618,7 +1618,7 @@ fn link_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 ui.add(egui::Label::new(egui::RichText::new(note).color(t.text)).wrap());
             }
         }
-        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(120.0), |ui| {
             ui.add(egui::Label::new(egui::RichText::new(&pending.url).monospace().small()).wrap().selectable(true));
         });
         ui.add_space(8.0);
@@ -1698,7 +1698,7 @@ fn remote_link_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
         ui.label(egui::RichText::new(tl!("Open this local PDF?")).font(theme::semibold(16.0)));
         ui.add_space(6.0);
         ui.label(tl!("This document is trying to open a local file:"));
-        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(160.0), |ui| {
             ui.add(egui::Label::new(egui::RichText::new(pending.path.to_string_lossy()).monospace()).wrap().selectable(true));
         });
         ui.add_space(8.0);
