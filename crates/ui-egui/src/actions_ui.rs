@@ -25,6 +25,8 @@ pub struct Wizard {
 pub struct RunProgress {
     pub done: usize,
     pub total: usize,
+    /// The summary shown when the run is over, in logical order ([`crate::i18n::Logical`]): it
+    /// becomes the toast.
     pub message: Option<String>,
 }
 
@@ -115,11 +117,15 @@ impl PdfCraftApp {
                     Err(e) => failed.push(format!("{name}: {}", e)),
                 }
             }
-            let done =
-                if ok == 1 { crate::i18n::fmt(tl!("1 file done"), &[]) } else { crate::i18n::fmt(tl!("{n} files done"), &[("n", &ok.to_string())]) };
+            let done = if ok == 1 {
+                crate::i18n::fmt_logical(&tl_logical!("1 file done"), &[])
+            } else {
+                crate::i18n::fmt_logical(&tl_logical!("{n} files done"), &[("n", &ok.to_string())])
+            };
+            // In logical order: the toast wraps and reorders it.
             let mut msg = format!("{}: {done}", action.name);
             if !failed.is_empty() {
-                msg.push_str(&crate::i18n::fmt(tl!("; failed: {list}"), &[("list", &failed.join("; "))]));
+                msg.push_str(&crate::i18n::fmt_logical(&tl_logical!("; failed: {list}"), &[("list", &failed.join("; "))]));
             }
             if let Ok(mut s) = p.lock() {
                 s.done = s.total;
@@ -148,8 +154,8 @@ impl PdfCraftApp {
                 self.notify(m);
             }
             Some(Err((done, total))) => {
-                let m = crate::i18n::fmt(
-                    tl!("Running action… file {d} of {t}"),
+                let m = crate::i18n::fmt_logical(
+                    &tl_logical!("Running action… file {d} of {t}"),
                     &[("d", &(done + 1).min(total.max(1)).to_string()), ("t", &total.max(1).to_string())],
                 );
                 if self.toast.as_ref().is_none_or(|t| t.0 != m) {

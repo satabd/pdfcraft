@@ -35,11 +35,14 @@ impl PdfCraftApp {
             self.pdfa_verify();
             let left = self.pdfa.issues.as_ref().map_or(0, Vec::len);
             self.notify(if left == 0 {
-                crate::i18n::fmt(tl!("The document now conforms to {level}; save it to keep the changes"), &[("level", level.label())])
+                crate::i18n::fmt_logical(
+                    &tl_logical!("The document now conforms to {level}; save it to keep the changes"),
+                    &[("level", level.label())],
+                )
             } else if left == 1 {
-                crate::i18n::fmt(tl!("Fixed what could be fixed; 1 problem remains"), &[])
+                crate::i18n::fmt_logical(&tl_logical!("Fixed what could be fixed; 1 problem remains"), &[])
             } else {
-                crate::i18n::fmt(tl!("Fixed what could be fixed; {n} problems remain"), &[("n", &left.to_string())])
+                crate::i18n::fmt_logical(&tl_logical!("Fixed what could be fixed; {n} problems remain"), &[("n", &left.to_string())])
             });
         }
     }
@@ -87,7 +90,9 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool
                 Some(v) => {
                     for i in v {
                         let page = i.page.map(|p| crate::i18n::fmt(tl!(" (page {p})"), &[("p", &(p + 1).to_string())])).unwrap_or_default();
-                        let fix = if i.fixable { String::new() } else { tl!("  · not fixable here").to_string() };
+                        let clause = format!("ISO 19005 {}", i.clause);
+                        // The catalog entry keeps its separator at its edge; the join supplies it.
+                        let fix = tl!("  · not fixable here").trim_start_matches(|c: char| c.is_whitespace() || c == '·');
                         // The verifier hands the wording over whole, with the document's own name
                         // apart from it, so the problem reads in this language and the name as it is.
                         let said = format!("{}{page}", i.said(&crate::i18n::words));
@@ -97,7 +102,8 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool
                         } else {
                             ui.label(said);
                         }
-                        ui.label(egui::RichText::new(format!("ISO 19005 {}{fix}", i.clause)).small().color(t.text_muted));
+                        let detail = if i.fixable { clause } else { crate::rtl::join(&[&clause, fix], "  · ") };
+                        ui.label(egui::RichText::new(detail).small().color(t.text_muted));
                     }
                 }
             }

@@ -24,8 +24,8 @@ pub struct DocJsDraft {
 
 /// What the user is told when a form's scripts were turned off: in a toast as it happens, then
 /// on the notice bar for as long as the document is open.
-pub(crate) fn scripts_off_notice() -> String {
-    tl!("This form's scripts are turned off because one ran too long. Reopen the document to run them again.").to_string()
+pub(crate) fn scripts_off_notice() -> crate::i18n::Logical<'static> {
+    tl_logical!("This form's scripts are turned off because one ran too long. Reopen the document to run them again.")
 }
 
 impl PdfCraftApp {

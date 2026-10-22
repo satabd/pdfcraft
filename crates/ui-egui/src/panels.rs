@@ -111,7 +111,7 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
     let right_reserved = match (g.badge, g.availability) {
         (Some(b), _) => ui.fonts_mut(|f| f.layout_no_wrap(tl!(b).to_owned(), theme::semibold(9.5), Color32::WHITE).size().x) + 26.0,
         (None, Availability::Planned(m)) if resp.hovered() => {
-            let hint = format!("{} · {m}", tl!("Planned"));
+            let hint = rtl::join(&[tl!("Planned"), m], " · ");
             ui.fonts_mut(|f| f.layout_no_wrap(hint, theme::medium(10.5), t.text_faint).size().x) + 18.0
         }
         _ => 8.0,
@@ -131,7 +131,7 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
             ui.painter().text(
                 rtl::end_center(body, 10.0),
                 rtl::flip(Align2::RIGHT_CENTER),
-                format!("{} · {m}", tl!("Planned")),
+                rtl::join(&[tl!("Planned"), m], " · "),
                 theme::medium(10.5),
                 t.text_faint,
             );
@@ -753,17 +753,17 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                         ui.add(
                                             egui::Label::new(egui::RichText::new(crate::bidi::visual(&a.name)).font(theme::medium(13.0))).truncate(),
                                         );
-                                        let mut meta = a.size.map(human_size).unwrap_or_default();
+                                        let mut parts = vec![a.size.map(human_size).unwrap_or_default()];
                                         if let pdfcraft_render::AttachmentSource::Annotation { page, .. } = a.source {
-                                            let on_page = crate::i18n::fmt(
+                                            parts.push(crate::i18n::fmt(
                                                 tl!("on page {label}"),
                                                 &[("label", info.pages.get(page).map(|p| p.label.as_str()).unwrap_or("?"))],
-                                            );
-                                            meta = format!("{meta}  ·  {on_page}");
+                                            ));
                                         }
                                         if let Some(d) = &a.description {
-                                            meta = format!("{meta}  ·  {}", crate::bidi::visual_auto(d));
+                                            parts.push(crate::bidi::visual_auto(d).into_owned());
                                         }
+                                        let meta = rtl::join(&parts.iter().map(String::as_str).collect::<Vec<_>>(), "  ·  ");
                                         ui.add(egui::Label::new(egui::RichText::new(meta).color(t.text_faint).small()).truncate());
                                     });
                                     rtl::end(ui, |ui| {

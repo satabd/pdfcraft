@@ -89,7 +89,7 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             let blurb = g
                                 .sections
                                 .first()
-                                .map(|s| s.items.iter().take(3).map(|i| tl!(i.label)).collect::<Vec<_>>().join(" · "))
+                                .map(|s| rtl::join(&s.items.iter().take(3).map(|i| tl!(i.label)).collect::<Vec<_>>(), " · "))
                                 .unwrap_or_default();
                             // Fixed-height cards must leave room for their action in every language.
                             let mut job = egui::text::LayoutJob::simple(blurb.clone(), theme::regular(11.5), t.text_muted, body.width() - 28.0);
@@ -202,7 +202,7 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let detail = ui.painter().text(
                     rtl::end_center(body, 48.0),
                     rtl::flip(Align2::RIGHT_CENTER),
-                    format!("{}  ·  {}", crate::i18n::trn(crate::i18n::current(), r.pages as u64, "{n} page", "{n} pages"), human_size(r.size)),
+                    rtl::join(&[&crate::i18n::trn(crate::i18n::current(), r.pages as u64, "{n} page", "{n} pages"), &human_size(r.size)], "  ·  "),
                     theme::regular(12.0),
                     t.text_muted,
                 );

@@ -114,7 +114,7 @@ impl PdfCraftApp {
         if let Some(w) = p.width {
             self.comment_prefs.set_width(tool, w);
         }
-        self.notify_fmt("New {tool} comments will look like this one", &[("tool", &crate::i18n::in_sentence(tl!(tool.label())))]);
+        self.notify_fmt("New {tool} comments will look like this one", &[("tool", &crate::i18n::in_sentence(&tl_logical!(tool.label())))]);
     }
 
     /// Open Comment Properties for the comment at `(page, index)` of the active document.

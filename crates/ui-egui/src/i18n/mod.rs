@@ -710,6 +710,16 @@ pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
 /// A generated history label (the action part of "Undo …") in the current language. Captured
 /// values (file and field names) are inserted as they are; unknown labels are looked up whole.
 pub fn action_label(text: &str) -> String {
+    action_label_with(text, |s| t(s).to_owned(), |n, one, other| trn(current(), n, one, other))
+}
+
+/// [`action_label`] in logical order (see [`Logical`]), for a notice.
+pub fn action_label_logical(text: &str) -> Logical<'static> {
+    Logical::from(action_label_with(text, |s| t_logical(s).into_owned(), |n, one, other| trn_logical(current(), n, one, other).into_owned()))
+}
+
+/// [`action_label`] with the lookups given: display order or logical order.
+fn action_label_with(text: &str, look: impl Fn(&str) -> String, plural: impl Fn(u64, &str, &str) -> String) -> String {
     for (prefix, template) in [
         ("Insert pages from ", "Insert pages from {name}"),
         ("Fill in ", "Fill in {name}"),
@@ -718,18 +728,18 @@ pub fn action_label(text: &str) -> String {
         ("Import ", "Import {name}"),
     ] {
         if let Some(value) = text.strip_prefix(prefix) {
-            return fmt(t(template), &[("name", value)]);
+            return fmt(&look(template), &[("name", value)]);
         }
     }
     if let Some(key) = text.strip_prefix("Change ")
         && ["Title", "Author", "Subject", "Keywords", "Creator", "Producer"].contains(&key)
     {
-        return fmt(t("Change {key}"), &[("key", t(key))]);
+        return fmt(&look("Change {key}"), &[("key", &look(key))]);
     }
     if let Some(n) = text.strip_prefix("Delete ").and_then(|rest| rest.strip_suffix(" fields")).and_then(|n| n.parse::<u64>().ok()) {
-        return trn(current(), n, "Delete {n} field", "Delete {n} fields");
+        return plural(n, "Delete {n} field", "Delete {n} fields");
     }
-    t(text).to_owned()
+    look(text)
 }
 
 /// A history label in the current language, out of the engine's own two parts: the wording is
@@ -737,12 +747,22 @@ pub fn action_label(text: &str) -> String {
 /// name is never read as part of the wording. This is exact where [`action_label`] has to guess
 /// from the English text, and is what the engine's own labels go through.
 pub fn edit_label(label: &pdfcraft_engine::Label) -> String {
+    edit_label_with(label, |s| t(s).to_owned())
+}
+
+/// [`edit_label`] in logical order (see [`Logical`]), for a notice.
+pub fn edit_label_logical(label: &pdfcraft_engine::Label) -> Logical<'static> {
+    Logical::from(edit_label_with(label, |s| t_logical(s).into_owned()))
+}
+
+/// [`edit_label`] with the lookup given: display order or logical order.
+fn edit_label_with(label: &pdfcraft_engine::Label, look: impl Fn(&str) -> String) -> String {
     // A batch's wording is only the hole: it carries its name as text, which from below L7 is one
     // of `BATCH_LABELS` and so is looked up too.
     if let Some(name) = label.value.as_deref().filter(|_| label.wording == "{batch}") {
-        return t(name).to_owned();
+        return look(name);
     }
-    label.said(t(label.wording))
+    label.said(&look(label.wording))
 }
 
 /// A command label such as "Undo Insert pages from a.pdf" in the current language. A catalog
@@ -779,7 +799,8 @@ pub fn trn(lang: Lang, n: u64, one: &str, other: &str) -> String {
 
 /// Translated text still in logical (typing) order, for the wrapping helpers only
 /// ([`crate::widgets::hover_text`], [`crate::widgets::body_text`],
-/// [`crate::widgets::styled_text`]).
+/// [`crate::widgets::styled_text`], and for notices and banners
+/// [`crate::PdfCraftApp::notify`] and [`crate::widgets::logical_label`]).
 ///
 /// The lookups ([`t`], [`tr`], [`trn`]) hand a right-to-left language's text back in display
 /// order, which is right for a label painted on one line and wrong for text egui wraps: it
@@ -788,7 +809,7 @@ pub fn trn(lang: Lang, n: u64, one: &str, other: &str) -> String {
 /// text anywhere else shows it in typing order, so the type keeps it out of `&str` parameters.
 ///
 /// For every language but the right-to-left ones, the logical text is the display text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Logical<'a>(std::borrow::Cow<'a, str>);
 
 impl<'a> Logical<'a> {
@@ -800,6 +821,11 @@ impl<'a> Logical<'a> {
     /// The text as an owned string, still in logical order.
     pub fn into_owned(self) -> String {
         self.0.into_owned()
+    }
+
+    /// Append `tail`, which must be in logical order too (a clause of the same sentence).
+    pub fn push_str(&mut self, tail: &str) {
+        self.0.to_mut().push_str(tail);
     }
 }
 
@@ -3644,6 +3670,42 @@ mod tests {
         }
         assert_eq!(tr_logical(Lang::EN, "Save as…"), "Save as…");
         assert_eq!(Logical::from("x").into_owned(), "x");
+    }
+
+    /// History labels have a logical form for notices ("Undid {label}"): in Arabic it is the
+    /// display form before reordering, in every other language the same text.
+    #[test]
+    fn history_labels_have_a_logical_form() {
+        let ar = arabic();
+        let edit = |label: &pdfcraft_engine::Label| (edit_label(label), edit_label_logical(label));
+        let actions = ["Insert pages from a.pdf", "Fill in Name", "Change Title", "Delete 3 fields", "Enhance camera image"];
+        let labels = [pdfcraft_engine::Label::of("Rotate page"), pdfcraft_engine::Label::with("Fill in {name}", "Total")];
+        for lang in Lang::all() {
+            set_current(lang);
+            for action in actions {
+                let (display, logical) = (action_label(action), action_label_logical(action));
+                if lang.rtl() {
+                    assert_eq!(crate::bidi::display_rtl(&logical), display, "{}: {action}", lang.code());
+                } else {
+                    assert_eq!(logical, display, "{}: {action}", lang.code());
+                }
+            }
+            for label in &labels {
+                let (display, logical) = edit(label);
+                if lang.rtl() {
+                    assert_eq!(crate::bidi::display_rtl(&logical), display, "{}: {label:?}", lang.code());
+                } else {
+                    assert_eq!(logical, display, "{}: {label:?}", lang.code());
+                }
+            }
+        }
+        set_current(ar);
+        assert_ne!(action_label_logical("Insert pages from a.pdf"), action_label("Insert pages from a.pdf"));
+        set_current(Lang::EN);
+        assert_eq!(action_label_logical("Insert pages from a.pdf"), "Insert pages from a.pdf");
+        let mut sentence = Logical::from("a");
+        sentence.push_str(" b");
+        assert_eq!(sentence, "a b");
     }
 
     #[test]

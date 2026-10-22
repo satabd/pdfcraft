@@ -474,8 +474,8 @@ impl PdfCraftApp {
 
     fn report_print_job(&mut self, printer: &str, result: Result<String, String>) {
         match result {
-            Ok(msg) if msg.is_empty() => self.notify(crate::i18n::fmt(tl!("Sent to {printer}"), &[("printer", printer)])),
-            Ok(msg) => self.notify(crate::i18n::fmt(tl!("Sent to {printer}: {msg}"), &[("printer", printer), ("msg", &msg)])),
+            Ok(msg) if msg.is_empty() => self.notify(crate::i18n::fmt_logical(&tl_logical!("Sent to {printer}"), &[("printer", printer)])),
+            Ok(msg) => self.notify(crate::i18n::fmt_logical(&tl_logical!("Sent to {printer}: {msg}"), &[("printer", printer), ("msg", &msg)])),
             Err(e) => self.notify_error(e),
         }
     }

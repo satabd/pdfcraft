@@ -59,6 +59,8 @@ pub struct OcrProgress {
 pub struct BatchProgress {
     pub done: usize,
     pub total: usize,
+    /// The summary shown when the run is over, in logical order ([`crate::i18n::Logical`]): it
+    /// becomes the toast.
     pub message: Option<String>,
 }
 
@@ -255,13 +257,14 @@ impl PdfCraftApp {
                 }
             }
             let done = if ok == 1 {
-                crate::i18n::fmt(tl!("Recognized {w} words in 1 file"), &[("w", &words.to_string())])
+                crate::i18n::fmt_logical(&tl_logical!("Recognized {w} words in 1 file"), &[("w", &words.to_string())])
             } else {
-                crate::i18n::fmt(tl!("Recognized {w} words in {n} files"), &[("w", &words.to_string()), ("n", &ok.to_string())])
+                crate::i18n::fmt_logical(&tl_logical!("Recognized {w} words in {n} files"), &[("w", &words.to_string()), ("n", &ok.to_string())])
             };
-            let mut msg = done;
+            // In logical order: the toast wraps and reorders it.
+            let mut msg = done.into_owned();
             if !failed.is_empty() {
-                msg.push_str(&crate::i18n::fmt(tl!("; failed: {list}"), &[("list", &failed.join("; "))]));
+                msg.push_str(&crate::i18n::fmt_logical(&tl_logical!("; failed: {list}"), &[("list", &failed.join("; "))]));
             }
             if let Ok(mut s) = p.lock() {
                 s.done = s.total;
@@ -299,8 +302,8 @@ impl PdfCraftApp {
                     self.notify(m);
                 }
                 Some(Err((done, total))) => {
-                    let m = crate::i18n::fmt(
-                        tl!("Recognizing text… file {d} of {t}"),
+                    let m = crate::i18n::fmt_logical(
+                        &tl_logical!("Recognizing text… file {d} of {t}"),
                         &[("d", &(done + 1).min(total.max(1)).to_string()), ("t", &total.max(1).to_string())],
                     );
                     if self.toast.as_ref().is_none_or(|t| t.0 != m) {
@@ -317,8 +320,8 @@ impl PdfCraftApp {
         let (doc, progress) = (run.doc, run.progress.clone());
         let Ok(mut s) = progress.lock() else { return };
         let Some(result) = s.result.take() else {
-            let msg = crate::i18n::fmt(
-                tl!("Recognizing text… page {d} of {t}"),
+            let msg = crate::i18n::fmt_logical(
+                &tl_logical!("Recognizing text… page {d} of {t}"),
                 &[("d", &(s.done + 1).min(s.total.max(1)).to_string()), ("t", &s.total.max(1).to_string())],
             );
             drop(s);
@@ -349,17 +352,22 @@ impl PdfCraftApp {
                     view.document_changed(&info);
                 }
                 let words_part = if words == 1 {
-                    crate::i18n::fmt(tl!("Recognized 1 word"), &[])
+                    crate::i18n::fmt_logical(&tl_logical!("Recognized 1 word"), &[])
                 } else {
-                    crate::i18n::fmt(tl!("Recognized {n} words"), &[("n", &words.to_string())])
+                    crate::i18n::fmt_logical(&tl_logical!("Recognized {n} words"), &[("n", &words.to_string())])
                 };
-                let pages_part = if read == 1 { tl!("1 page").to_string() } else { crate::i18n::fmt(tl!("{n} pages"), &[("n", &read.to_string())]) };
-                let mut msg = crate::i18n::fmt(tl!("{words} on {pages}"), &[("words", &words_part), ("pages", &pages_part)]);
+                let pages_part = if read == 1 {
+                    tl_logical!("1 page").into_owned()
+                } else {
+                    crate::i18n::fmt_logical(&tl_logical!("{n} pages"), &[("n", &read.to_string())]).into_owned()
+                };
+                let mut msg =
+                    crate::i18n::fmt_logical(&tl_logical!("{words} on {pages}"), &[("words", &words_part), ("pages", &pages_part)]).into_owned();
                 if skipped > 0 {
                     msg.push_str(&if skipped == 1 {
-                        crate::i18n::fmt(tl!("; 1 page already had text"), &[])
+                        crate::i18n::fmt_logical(&tl_logical!("; 1 page already had text"), &[])
                     } else {
-                        crate::i18n::fmt(tl!("; {n} pages already had text"), &[("n", &skipped.to_string())])
+                        crate::i18n::fmt_logical(&tl_logical!("; {n} pages already had text"), &[("n", &skipped.to_string())])
                     });
                 }
                 self.notify(msg);

@@ -1091,8 +1091,10 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                             1..=59 => crate::i18n::fmt(tl!("{n} min ago"), &[("n", &mins.to_string())]),
                             _ => crate::i18n::fmt(tl!("{n} h ago"), &[("n", &(mins / 60).to_string())]),
                         };
-                        let lock = if m.encrypted { tl!(" · password-protected") } else { "" };
-                        ui.label(egui::RichText::new(format!("{when}{lock}")).color(t.text_muted));
+                        // The catalog entry keeps its separator at its edge; the join supplies it.
+                        let lock = tl!(" · password-protected").trim_start_matches(|c: char| c.is_whitespace() || c == '·');
+                        let line = if m.encrypted { rtl::join(&[&when, lock], " · ") } else { when };
+                        ui.label(egui::RichText::new(line).color(t.text_muted));
                         ui.end_row();
                     }
                 });

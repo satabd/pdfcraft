@@ -6,6 +6,9 @@
 //! catalog are already in display order ([`crate::bidi::display_rtl`]), so nothing here (and no
 //! caller) puts them through `bidi::visual*` again.
 //!
+//! Lines the code assembles from translated pieces are ordered the same way: [`join`] and
+//! [`caption_value`] follow the reading order of the language.
+//!
 //! Every helper is the identity when [`mirrored`] is false, so the English layout cannot change.
 //! What stays physical: the window controls, scrollbars, the document canvas and its overlays,
 //! menus and submenus (their layout is justified towards the left), `egui::Grid` dialogs, the
@@ -173,6 +176,33 @@ pub fn menu_align() -> egui::RectAlign {
     if mirrored() { egui::RectAlign::BOTTOM_END } else { egui::RectAlign::BOTTOM_START }
 }
 
+/// `parts` joined by `sep` in the interface's reading order, for one line painted as it is: the
+/// first part at the start edge. In English that is `parts.join(sep)`. Mirrored, the line runs
+/// right to left and its parts are in display order already ([`crate::bidi::display_rtl`]), so
+/// their order is reversed: `A · B · C` is painted `C · B · A`, with `A` at the right.
+///
+/// Only for a list the code assembles from translated pieces. A list of document text (tags,
+/// folder paths), or one that goes through a wrapping helper in logical order, is not reversed.
+pub fn join(parts: &[&str], sep: &str) -> String {
+    if mirrored() { parts.iter().rev().copied().collect::<Vec<_>>().join(sep) } else { parts.join(sep) }
+}
+
+/// A translated `caption` (display order, with the colon and the space the code appends after
+/// it: `"Issued by: "`) and the `value` it captions, as one painted line. In English that is
+/// `caption` followed by `value`. Mirrored, the caption is at the start edge (the right) and the
+/// value follows it in reading order, which is to its left on screen; the colon goes to the
+/// caption's far end so that it still follows the caption's last word (`value :caption`).
+pub fn caption_value(caption: &str, value: &str) -> String {
+    if !mirrored() {
+        return format!("{caption}{value}");
+    }
+    let caption = caption.trim_end();
+    match caption.strip_suffix(':') {
+        Some(words) => format!("{value} :{words}"),
+        None => format!("{value} {caption}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +334,41 @@ mod tests {
             out.textures_delta.clear();
             assert_eq!(xs.0 < xs.1, !arabic, "first item left of the second only in English: {xs:?}");
         }
+    }
+
+    #[test]
+    fn lists_and_captions_are_the_identity_in_english() {
+        assert_eq!(join(&["A", "B", "C"], " · "), "A · B · C");
+        assert_eq!(join(&["only"], " · "), "only");
+        assert_eq!(join(&[], " · "), "");
+        assert_eq!(join(&["A", "", "C"], "-"), "A--C", "as slice::join does");
+        assert_eq!(caption_value("Issued by: ", "Contoso CA"), "Issued by: Contoso CA");
+        assert_eq!(caption_value("", "x"), "x");
+        assert_eq!(caption_value("Issued by: ", ""), "Issued by: ");
+    }
+
+    #[test]
+    fn lists_run_from_the_start_edge_when_mirrored() {
+        let _arabic = Arabic::on();
+        assert_eq!(join(&["A", "B", "C"], " · "), "C · B · A");
+        assert_eq!(join(&["only"], " · "), "only");
+        assert_eq!(join(&[], " · "), "");
+        // The catalog's own pieces, as a card blurb joins them: the first at the right.
+        let (a, b) = (crate::i18n::t("Save"), crate::i18n::t("Open"));
+        assert_ne!(a, "Save", "Save is translated");
+        assert_eq!(join(&[a, b], " · "), format!("{b} · {a}"));
+        // A caption's value follows it in reading order, which is on its left, and the colon
+        // follows the caption's last word.
+        assert_eq!(caption_value("صادرة عن: ", "Contoso"), "Contoso :صادرة عن");
+        assert_eq!(caption_value("صادرة عن", "Contoso"), "Contoso صادرة عن");
+        assert_eq!(caption_value("صادرة عن: ", ""), " :صادرة عن");
+    }
+
+    #[test]
+    fn the_signing_dialog_captions_read_value_after_caption_when_mirrored() {
+        let _arabic = Arabic::on();
+        let issued = crate::i18n::t("Issued by: ");
+        let line = caption_value(issued, "Contoso");
+        assert!(line.starts_with("Contoso :") && !line.ends_with(' '), "{line:?} from {issued:?}");
     }
 }

@@ -302,7 +302,7 @@ update the numbers.
   rearranged layout is kept).
 - **Missing:** the rest of the right-to-left layout (menus and submenus, dialog bodies and
   `egui::Grid` columns, the Comments, Signatures and Compare panels, the order of document tabs,
-  the canvas), bidirectional text in the text layout itself (text being typed; the toast and banners under the Arabic interface); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+  the canvas), bidirectional text in the text layout itself (text being typed); catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
   Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
   like other non-English languages (no translated help; engine/OS details stay English).

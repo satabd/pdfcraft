@@ -91,10 +91,10 @@ impl PdfCraftApp {
                 self.notify_fmt("Wrote {n} files to {dir}", &[("n", &made.to_string()), ("dir", &dir.display().to_string())]);
             }
             #[cfg(target_arch = "wasm32")]
-            self.notify(crate::i18n::trn(crate::i18n::current(), made as u64, "Downloaded {n} PDF", "Downloaded {n} PDFs"));
+            self.notify(crate::i18n::trn_logical(crate::i18n::current(), made as u64, "Downloaded {n} PDF", "Downloaded {n} PDFs"));
         }
         if !refused.is_empty() {
-            self.notify(crate::i18n::fmt(tl!("Left out: {names}"), &[("names", &refused.join(", "))]));
+            self.notify(crate::i18n::fmt_logical(&tl_logical!("Left out: {names}"), &[("names", &refused.join(", "))]));
         }
     }
 
@@ -139,12 +139,12 @@ impl PdfCraftApp {
         };
         let n = converted.to_string();
         let message = if !refused.is_empty() {
-            crate::i18n::fmt(tl!("Created a PDF from {n} files; left out: {names}"), &[("n", &n), ("names", &refused.join(", "))])
+            crate::i18n::fmt_logical(&tl_logical!("Created a PDF from {n} files; left out: {names}"), &[("n", &n), ("names", &refused.join(", "))])
         } else {
-            crate::i18n::fmt(tl!("Created a PDF from {n} files"), &[("n", &n)])
+            crate::i18n::fmt_logical(&tl_logical!("Created a PDF from {n} files"), &[("n", &n)])
         };
         let before = self.views.len();
-        self.open_created("Combined.pdf", bytes, &message);
+        self.open_created("Combined.pdf", bytes, message);
         if self.views.len() > before
             && let Some(view) = self.active.and_then(|i| self.views.get_mut(i))
         {

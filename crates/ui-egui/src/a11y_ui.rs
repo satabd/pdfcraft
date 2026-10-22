@@ -363,9 +363,9 @@ impl PdfCraftApp {
         self.a11y.report = Some((id, report));
         self.right = Some(RightPanel::Accessibility);
         self.notify(if failed == 0 {
-            tl!("No untagged content was found.").to_string()
+            tl_logical!("No untagged content was found.")
         } else {
-            crate::i18n::fmt(tl!("Found {n} untagged content problems."), &[("n", &failed.to_string())])
+            crate::i18n::fmt_logical(&tl_logical!("Found {n} untagged content problems."), &[("n", &failed.to_string())])
         });
     }
 
@@ -407,18 +407,18 @@ impl PdfCraftApp {
         self.a11y.report = Some((id, report));
         self.right = Some(RightPanel::Accessibility);
         self.notify(if failed == 0 && manual == 0 && skipped == 0 {
-            tl!("The checker found no problems in this document.").to_string()
+            tl_logical!("The checker found no problems in this document.")
         } else if failed == 1 {
-            tl!("The checker found 1 problem which may prevent the document from being fully accessible.").to_string()
+            tl_logical!("The checker found 1 problem which may prevent the document from being fully accessible.")
         } else if failed > 1 {
-            crate::i18n::fmt(
-                tl!("The checker found {n} problems which may prevent the document from being fully accessible."),
+            crate::i18n::fmt_logical(
+                &tl_logical!("The checker found {n} problems which may prevent the document from being fully accessible."),
                 &[("n", &failed.to_string())],
             )
         } else if manual > 0 {
-            format!("{}: {manual}", tl!("Needs manual check"))
+            crate::i18n::Logical::from(format!("{}: {manual}", tl_logical!("Needs manual check")))
         } else {
-            format!("{}: {skipped}", tl!("Skipped"))
+            crate::i18n::Logical::from(format!("{}: {skipped}", tl_logical!("Skipped")))
         });
         if self.a11y_options.create_report {
             self.show_accessibility_report();

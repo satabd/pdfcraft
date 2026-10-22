@@ -11,7 +11,7 @@ use pdfcraft_engine::{SignOptions, SignatureImage, SignatureInfo, SignatureStatu
 use crate::canvas::{DocView, PageXform, Snapshot, SnapshotKind};
 use crate::fill_sign::SavedSig;
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, icons, widgets};
+use crate::{PdfCraftApp, icons, rtl, widgets};
 
 /// A digital ID the app knows about (Acrobat: Digital ID files). The file stays where it is;
 /// its password is asked for at each signing.
@@ -659,6 +659,31 @@ fn error(ui: &mut egui::Ui, err: &Option<String>) {
     }
 }
 
+/// The second line of a digital ID's row: where it is kept, its e-mail, who issued it and when it
+/// expires, or why it can't be used. Joined in the interface's reading order ([`rtl::join`]).
+fn id_details(e: &DigitalIdEntry) -> String {
+    // The catalog keeps the separator at the edge of the store's name; the join supplies it.
+    let separator = |c: char| c.is_whitespace() || c == '·';
+    let store = if e.path.starts_with("keychain:") {
+        Some(tl!("Keychain  ·  ").trim_end_matches(separator))
+    } else if e.path.starts_with("windows:") {
+        Some(tl!("Windows store  ·  ").trim_end_matches(separator))
+    } else {
+        None
+    };
+    match &e.unusable {
+        Some(reason) => rtl::join(&store.into_iter().chain([reason.as_str()]).collect::<Vec<_>>(), "  ·  "),
+        None => {
+            // "Issued by: X, Expires: Y": the clauses follow each other in reading order.
+            let issued = rtl::caption_value(tl!("Issued by: "), &e.issuer);
+            let expires = rtl::caption_value(tl!(", Expires: "), &e.expires);
+            let details = rtl::join(&[&issued, &expires], "");
+            let email = (!e.email.is_empty()).then_some(e.email.as_str());
+            rtl::join(&store.into_iter().chain(email).chain([details.as_str()]).collect::<Vec<_>>(), "  ·  ")
+        }
+    }
+}
+
 fn choose(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     title(ui, "Sign with a Digital ID");
     ui.label(tl!("Choose the digital ID that you want to use for signing:"));
@@ -691,24 +716,7 @@ fn choose(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
                 ui.painter().layout_job(job)
             };
             let name = line(&e.name, theme::semibold(13.0), name_color);
-            let store = if e.path.starts_with("keychain:") {
-                tl!("Keychain  ·  ").to_string()
-            } else if e.path.starts_with("windows:") {
-                tl!("Windows store  ·  ").to_string()
-            } else {
-                String::new()
-            };
-            let sub = match &e.unusable {
-                Some(reason) => format!("{store}{reason}"),
-                None => format!(
-                    "{store}{email}{issued}{issuer}{expires}{date}",
-                    email = if e.email.is_empty() { String::new() } else { format!("{}  ·  ", e.email) },
-                    issued = tl!("Issued by: "),
-                    issuer = e.issuer,
-                    expires = tl!(", Expires: "),
-                    date = e.expires,
-                ),
-            };
+            let sub = id_details(e);
             let details = line(&sub, theme::regular(11.5), t.text_muted);
             let elided = name.elided || details.elided;
             ui.painter().galley(rect.min + vec2(40.0, 9.0), name, name_color);
@@ -1489,6 +1497,39 @@ pub fn certificate_pem(c: &Certificate) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(path: &str, email: &str, unusable: Option<&str>) -> DigitalIdEntry {
+        DigitalIdEntry {
+            path: path.into(),
+            name: "Grace".into(),
+            issuer: "Contoso CA".into(),
+            email: email.into(),
+            expires: "2030-01-01".into(),
+            unusable: unusable.map(str::to_owned),
+        }
+    }
+
+    /// The row's details line reads as it always has in English, and in the Arabic interface its
+    /// pieces follow each other in reading order: the store first (at the right), the clauses of
+    /// the issuer and the expiry last.
+    #[test]
+    fn a_digital_id_row_joins_its_pieces_in_reading_order() {
+        assert_eq!(id_details(&entry("a.pfx", "", None)), "Issued by: Contoso CA, Expires: 2030-01-01");
+        assert_eq!(
+            id_details(&entry("keychain:x", "g@example.com", None)),
+            "Keychain  ·  g@example.com  ·  Issued by: Contoso CA, Expires: 2030-01-01"
+        );
+        assert_eq!(id_details(&entry("windows:x", "", Some("no key"))), "Windows store  ·  no key");
+        assert_eq!(id_details(&entry("a.pfx", "", Some("no key"))), "no key");
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        let keychain = id_details(&entry("keychain:x", "g@example.com", None));
+        let store = tl!("Keychain  ·  ").trim_end_matches(|c: char| c.is_whitespace() || c == '·');
+        crate::i18n::set_current(previous);
+        // On screen the first piece (the store) is at the right end, the clauses at the left.
+        let at = |needle: &str| keychain.find(needle).unwrap_or_else(|| panic!("{needle:?} in {keychain:?}"));
+        assert!(at("Contoso") < at("g@example.com") && at("g@example.com") < at(store), "{keychain:?}");
+    }
 
     /// A fresh folder per call: tests run in parallel.
     fn scratch() -> PathBuf {

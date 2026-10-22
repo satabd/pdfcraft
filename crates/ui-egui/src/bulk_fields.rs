@@ -225,7 +225,12 @@ impl crate::PdfCraftApp {
                 if self.apply_edit(Edit::Batch { label: "Change field properties".into(), edits }) {
                     return true;
                 }
-                self.toast.as_ref().map(|(message, _)| message.clone()).unwrap_or_else(|| "The field properties could not be changed.".into())
+                // The notice is in logical order; this dialog paints the line as it is, so under
+                // the Arabic interface it goes into display order first.
+                self.toast
+                    .as_ref()
+                    .map(|(message, _)| if crate::rtl::mirrored() { crate::bidi::display_rtl(message) } else { message.as_str().to_owned() })
+                    .unwrap_or_else(|| "The field properties could not be changed.".into())
             }
             Err(error) => error,
         };

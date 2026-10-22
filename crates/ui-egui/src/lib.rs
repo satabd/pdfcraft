@@ -604,7 +604,9 @@ pub struct PdfCraftApp {
     open_prepare_gate: Option<std::sync::Arc<open_worker::PrepareGate>>,
     /// Folders pinned to Home, and what they held when last listed.
     pub pinned: folders_ui::PinnedFolders,
-    pub toast: Option<(String, f64)>,
+    /// The notice at the bottom centre and the time it appeared (0 until it is first drawn). The
+    /// message is in logical order ([`i18n::Logical`]): [`widgets::toast`] wraps and reorders it.
+    pub toast: Option<(i18n::Logical<'static>, f64)>,
     /// Whether the macOS title bar is drawn by us (traffic lights over our tab strip).
     pub integrated_titlebar: bool,
     /// Set when the desktop leaves the window frame to the app (GNOME on Wayland): the tab strip
@@ -1994,7 +1996,7 @@ impl PdfCraftApp {
                 } else {
                     "{who} in this document tried to open an address PdfCraft won't open: {e}. Only web (http, https) and email (mailto) links open from documents."
                 };
-                self.notify_fmt(template, &[("who", tl!(origin.noun())), ("e", &e.to_string())]);
+                self.notify_fmt(template, &[("who", &tl_logical!(origin.noun())), ("e", &e.to_string())]);
             }
         }
     }
@@ -2008,13 +2010,17 @@ impl PdfCraftApp {
         }
     }
 
-    pub fn notify(&mut self, msg: impl Into<String>) {
+    /// Show `msg` as the toast. It must be in logical order: built from [`tl_logical!`],
+    /// [`i18n::fmt_logical`] and [`i18n::trn_logical`] pieces, text people typed or a file's name,
+    /// or an engine or OS message (English, never reordered). Never the output of [`tl!`]: the
+    /// Arabic catalog's display-order text would be reordered a second time and read backwards.
+    pub fn notify(&mut self, msg: impl Into<i18n::Logical<'static>>) {
         self.toast = Some((msg.into(), 0.0));
     }
 
     /// Notify with a static message in the UI language.
     pub fn notify_tr(&mut self, text: &str) {
-        self.notify(tl!(text).to_string());
+        self.notify(i18n::t_logical(text).into_owned());
     }
 
     /// Notify with an error's own text. Engine and OS messages are not translated: matching their
@@ -2023,9 +2029,11 @@ impl PdfCraftApp {
         self.notify(error.to_string());
     }
 
-    /// Notify with a `{name}`-style template in the UI language (placeholders filled once).
+    /// Notify with a `{name}`-style template in the UI language (placeholders filled once). The
+    /// values go in as they are: a file's name, an engine message, or text from
+    /// [`tl_logical!`] (never [`tl!`] output).
     pub fn notify_fmt(&mut self, template: &str, args: &[(&str, &str)]) {
-        self.notify(i18n::fmt(tl!(template), args));
+        self.notify(i18n::fmt_logical(&i18n::t_logical(template), args));
     }
 
     pub fn set_theme_preference(&mut self, preference: ThemePreference) {
@@ -2113,11 +2121,11 @@ impl PdfCraftApp {
             .flat_map(|g| g.sections.iter().flat_map(|s| s.items.iter()))
             .find(|i| i.command == command)
             .map(|i| match i.availability {
-                pdfcraft_engine::catalog::Availability::Planned(m) => crate::i18n::fmt(tl!("ships in milestone {m}"), &[("m", m)]),
-                pdfcraft_engine::catalog::Availability::Provider => tl!("needs an AI provider (off by default)").to_string(),
-                pdfcraft_engine::catalog::Availability::Ready => tl!("is available").to_string(),
+                pdfcraft_engine::catalog::Availability::Planned(m) => crate::i18n::fmt_logical(&tl_logical!("ships in milestone {m}"), &[("m", m)]),
+                pdfcraft_engine::catalog::Availability::Provider => tl_logical!("needs an AI provider (off by default)"),
+                pdfcraft_engine::catalog::Availability::Ready => tl_logical!("is available"),
             })
-            .unwrap_or_else(|| tl!("is not available yet").to_string());
+            .unwrap_or_else(|| tl_logical!("is not available yet"));
         self.notify_fmt("`{command}` {when}", &[("command", command), ("when", &when)]);
     }
 
@@ -2877,8 +2885,8 @@ impl PdfCraftApp {
 
 /// Why nothing can be copied out of the document: its security doesn't allow it (Table 22,
 /// bit 5; #568).
-pub(crate) fn copy_refused() -> &'static str {
-    tl!("The document's security settings don't allow copying text and images")
+pub(crate) fn copy_refused() -> i18n::Logical<'static> {
+    tl_logical!("The document's security settings don't allow copying text and images")
 }
 
 impl PdfCraftApp {
@@ -2889,7 +2897,7 @@ impl PdfCraftApp {
         if self.session.get(id).is_none_or(pdfcraft_engine::Document::allows_copying) {
             return true;
         }
-        self.notify(copy_refused().to_string());
+        self.notify(copy_refused());
         false
     }
 

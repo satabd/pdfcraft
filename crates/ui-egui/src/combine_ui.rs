@@ -2586,8 +2586,8 @@ impl PdfCraftApp {
         match self.session.combine_grouped(&sources, &groups, &passwords) {
             Ok(bytes) => {
                 self.close_combine_tab();
-                let message = crate::i18n::fmt(tl!("Combined {n} files"), &[("n", &count.to_string())]);
-                self.open_created("Combined.pdf", bytes, &message)
+                let message = crate::i18n::fmt_logical(&tl_logical!("Combined {n} files"), &[("n", &count.to_string())]);
+                self.open_created("Combined.pdf", bytes, message)
             }
             // The list stays, so the user can fix it.
             Err(e) => self.notify_fmt("Couldn't combine files: {e}", &[("e", &e.to_string())]),

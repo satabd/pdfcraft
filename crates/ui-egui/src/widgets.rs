@@ -548,9 +548,10 @@ pub fn needs_bidi(text: &str) -> bool {
     !crate::i18n::current().rtl() && crate::bidi::has_rtl(text)
 }
 
-/// A wrapping label for text that may hold right-to-left script (a notice naming an Arabic file
-/// or field, a hover popup): [`wrapped_text`] in a column as wide as the text, up to the room
-/// there is, when [`needs_bidi`]; otherwise an ordinary wrapping label.
+/// A wrapping label for document text that may hold right-to-left script (an Arabic file or
+/// field name in a popup or a detail line; a notice is a [`logical_label`]): [`wrapped_text`] in
+/// a column as wide as the text, up to the room there is, when [`needs_bidi`]; otherwise an
+/// ordinary wrapping label.
 pub fn wrapped_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32) -> Response {
     if !needs_bidi(text) {
         return ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(color)).wrap());
@@ -560,6 +561,17 @@ pub fn wrapped_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: C
     let natural = text.split('\n').map(|paragraph| text_width(ui, paragraph, &font)).fold(0.0_f32, f32::max);
     let width = if natural.is_finite() { (natural + 1.0).min(ui.available_width()).max(1.0) } else { ui.available_width().max(1.0) };
     ui.allocate_ui(vec2(width, 0.0), |ui| wrapped_text(ui, text, font, color, false)).inner
+}
+
+/// A wrapping label for a notice or a banner: a sentence from the catalog in LOGICAL order
+/// ([`tl_logical!`](crate::tl_logical), [`fmt_logical`](crate::i18n::fmt_logical)), which may
+/// hold a document's name. Text with right-to-left script is wrapped and reordered here with the
+/// bidirectional algorithm and sits against the right edge of a column as wide as its longest
+/// line, up to the room there is ([`wrapped_text_impl`] fitted); in the Arabic interface as in
+/// any other. Text without it is an ordinary label that wraps, or, with `truncate`, keeps its
+/// first line and ends it with an ellipsis.
+pub fn logical_label(ui: &mut egui::Ui, text: &crate::i18n::Logical<'_>, font: egui::FontId, color: Color32, truncate: bool) -> Response {
+    wrapped_text_impl(ui, text, font, color, truncate, true)
 }
 
 /// [`wrapped_text`] as a selectable, clickable row, for lists of document text (findings,
@@ -627,13 +639,10 @@ pub fn toast(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     // including the frame's 32 points and 16-point outside margins.
                     ui.set_max_width((screen.width() - 64.0).clamp(1.0, 560.0));
                     let ink = if t.dark() { Color32::from_rgb(0x22, 0x22, 0x26) } else { Color32::WHITE };
-                    if needs_bidi(&msg) {
-                        // A notice naming an Arabic file or field reads in display order.
-                        let font = egui::TextStyle::Body.resolve(ui.style());
-                        wrapped_label(ui, &msg, font, ink);
-                    } else {
-                        ui.add(egui::Label::new(egui::RichText::new(msg).color(ink)).wrap());
-                    }
+                    // The message is in logical order: an Arabic notice (or one naming an Arabic
+                    // file) is wrapped and reordered here; any other is an ordinary label.
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    logical_label(ui, &msg, font, ink, false);
                 });
         });
     ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -982,7 +991,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(theme::font_definitions());
         let mut app = PdfCraftApp::new();
-        app.notify(message);
+        app.notify(message.to_owned());
         let mut now = 1.0;
         let mut texts = Vec::new();
         for _ in 0..3 {
@@ -1002,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_naming_an_arabic_file_reads_in_display_order() {
+    fn a_notice_naming_an_arabic_file_reads_in_display_order_in_either_interface() {
         let previous = crate::i18n::current();
         let logical = "Could not open تقرير 2024 Report";
         // Left-to-right interface: the document's name is reordered inside the notice (the Arabic
@@ -1011,10 +1020,87 @@ mod tests {
         assert!(toast_texts(logical).iter().any(|t| t == "Could not open 2024 تقرير Report"), "{:?}", toast_texts(logical));
         // Text without right-to-left script is the plain label, as before.
         assert!(toast_texts("Saved").iter().any(|t| t == "Saved"));
-        // The Arabic interface's own sentences are in display order already: left alone.
+        // The Arabic interface's notices are in logical order too: this one is a right-to-left
+        // paragraph, so the Latin name and the number come out in front of the Arabic word.
         crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
-        assert!(toast_texts("تقرير 2024 Report").iter().any(|t| t == "تقرير 2024 Report"));
+        assert!(toast_texts("تقرير 2024 Report").iter().any(|t| t == "Report 2024 تقرير"), "{:?}", toast_texts("تقرير 2024 Report"));
+        // An English engine message in the Arabic interface is the plain label.
+        assert!(toast_texts("Saved").iter().any(|t| t == "Saved"));
         crate::i18n::set_current(previous);
+    }
+
+    /// The text shapes (position, galley rectangle, text) the toast paints on a screen `width`
+    /// wide after settling for a few frames.
+    fn toast_shapes(message: crate::i18n::Logical<'static>, width: f32) -> Vec<(Pos2, Rect, String)> {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme::font_definitions());
+        let mut app = PdfCraftApp::new();
+        app.notify(message);
+        let mut now = 1.0;
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            now += 0.016;
+            let output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 600.0))), time: Some(now), ..Default::default() },
+                |ui| toast(&mut app, ui.ctx()),
+            );
+            shapes = output
+                .shapes
+                .iter()
+                .filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some((t.pos, t.galley.rect, t.galley.job.text.clone())) } else { None })
+                .collect();
+            output.drop_without_applying_deltas();
+        }
+        shapes
+    }
+
+    /// A long notice under the Arabic interface wraps in typing order: its first line holds its
+    /// first words, the lines sit against the right edge, and the last line holds the last words.
+    /// A left-to-right notice is the plain label, as before.
+    #[test]
+    fn an_arabic_notice_wraps_from_its_first_words_against_the_right_edge() {
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        let logical = tl_logical!("This file was damaged and has been repaired. Saving keeps the repaired version.");
+        assert!(crate::bidi::has_rtl(&logical), "the Arabic catalog has this notice: {logical:?}");
+        let words: Vec<&str> = logical.split_whitespace().collect();
+        // The closing full stop moves to the other end of the last word when it is painted.
+        let (first, last) = (words[0], words[words.len() - 1].trim_end_matches('.'));
+        let shapes = toast_shapes(logical.clone(), 300.0);
+        crate::i18n::set_current(previous);
+        assert!(shapes.len() >= 2, "a narrow screen wraps the notice: {shapes:?}");
+        let top = shapes.iter().min_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        let bottom = shapes.iter().max_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        assert!(has_word(&top.2, first) && !top.2.contains(last), "the first line holds the first words: {shapes:?}");
+        assert!(bottom.2.contains(last), "the last line holds the last words: {shapes:?}");
+        let right = shapes.iter().map(|(pos, rect, _)| pos.x + rect.width()).fold(0.0, f32::max);
+        for (pos, rect, text) in &shapes {
+            assert!((pos.x + rect.width() - right).abs() < 0.5, "{text:?} is right-aligned");
+        }
+        // A Latin notice is one plain label whatever the width.
+        let latin = toast_shapes(crate::i18n::Logical::from("Saved"), 300.0);
+        assert_eq!(latin.iter().map(|s| s.2.as_str()).collect::<Vec<_>>(), ["Saved"]);
+    }
+
+    /// The toast keeps the catalog's logical text: the wrapper reorders it once, so the app must
+    /// not hand it display-order text (which `tl!` gives under Arabic).
+    #[test]
+    fn notices_carry_logical_text_under_the_arabic_interface() {
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        let mut app = PdfCraftApp::new();
+        let toast = |app: &PdfCraftApp| app.toast.as_ref().map(|t| t.0.clone()).expect("a notice");
+        app.notify_tr("Open a document first");
+        assert_eq!(toast(&app), tl_logical!("Open a document first"));
+        assert_ne!(toast(&app), crate::i18n::t("Open a document first"), "not the display-order text");
+        app.notify_fmt("{name} is read-only", &[("name", "تقرير.pdf")]);
+        assert_eq!(toast(&app), crate::i18n::fmt_logical(&tl_logical!("{name} is read-only"), &[("name", "تقرير.pdf")]));
+        app.notify_error("disk full");
+        assert_eq!(toast(&app), "disk full");
+        crate::i18n::set_current(previous);
+        // English: the text as written.
+        app.notify_fmt("{name} is read-only", &[("name", "a.pdf")]);
+        assert_eq!(toast(&app), "a.pdf is read-only");
     }
 
     /// The text shapes `wrapped_text` paints in a 120 pt wide column at x = 0.

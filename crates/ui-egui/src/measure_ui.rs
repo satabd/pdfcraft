@@ -465,12 +465,12 @@ fn export_csv(app: &mut PdfCraftApp) {
     let Some((_, id)) = app.active_ids() else { return };
     let result = app.session.get(id).ok_or_else(|| "no such document".to_string()).and_then(|d| d.measurements());
     match result {
-        Err(e) => app.notify(&e),
+        Err(e) => app.notify(e),
         Ok(listing) => {
             let csv = measure::csv(&listing.measurements);
             if !listing.unsupported.is_empty() {
-                app.notify(crate::i18n::fmt(
-                    tl!("{n} measurements use an unsupported format and are left out."),
+                app.notify(crate::i18n::fmt_logical(
+                    &tl_logical!("{n} measurements use an unsupported format and are left out."),
                     &[("n", &listing.unsupported.len().to_string())],
                 ));
             }
@@ -480,7 +480,7 @@ fn export_csv(app: &mut PdfCraftApp) {
                     &path.to_string_lossy(),
                     csv.as_bytes(),
                 ) {
-                    Ok(()) => app.notify(tl!("Saved measurements.")),
+                    Ok(()) => app.notify(tl_logical!("Saved measurements.")),
                     Err(e) => app.notify(e.to_string()),
                 };
                 match app.export_dir_override.as_ref().map(|d| std::path::PathBuf::from(d).join("measurements.csv")) {
@@ -493,7 +493,7 @@ fn export_csv(app: &mut PdfCraftApp) {
             }
             #[cfg(target_arch = "wasm32")]
             if let Err(e) = crate::editing::download("measurements.csv", csv.as_bytes()) {
-                app.notify(&e);
+                app.notify(e.to_string());
             }
         }
     }

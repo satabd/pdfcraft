@@ -35,24 +35,24 @@ pub(crate) fn undrawable(d: &TextDraft, memo: &UndrawableMemo) -> Option<char> {
 pub(crate) type UndrawableMemo = std::cell::RefCell<Option<(AddedText, Option<char>)>>;
 
 /// The warning shown for text with `c` in it.
-pub(crate) fn undrawable_message(c: char) -> String {
-    crate::i18n::fmt(
-        tl!("The PDF text fonts can't draw “{c}” ({code}). Choose supported text."),
+pub(crate) fn undrawable_message(c: char) -> crate::i18n::Logical<'static> {
+    crate::i18n::fmt_logical(
+        &tl_logical!("The PDF text fonts can't draw “{c}” ({code}). Choose supported text."),
         &[("c", &c.to_string()), ("code", &format!("U+{:04X}", u32::from(c)))],
     )
 }
 
 /// The warning after an edit that saved text its font can't draw: PdfCraft drew `?` for it (a form
 /// field, which other viewers redraw from its value, or a comment, where the `?` shows everywhere).
-pub(crate) fn undrawn_message(n: &pdfcraft_engine::TextNotice) -> String {
+pub(crate) fn undrawn_message(n: &pdfcraft_engine::TextNotice) -> crate::i18n::Logical<'static> {
     let template = if n.redrawn_elsewhere {
-        tl!(
+        tl_logical!(
             "This field's font can't draw “{c}” ({code}), so PdfCraft shows ? in its place. The value is saved, and other PDF viewers redraw the field from it."
         )
     } else {
-        tl!("The fonts PdfCraft writes with can't draw “{c}” ({code}), so it shows as ? in every PDF viewer. The text is saved.")
+        tl_logical!("The fonts PdfCraft writes with can't draw “{c}” ({code}), so it shows as ? in every PDF viewer. The text is saved.")
     };
-    crate::i18n::fmt(template, &[("c", &n.ch.to_string()), ("code", &format!("U+{:04X}", u32::from(n.ch)))])
+    crate::i18n::fmt_logical(&template, &[("c", &n.ch.to_string()), ("code", &format!("U+{:04X}", u32::from(n.ch)))])
 }
 
 const SELECT_BLUE: Color32 = Color32::from_rgb(0x14, 0x73, 0xE6);
@@ -570,7 +570,7 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
         // Page text is drawn with the standard fonts; anything else would be saved as `?` (#125).
         undrawable = self::undrawable(t, memo);
         if let Some(c) = undrawable {
-            ui.label(egui::RichText::new(undrawable_message(c)).small().color(UNDRAWABLE));
+            crate::widgets::small_text(ui, &undrawable_message(c), UNDRAWABLE);
         }
     });
     if cancel {

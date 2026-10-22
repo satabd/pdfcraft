@@ -230,11 +230,11 @@ impl PdfCraftApp {
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
-                    tl!("The text is the same").to_string()
+                    tl_logical!("The text is the same")
                 } else if n == 1 {
-                    tl!("1 difference found").to_string()
+                    tl_logical!("1 difference found")
                 } else {
-                    crate::i18n::fmt(tl!("{n} differences found"), &[("n", &n.to_string())])
+                    crate::i18n::fmt_logical(&tl_logical!("{n} differences found"), &[("n", &n.to_string())])
                 });
             }
             Err(e) => self.notify_error(e),
@@ -271,9 +271,9 @@ impl PdfCraftApp {
                         self.views[index].document_changed(&info);
                     }
                     self.notify(if n == 1 {
-                        tl!("Added 1 comment").to_string()
+                        tl_logical!("Added 1 comment")
                     } else {
-                        crate::i18n::fmt(tl!("Added {n} comments"), &[("n", &n.to_string())])
+                        crate::i18n::fmt_logical(&tl_logical!("Added {n} comments"), &[("n", &n.to_string())])
                     });
                 }
                 Err(e) => self.notify_error(e),

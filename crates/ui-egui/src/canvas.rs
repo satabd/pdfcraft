@@ -4447,12 +4447,15 @@ fn notices(
         egui::Frame::NONE.fill(t.accent_soft).inner_margin(egui::Margin::symmetric(14, 7)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(icons::image("rotate-cw", 16.0, t.accent_text));
-                ui.label(
-                    egui::RichText::new(tl!(
-                        "This file changed on disk. Reload shows the new version and drops your unsaved changes; Save replaces it with this version."
-                    ))
-                    .color(t.text),
+                let text = tl_logical!(
+                    "This file changed on disk. Reload shows the new version and drops your unsaved changes; Save replaces it with this version."
                 );
+                if crate::bidi::has_rtl(&text) {
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    widgets::logical_label(ui, &text, font, t.text, false);
+                } else {
+                    ui.label(egui::RichText::new(text.as_str()).color(t.text));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::button(ui, "x", 22.0, false, tl!("Dismiss")).clicked() {
                         view.disk_changed = false;
@@ -4468,13 +4471,15 @@ fn notices(
     if let Some(snap) = view.snapshot.as_ref() {
         let mut close = false;
         let text = if snap.kind == SnapshotKind::SignedVersion {
-            crate::i18n::fmt(
-                tl!("You are viewing the signed version of “{from}” (revision {rev}). It is a snapshot: changes here won't affect the original."),
+            crate::i18n::fmt_logical(
+                &tl_logical!(
+                    "You are viewing the signed version of “{from}” (revision {rev}). It is a snapshot: changes here won't affect the original."
+                ),
                 &[("from", &snap.from), ("rev", &snap.revision.to_string())],
             )
         } else {
-            crate::i18n::fmt(
-                tl!("You are viewing revision {rev} of “{from}”. It is a snapshot: changes here won't affect the original."),
+            crate::i18n::fmt_logical(
+                &tl_logical!("You are viewing revision {rev} of “{from}”. It is a snapshot: changes here won't affect the original."),
                 &[("rev", &snap.revision.to_string()), ("from", &snap.from)],
             )
         };
@@ -4489,7 +4494,7 @@ fn notices(
     }
     if let Some((icon, color, template, arg)) = signed {
         let mut open = false;
-        notice_bar(ui, t, icon, color, crate::i18n::fmt(tl!(template), &[("by", &arg)]), |ui| {
+        notice_bar(ui, t, icon, color, crate::i18n::fmt_logical(&crate::i18n::t_logical(template), &[("by", &arg)]), |ui| {
             if crate::widgets::pill_button(ui, tl!("Signature panel"), false).clicked() {
                 open = true;
             }
@@ -4510,33 +4515,33 @@ fn notices(
     // What the document is as a form, if it is one: what the bar says first, secured or not.
     let form = if let Some(x) = xfa {
         let lang = crate::i18n::current();
-        let pages = crate::i18n::trn(lang, x.pages as u64, "{n} page", "{n} pages");
-        let fields = crate::i18n::trn(lang, x.fields as u64, "{n} field", "{n} fields");
-        let mut text =
-            crate::i18n::fmt(tl!("Dynamic XFA form laid out from its template: {pages}, {fields}."), &[("pages", &pages), ("fields", &fields)]);
+        let pages = crate::i18n::trn_logical(lang, x.pages as u64, "{n} page", "{n} pages");
+        let fields = crate::i18n::trn_logical(lang, x.fields as u64, "{n} field", "{n} fields");
+        let mut text = crate::i18n::fmt_logical(
+            &tl_logical!("Dynamic XFA form laid out from its template: {pages}, {fields}."),
+            &[("pages", &pages), ("fields", &fields)],
+        );
         if !x.warnings.is_empty() {
-            text.push(' ');
-            text.push_str(&x.warnings.join("; "));
-            text.push('.');
+            text.push_str(&format!(" {}.", x.warnings.join("; ")));
         }
         Some(("text-cursor-input", text, true))
     } else if info.xfa == Some(pdfcraft_render::Xfa::Dynamic) {
         Some((
             "triangle-alert",
-            tl!("This is a dynamic XFA form, which PdfCraft can't display yet. What you see is the file's placeholder page.").to_string(),
+            tl_logical!("This is a dynamic XFA form, which PdfCraft can't display yet. What you see is the file's placeholder page."),
             false,
         ))
     } else if info.xfa == Some(pdfcraft_render::Xfa::Static) {
         Some((
             "text-cursor-input",
-            tl!("XFA form: its fields and its XFA data are kept in step, so other viewers show what you fill in.").to_string(),
+            tl_logical!("XFA form: its fields and its XFA data are kept in step, so other viewers show what you fill in."),
             true,
         ))
     } else if info.fields.iter().any(|f| f.kind != pdfcraft_render::FieldKind::PushButton) {
         // Push buttons alone (LaTeX `animate` frames, navigation buttons) leave nothing to fill in.
         Some((
             "text-cursor-input",
-            crate::i18n::fmt(tl!("This document contains {n} interactive form fields."), &[("n", &info.fields.len().to_string())]),
+            crate::i18n::fmt_logical(&tl_logical!("This document contains {n} interactive form fields."), &[("n", &info.fields.len().to_string())]),
             true,
         ))
     } else {
@@ -4547,17 +4552,21 @@ fn notices(
     } else if secured {
         // A secured form still says what it is, and keeps Highlight fields: the security
         // sentence follows the form's.
-        let security = tl!("This document is secured. Some changes are restricted by its security settings.");
+        let security = tl_logical!("This document is secured. Some changes are restricted by its security settings.");
         Some(match form {
-            Some((icon, text, fields)) => (icon, format!("{text} {security}"), fields),
-            None => ("lock", security.to_string(), false),
+            Some((icon, mut text, fields)) => {
+                text.push_str(&format!(" {security}"));
+                (icon, text, fields)
+            }
+            None => ("lock", security, false),
         })
     } else if form.is_some() {
         form
     } else if repaired {
-        Some(("bandage", tl!("This file was damaged and has been repaired. Saving keeps the repaired version.").to_string(), false))
+        Some(("bandage", tl_logical!("This file was damaged and has been repaired. Saving keeps the repaired version."), false))
     } else if !info.warnings.is_empty() {
-        Some(("triangle-alert", info.warnings[0].clone(), false))
+        // The engine's own wording, in English: never reordered.
+        Some(("triangle-alert", crate::i18n::Logical::from(info.warnings[0].clone()), false))
     } else {
         None
     };
@@ -4604,7 +4613,12 @@ fn notices(
 /// of running under the buttons and past the document area into the side panel (#785). The
 /// buttons are centred on a row of button height, and the message's first line is centred on
 /// the same row; a wrapped message grows the bar downwards.
-fn notice_bar(ui: &mut egui::Ui, t: &Tokens, icon: &str, icon_color: Color32, text: String, buttons: impl FnOnce(&mut egui::Ui)) {
+///
+/// `text` is in logical order ([`tl_logical!`], [`crate::i18n::fmt_logical`]; a document's name
+/// goes in through `fmt_logical`): a right-to-left sentence is wrapped and set against the right
+/// edge of its column ([`widgets::logical_label`]), and a name in Arabic reads right inside an
+/// English sentence.
+fn notice_bar(ui: &mut egui::Ui, t: &Tokens, icon: &str, icon_color: Color32, text: crate::i18n::Logical<'_>, buttons: impl FnOnce(&mut egui::Ui)) {
     const ROW: f32 = 28.0;
     const ICON: f32 = 16.0;
     egui::Frame::NONE.fill(t.accent_soft).inner_margin(egui::Margin::symmetric(14, 7)).show(ui, |ui| {
@@ -4621,14 +4635,8 @@ fn notice_bar(ui: &mut egui::Ui, t: &Tokens, icon: &str, icon_color: Color32, te
                     let (slot, _) = ui.allocate_exact_size(vec2(ICON, line), Sense::hover());
                     icons::paint(ui, Rect::from_center_size(slot.center(), vec2(ICON, ICON)), icon, ICON, icon_color);
                     // Wrapping into a sliver would stack the message a few letters per line.
-                    if ui.available_width() >= 120.0 && widgets::needs_bidi(&text) {
-                        // A notice naming an Arabic file or field reads in display order.
-                        let font = egui::TextStyle::Body.resolve(ui.style());
-                        widgets::wrapped_label(ui, &text, font, t.text);
-                        return;
-                    }
-                    let label = egui::Label::new(egui::RichText::new(text).color(t.text));
-                    ui.add(if ui.available_width() >= 120.0 { label.wrap() } else { label.truncate() });
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    widgets::logical_label(ui, &text, font, t.text, ui.available_width() < 120.0);
                 });
             });
         });
@@ -5351,6 +5359,59 @@ mod tests {
     }
 
     use super::*;
+
+    /// The text shapes (position, galley rectangle, text) a notice bar paints for `text` in a
+    /// 380 pt wide column.
+    fn notice_shapes(text: crate::i18n::Logical<'static>) -> Vec<(egui::Pos2, Rect, String)> {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme::font_definitions());
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let column = Rect::from_min_size(egui::Pos2::ZERO, vec2(380.0, 400.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+                let t = Tokens::get(ui.ctx());
+                notice_bar(ui, &t, "bandage", t.accent_text, text.clone(), |ui| {
+                    ui.label("Dismiss");
+                });
+            });
+        });
+        let shapes = output
+            .shapes
+            .iter()
+            .filter_map(|shape| if let egui::Shape::Text(t) = &shape.shape { Some((t.pos, t.galley.rect, t.galley.job.text.clone())) } else { None })
+            .filter(|(_, _, text)| text != "Dismiss" && text.chars().any(char::is_alphanumeric))
+            .collect();
+        output.drop_without_applying_deltas();
+        shapes
+    }
+
+    /// An Arabic banner is a right-to-left paragraph wrapped in typing order (the first line holds
+    /// the first words) with its lines against one right edge; an English banner is the plain
+    /// label, as before, and a name in Arabic inside an English sentence is put in display order.
+    #[test]
+    fn an_arabic_banner_wraps_from_its_first_words_against_the_right_edge() {
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        let arabic = tl_logical!("This file was damaged and has been repaired. Saving keeps the repaired version.");
+        let shapes = notice_shapes(arabic.clone());
+        crate::i18n::set_current(previous);
+        let words: Vec<&str> = arabic.split_whitespace().collect();
+        let (first, last) = (words[0], words[words.len() - 1].trim_end_matches('.'));
+        assert!(shapes.len() >= 2, "a narrow bar wraps the sentence: {shapes:?}");
+        let top = shapes.iter().min_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        let bottom = shapes.iter().max_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        assert!(top.2.split_whitespace().any(|w| w == first) && !top.2.contains(last), "the first line holds the first words: {shapes:?}");
+        assert!(bottom.2.contains(last), "the last line holds the last words: {shapes:?}");
+        let right = shapes.iter().map(|(pos, rect, _)| pos.x + rect.width()).fold(0.0, f32::max);
+        for (pos, rect, line) in &shapes {
+            assert!((pos.x + rect.width() - right).abs() < 0.5, "{line:?} is right-aligned");
+        }
+        // English: the sentence as it is, in one galley.
+        let english = crate::i18n::Logical::from("This file was damaged and has been repaired.");
+        assert_eq!(notice_shapes(english).iter().map(|s| s.2.as_str()).collect::<Vec<_>>(), ["This file was damaged and has been repaired."]);
+        // An English sentence naming an Arabic file reads its name in display order.
+        let named = crate::i18n::fmt_logical(&crate::i18n::Logical::from("Revision {rev} of {from}."), &[("rev", "3"), ("from", "تقرير 2024")]);
+        assert!(notice_shapes(named).iter().any(|s| s.2.contains("2024 تقرير")), "the name is reordered");
+    }
 
     #[test]
     fn typed_zoom_percentages_parse() {
