@@ -13,6 +13,7 @@ mod encodings;
 pub mod fallback;
 pub mod pdf;
 mod script;
+pub mod shaped_text;
 mod shaping;
 pub mod source_shaping;
 mod std14;

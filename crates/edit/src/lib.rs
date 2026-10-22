@@ -29,6 +29,12 @@ pub enum EditError {
     Cos(#[from] pdfcraft_cos::CosError),
 }
 
+impl From<pdfcraft_fonts::shaped_text::ShapedTextError> for EditError {
+    fn from(e: pdfcraft_fonts::shaped_text::ShapedTextError) -> Self {
+        EditError::Invalid(e.0)
+    }
+}
+
 /// The kinds of page marks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkKind {
