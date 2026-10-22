@@ -37,6 +37,15 @@
 //!
 //! Text without right-to-left script, passwords and texts of more than [`MAX_WRAPPED_CHARS`]
 //! characters in a multi-line field are plain `egui::TextEdit`s: [`BidiEdit`] is a drop-in for it.
+//!
+//! The look of the galley is open to the field's owner. [`BidiEdit::layout`] takes a hook that makes
+//! the galley of the text from its [`ScreenMap`] and a [`LayoutCtx`], which holds the standard steps of
+//! making one (the job, laying it out with one glyph per character, placing the rows): a text box lays
+//! its rows out by its alignment ([`LayoutCtx::layout_aligned`]), an editor of styled text builds its own
+//! sections. The hook runs for a plain `TextEdit` too (the map is then the identity), so one hook serves
+//! text of either kind. [`BidiEdit::wrap_at`], [`BidiEdit::measure`] and [`BidiEdit::forced_rtl`] say
+//! where lines break, how they are measured and which way paragraphs read when the owner knows better,
+//! and [`BidiEdit::show_mapped`] hands back the map with [`BidiOutput::logical_range`].
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -63,7 +72,15 @@ struct Wrap {
     width: f32,
     /// The direction of a paragraph without a strong character (the interface's).
     neutral_rtl: bool,
+    /// The direction of every paragraph when the field's owner decides it (`None`: each paragraph's
+    /// first strong character does).
+    forced_rtl: Option<bool>,
+    /// How wide a line is, when the field's owner knows better than the field's own font does.
+    measure: Option<Measure>,
 }
+
+/// The width of a line of text in logical order, as the field's owner lays it out.
+type Measure = Rc<dyn Fn(&egui::Context, &str) -> f32>;
 
 /// The width of a tab's indentation in spaces, as egui takes it.
 const TAB_SIZE: usize = 4;
@@ -81,16 +98,19 @@ impl Wrap {
     fn map(&self, text: &str) -> ScreenMap {
         let width = self.width.round().max(1.0);
         let mut spent = 0_usize;
-        bidi::wrapped_screen_map(text, self.neutral_rtl, |line: &str| {
+        bidi::wrapped_screen_map(text, self.neutral_rtl, self.forced_rtl, |line: &str| {
             spent = spent.saturating_add(line.len());
             if !self.width.is_finite() || spent > WRAP_BUDGET {
                 return true;
             }
-            // The widest extent of its glyphs, as egui measures a row against the wrap width.
-            let wide = self.ctx.fonts_mut(|f| {
-                let galley = f.layout_no_wrap(line.to_owned(), self.font.clone(), Color32::WHITE);
-                galley.rows.first().map_or(0.0, |row| row.glyphs.iter().map(Glyph::max_x).fold(0.0, f32::max))
-            });
+            let wide = match &self.measure {
+                Some(measure) => measure(&self.ctx, line),
+                // The widest extent of its glyphs, as egui measures a row against the wrap width.
+                None => self.ctx.fonts_mut(|f| {
+                    let galley = f.layout_no_wrap(line.to_owned(), self.font.clone(), Color32::WHITE);
+                    galley.rows.first().map_or(0.0, |row| row.glyphs.iter().map(Glyph::max_x).fold(0.0, f32::max))
+                }),
+            };
             wide <= width
         })
     }
@@ -138,6 +158,7 @@ struct KeptMap {
     text: String,
     width: u32,
     neutral_rtl: bool,
+    forced_rtl: Option<bool>,
     map: Arc<ScreenMap>,
 }
 
@@ -145,7 +166,7 @@ struct KeptMap {
 fn seed_cache(cache: &SharedCache, kept: KeptMap, text: &str) {
     let Ok(mut cache) = cache.try_borrow_mut() else { return };
     let Some(wrap) = &cache.wrap else { return };
-    if kept.width == wrap.width.to_bits() && kept.neutral_rtl == wrap.neutral_rtl && kept.text == text {
+    if kept.width == wrap.width.to_bits() && kept.neutral_rtl == wrap.neutral_rtl && kept.forced_rtl == wrap.forced_rtl && kept.text == text {
         cache.width = Some(kept.width);
         cache.text = kept.text;
         cache.map = Some(kept.map);
@@ -156,7 +177,13 @@ fn seed_cache(cache: &SharedCache, kept: KeptMap, text: &str) {
 fn kept_map(cache: &SharedCache) -> Option<KeptMap> {
     let cache = cache.try_borrow().ok()?;
     let (wrap, map) = (cache.wrap.as_ref()?, cache.map.as_ref()?);
-    Some(KeptMap { text: cache.text.clone(), width: wrap.width.to_bits(), neutral_rtl: wrap.neutral_rtl, map: Arc::clone(map) })
+    Some(KeptMap {
+        text: cache.text.clone(),
+        width: wrap.width.to_bits(),
+        neutral_rtl: wrap.neutral_rtl,
+        forced_rtl: wrap.forced_rtl,
+        map: Arc::clone(map),
+    })
 }
 
 /// Tells the cache the width the layouter was given.
@@ -794,6 +821,12 @@ struct Settings {
     background_color: Option<Color32>,
     char_limit: Option<usize>,
     return_key: Option<Option<egui::KeyboardShortcut>>,
+    /// The width a multi-line text is wrapped at instead of the width egui gives it.
+    wrap_override: Option<f32>,
+    /// How a multi-line text is measured, if not with the field's own font.
+    measure: Option<Measure>,
+    /// The direction of every paragraph of a multi-line text, if the owner decides it.
+    forced_rtl: Option<bool>,
 }
 
 impl Settings {
@@ -858,19 +891,52 @@ pub struct BidiEdit<'t> {
     text: &'t mut String,
     multiline: bool,
     s: Settings,
+    hook: Option<LayoutHook<'t>>,
+}
+
+/// What [`BidiEdit::show_mapped`] returns: egui's output, and how the text was put on screen.
+#[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor reads its selection from the map"))]
+pub struct BidiOutput {
+    /// What `egui::TextEdit::show` returns. Its cursor counts characters of the screen text
+    /// (`map.shaper` is its text).
+    pub out: TextEditOutput,
+    /// How the stored text was drawn this frame: the identity for a field drawn as a plain `TextEdit`.
+    pub map: Arc<ScreenMap>,
+    /// The logical place of the caret (between the characters `caret - 1` and `caret` of the text).
+    caret: Option<usize>,
+}
+
+impl BidiOutput {
+    /// The selection as a range of the *stored* text: from the first to one past the last of the
+    /// characters between the cursor's ends, which for a selection that crosses a change of
+    /// direction also covers characters it does not (they are not contiguous in the text). Empty,
+    /// at the caret, when nothing is selected. `None` if the field has no cursor (it has not been focused).
+    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor reads its selection from the map"))]
+    pub fn logical_range(&self) -> Option<std::ops::Range<usize>> {
+        let range = self.out.state.cursor.char_range()?;
+        let [low, high] = range.sorted_cursors();
+        let (low, high) = (low.index.0.min(self.map.screen_len()), high.index.0.min(self.map.screen_len()));
+        if low == high {
+            let at = self.caret.unwrap_or_else(|| first(&self.map.logical_positions(low))).min(self.map.logical_len());
+            return Some(at..at);
+        }
+        let covered = self.map.logical_of_screen(low..high);
+        let (start, last) = (covered.first().copied()?, covered.last().copied()?);
+        Some(start..last.saturating_add(1))
+    }
 }
 
 impl<'t> BidiEdit<'t> {
     /// A single-line field.
     pub fn singleline(text: &'t mut String) -> Self {
-        Self { text, multiline: false, s: Settings::default() }
+        Self { text, multiline: false, s: Settings::default(), hook: None }
     }
 
     /// A multi-line field. Where it holds right-to-left script the field wraps each paragraph
     /// itself, at the width egui gives it, and shows the lines in display order, a right-to-left
     /// paragraph against the right edge (see the [module](self)).
     pub fn multiline(text: &'t mut String) -> Self {
-        Self { text, multiline: true, s: Settings::default() }
+        Self { text, multiline: true, s: Settings::default(), hook: None }
     }
 
     /// Use this [`Id`] for the field.
@@ -964,19 +1030,88 @@ impl<'t> BidiEdit<'t> {
         self
     }
 
+    /// Make the galley of the field's text with `hook` instead of the field's own layout (see
+    /// [`LayoutCtx`]): a look of its own for the text, rows placed by an alignment. It runs
+    /// whenever egui wants the text laid out, for text with right-to-left script (`map` is the text
+    /// in display order, wrapped when the field is multi-line) and for text without, drawn as a plain
+    /// `TextEdit` (`map` is then the identity: the stored text, in order). A password is laid out as
+    /// egui does, masked.
+    pub fn layout(mut self, hook: impl FnMut(&Ui, &ScreenMap, &LayoutCtx<'_>) -> Arc<Galley> + 't) -> Self {
+        self.hook = Some(Box::new(hook));
+        self
+    }
+
+    /// Wrap a multi-line text at `width` instead of the width egui gives the field, `f32::INFINITY`
+    /// for not at all (only the text's own line breaks end a line). The galley is still placed for
+    /// the width egui gives ([`LayoutCtx::wrap_width`]).
+    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text field wraps at the source's width"))]
+    pub fn wrap_at(mut self, width: f32) -> Self {
+        self.s.wrap_override = Some(width);
+        self
+    }
+
+    /// Measure the lines of a multi-line text with `measure` (the width of a line, in logical
+    /// order) instead of the field's font, for an owner whose text is set in other fonts. The
+    /// answer must depend on the line alone (and what the owner keeps fixed): the field keeps the
+    /// wrapping it made of a text for as long as the text and the width stay the same.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text field measures lines as the page will"))]
+    pub fn measure(mut self, measure: impl Fn(&egui::Context, &str) -> f32 + 'static) -> Self {
+        self.s.measure = Some(Rc::new(measure));
+        self
+    }
+
+    /// Read every paragraph of a multi-line text right to left (`Some(true)`) or left to right,
+    /// whatever its first strong character says; for an owner whose text has a direction of its own.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text field reads a block in the direction the page writes it"))]
+    pub fn forced_rtl(mut self, rtl: Option<bool>) -> Self {
+        self.s.forced_rtl = rtl;
+        self
+    }
+
     /// Show the field and return what `egui::TextEdit::show` does. The cursor in the output
     /// counts characters in screen order when the field holds right-to-left script.
     pub fn show(self, ui: &mut Ui) -> TextEditOutput {
-        let Self { text, multiline, mut s } = self;
+        self.run(ui, false).out
+    }
+
+    /// [`Self::show`], with the map of how the text was put on screen, which relates the cursor
+    /// to the stored text ([`BidiOutput::logical_range`]).
+    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor reads its selection from the map"))]
+    pub fn show_mapped(self, ui: &mut Ui) -> BidiOutput {
+        self.run(ui, true)
+    }
+
+    /// Shows the field; `want_map` says whether the caller will look at [`BidiOutput::map`] (a plain
+    /// field's map is made only then).
+    fn run(self, ui: &mut Ui, want_map: bool) -> BidiOutput {
+        let Self { text, multiline, mut s, mut hook } = self;
         let id = s.resolve_id(ui);
         restore_deferred(ui, id);
         let too_long = multiline && text.chars().nth(MAX_WRAPPED_CHARS).is_some();
         if s.password || too_long || !wants_reordering(ui, id, text) {
             forget_caret(ui.ctx(), id);
-            let edit = if multiline { TextEdit::multiline(text) } else { TextEdit::singleline(text) };
-            return s.apply(edit, id).show(ui);
+            // A password is masked by egui itself.
+            let hook = hook.as_mut().filter(|_| !s.password);
+            let edit = if multiline { TextEdit::multiline(&mut *text) } else { TextEdit::singleline(&mut *text) };
+            let edit = s.apply(edit, id);
+            let out = match hook {
+                // The plain field's galley, from the hook.
+                Some(hook) => {
+                    let look = Look::of(ui, &s);
+                    let mut layouter = |ui: &Ui, buffer: &dyn TextBuffer, width: f32| -> Arc<Galley> {
+                        let map = ScreenMap::identity(buffer.as_str());
+                        hook(ui, &map, &LayoutCtx { wrap_width: multiline.then_some(width), prewrapped: false, look: &look })
+                    };
+                    edit.layouter(&mut layouter).show(ui)
+                }
+                None => edit.show(ui),
+            };
+            let caret = out.state.cursor.char_range().map(|r| r.primary.index.0);
+            let map = if want_map { Arc::new(ScreenMap::identity(text)) } else { Arc::default() };
+            return BidiOutput { out, map, caret };
         }
-        show_reordered(ui, id, text, s, multiline)
+        let (out, map, caret) = show_reordered(ui, id, text, s, multiline, &mut hook);
+        BidiOutput { out, map, caret }
     }
 }
 
@@ -1152,28 +1287,178 @@ struct Look {
 }
 
 impl Look {
-    /// The galley of `map` for `egui::TextEdit`: one glyph per drawn character, in screen order.
-    /// A single line (`wrap_width` `None`) is laid out as a `TextEdit::singleline` does; with a
-    /// width, the lines the map is wrapped into (see [`bidi::wrapped_screen_map`]) one to a row,
-    /// each against the edge its paragraph reads from.
-    fn layout(&self, ui: &Ui, map: &ScreenMap, wrap_width: Option<f32>) -> Arc<Galley> {
-        let mut job = match wrap_width {
+    /// The look a field with settings `s` has in `ui`.
+    fn of(ui: &Ui, s: &Settings) -> Self {
+        let font = s.font.clone().resolve(ui.style());
+        let row_height = ui.fonts_mut(|f| f.row_height(&font));
+        let line_height = row_height + ui.spacing().extra_text_line_spacing;
+        let color = s.text_color.or(ui.visuals().override_text_color).unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
+        Self { font, color, halign: s.halign.unwrap_or(Align::Min), line_height }
+    }
+}
+
+/// What a layout hook ([`BidiEdit::layout`]) is told about the galley it makes, and the standard
+/// pieces of making it: [`Self::job`] builds the text of the galley, [`Self::lay_out`] has egui lay
+/// a job out and gives every drawn character a glyph, and [`Self::place_rows`] and
+/// [`Self::place_rows_with`] put the rows of a multi-line field where they belong. A hook that
+/// wants the field's own layout calls [`Self::layout`], which is the three in a row; one that
+/// wants another look takes its own job (styled sections, say) or placement.
+///
+/// The galley must be of exactly `map.shaper`, whatever the hook makes of it: egui's cursor, clicks and
+/// selection count its characters.
+pub struct LayoutCtx<'a> {
+    /// The width egui lays the field's text out at (a multi-line field), which is also how wide
+    /// the galley is to be placed; `None` for a single line.
+    pub wrap_width: Option<f32>,
+    /// The lines of the map are already broken, one to a row of the galley (a multi-line field that
+    /// holds right-to-left script, whose lines the field wraps itself): the job must not wrap them again.
+    /// Not set for a field drawn as a plain `egui::TextEdit` (no right-to-left script), whose
+    /// galley egui wraps at [`Self::wrap_width`].
+    pub prewrapped: bool,
+    look: &'a Look,
+}
+
+/// A row of a multi-line galley, for [`LayoutCtx::place_rows_with`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowSlot {
+    /// The row's index in the galley.
+    pub index: usize,
+    /// How wide the row is.
+    pub width: f32,
+    /// How wide the galley is to be: the width egui gave the field's text, or the widest row (without the
+    /// spaces at its ends) if that is wider.
+    pub field_width: f32,
+    /// The row belongs to a paragraph that reads right to left (only where the field wrapped it itself).
+    pub rtl: bool,
+    /// The last row that draws anything.
+    pub last: bool,
+}
+
+impl LayoutCtx<'_> {
+    /// The font of the field's text.
+    #[cfg_attr(not(test), expect(dead_code, reason = "for hooks that build their own sections"))]
+    pub fn font(&self) -> &FontId {
+        &self.look.font
+    }
+
+    /// The color of the field's text.
+    #[cfg_attr(not(test), expect(dead_code, reason = "for hooks that build their own sections"))]
+    pub fn color(&self) -> Color32 {
+        self.look.color
+    }
+
+    /// The height of a row.
+    #[cfg_attr(not(test), expect(dead_code, reason = "for hooks that build their own sections"))]
+    pub fn line_height(&self) -> f32 {
+        self.look.line_height
+    }
+
+    /// The job that lays out `map` as `egui::TextEdit` would: one section of its shaper text in the
+    /// field's font and color, a single line as `TextEdit::singleline` lays it out, a multi-line text
+    /// wrapped by egui unless the field wrapped it ([`Self::prewrapped`]), a typed space showing at once.
+    pub fn job(&self, map: &ScreenMap) -> LayoutJob {
+        let look = self.look;
+        let text = map.shaper.clone();
+        let mut job = match (self.prewrapped, self.wrap_width) {
             // The lines are already broken: egui must not break them again.
-            Some(_) => LayoutJob::simple(map.shaper.clone(), self.font.clone(), self.color, f32::INFINITY),
-            None => LayoutJob::simple_singleline(map.shaper.clone(), self.font.clone(), self.color),
+            (true, _) => LayoutJob::simple(text, look.font.clone(), look.color, f32::INFINITY),
+            (false, Some(width)) => LayoutJob::simple(text, look.font.clone(), look.color, width),
+            (false, None) => LayoutJob::simple_singleline(text, look.font.clone(), look.color),
         };
-        job.halign = if wrap_width.is_some() { Align::Min } else { self.halign };
+        job.halign = if self.prewrapped { Align::Min } else { look.halign };
         // Typing a space must show at once, as in a plain field.
         job.keep_trailing_whitespace = true;
         for section in &mut job.sections {
-            section.format.line_height = Some(self.line_height);
+            section.format.line_height = Some(look.line_height);
         }
+        job
+    }
+
+    /// The galley of `job`, which must be of `map`'s shaper text, with one glyph per drawn
+    /// character, in screen order (see [`align_glyphs`]).
+    pub fn lay_out(&self, ui: &Ui, map: &ScreenMap, job: LayoutJob) -> Arc<Galley> {
         let galley = ui.fonts_mut(|f| f.layout_job(job));
-        let galley = align_glyphs(galley, map, wrap_width.is_some());
-        match wrap_width {
-            Some(width) => place_rows(galley, map, width, ui.ctx().pixels_per_point()),
+        align_glyphs(galley, map, self.wrap_width.is_some())
+    }
+
+    /// `galley` with the rows of right-to-left paragraphs against the right edge (see [`place_rows`]).
+    /// Nothing moves in a single line, or a text egui wrapped.
+    pub fn place_rows(&self, ui: &Ui, galley: Arc<Galley>, map: &ScreenMap) -> Arc<Galley> {
+        match self.wrap_width {
+            Some(width) if self.prewrapped => place_rows(galley, map, width, ui.ctx().pixels_per_point()),
+            _ => galley,
+        }
+    }
+
+    /// `galley` with row `r` moved to `x(r)`, measured from the left edge of the galley (`None`: the
+    /// row stays), and the galley as wide as the field (a hook that centres or right-aligns rows).
+    /// Rows land on whole pixels. A row never goes left of the galley, except for the spaces it
+    /// starts with (a right-to-left line keeps the one after its last word there), which hang over
+    /// the edge so that what is read ends where it was put. Nothing moves in a single line.
+    pub fn place_rows_with(&self, ui: &Ui, galley: Arc<Galley>, map: &ScreenMap, x: impl FnMut(RowSlot) -> Option<f32>) -> Arc<Galley> {
+        match self.wrap_width {
+            Some(width) => place_rows_at(galley, map, width, ui.ctx().pixels_per_point(), x),
             None => galley,
         }
+    }
+
+    /// The field's own layout: [`Self::job`], [`Self::lay_out`], [`Self::place_rows`].
+    pub fn layout(&self, ui: &Ui, map: &ScreenMap) -> Arc<Galley> {
+        let galley = self.lay_out(ui, map, self.job(map));
+        self.place_rows(ui, galley, map)
+    }
+
+    /// The field's text with its rows aligned as `align` says, whichever way a paragraph reads: the
+    /// layout of a text box whose alignment is a property of the text (see [`RowAlign`]).
+    pub fn layout_aligned(&self, ui: &Ui, map: &ScreenMap, align: RowAlign) -> Arc<Galley> {
+        let galley = self.lay_out(ui, map, self.job(map));
+        self.place_rows_with(ui, galley, map, |row| Some(align.offset(row)))
+    }
+}
+
+/// Where the rows of a multi-line galley sit between its edges (see [`LayoutCtx::layout_aligned`]).
+/// Right-to-left rows are placed like the others: it is the alignment, not the direction, that
+/// says which edge a row goes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowAlign {
+    /// Against the left edge.
+    Left,
+    /// In the middle.
+    Center,
+    /// Against the right edge.
+    Right,
+    /// Against the left edge, as a justified text box lays its rows out when it cannot stretch them
+    /// (the spaces are not widened here); but the last row of a right-to-left paragraph ends at the
+    /// right edge, where such a paragraph's last line ends.
+    Justify,
+}
+
+impl RowAlign {
+    /// The distance from the left edge of the galley to the left edge of `row` (see [`LayoutCtx::place_rows_with`]).
+    fn offset(self, row: RowSlot) -> f32 {
+        // Negative for a row wider than the galley; the spaces it ends with then hang over the edge.
+        let room = row.field_width - row.width;
+        match self {
+            Self::Left => 0.0,
+            Self::Center => room / 2.0,
+            Self::Right => room,
+            Self::Justify if row.rtl && row.last => room,
+            Self::Justify => 0.0,
+        }
+    }
+}
+
+/// A function that makes the galley of a field's text (see [`LayoutCtx`]).
+type LayoutHook<'t> = Box<dyn FnMut(&Ui, &ScreenMap, &LayoutCtx<'_>) -> Arc<Galley> + 't>;
+
+/// The galley of `map` for `egui::TextEdit`: the hook's, or the field's own. A single line (`wrap_width`
+/// `None`) is laid out as a `TextEdit::singleline` does; with a width, the lines the map is wrapped
+/// into (see [`bidi::wrapped_screen_map`]) one to a row, each against the edge its paragraph reads from.
+fn galley_of(hook: &mut Option<LayoutHook<'_>>, look: &Look, ui: &Ui, map: &ScreenMap, wrap_width: Option<f32>) -> Arc<Galley> {
+    let ctx = LayoutCtx { wrap_width, prewrapped: wrap_width.is_some(), look };
+    match hook {
+        Some(hook) => hook(ui, map, &ctx),
+        None => ctx.layout(ui, map),
     }
 }
 
@@ -1181,17 +1466,54 @@ impl Look {
 /// against the right edge of a galley `width` wide. The galley's rect then spans the whole
 /// width, so egui puts it at the field's left edge whatever its alignment, and left-to-right and
 /// right-to-left paragraphs sit at their own sides.
-fn place_rows(mut galley: Arc<Galley>, map: &ScreenMap, width: f32, pixels_per_point: f32) -> Arc<Galley> {
-    if !map.row_rtl.iter().any(|rtl| *rtl) {
+fn place_rows(galley: Arc<Galley>, map: &ScreenMap, width: f32, pixels_per_point: f32) -> Arc<Galley> {
+    place_rows_at(galley, map, width, pixels_per_point, |row| row.rtl.then_some(row.field_width - row.width))
+}
+
+/// How wide `row` is without the spaces at its ends: a wrapped line keeps the spaces after its last word
+/// (a space typed at the end must show), which are not part of what is set against an edge.
+fn ink_width(row: &egui::epaint::text::Row) -> f32 {
+    let advance = |glyphs: &mut dyn Iterator<Item = &Glyph>| glyphs.take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
+    let (before, after) = (advance(&mut row.glyphs.iter()), advance(&mut row.glyphs.iter().rev()));
+    (row.size.x - before - after).max(0.0)
+}
+
+/// [`place_rows`] with the place of each row (from the galley's left edge) decided by `x`.
+fn place_rows_at(
+    mut galley: Arc<Galley>,
+    map: &ScreenMap,
+    width: f32,
+    pixels_per_point: f32,
+    mut x: impl FnMut(RowSlot) -> Option<f32>,
+) -> Arc<Galley> {
+    // A row may be wider than the field by the spaces it keeps after its last word (the wrapping measures
+    // it without them), which hang over the edge: a row set against an edge is not pushed back for them.
+    let widest = galley.rows.iter().map(|placed| ink_width(&placed.row)).fold(0.0, f32::max);
+    let hang = |row: &egui::epaint::text::Row| row.glyphs.iter().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
+    let width = if width.is_finite() { width.floor().max(widest) } else { widest };
+    let last = galley.rows.iter().rposition(|placed| !placed.row.glyphs.is_empty());
+    // The place of each row, and how far it may hang over the left edge: the spaces it starts with (the ones a
+    // right-to-left line keeps after its last word), so that what is read ends at the right edge.
+    let moves: Vec<Option<(f32, f32)>> = galley
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, placed)| {
+            let slot = RowSlot { index, width: placed.row.size.x, field_width: width, rtl: map.row_is_rtl(index), last: last == Some(index) };
+            x(slot).filter(|at| at.is_finite()).map(|at| (at, hang(&placed.row)))
+        })
+        .collect();
+    if moves.iter().all(Option::is_none) {
         return galley;
     }
     let inner = Arc::make_mut(&mut galley);
-    let width = if width.is_finite() { width.floor().max(inner.rect.width()) } else { inner.rect.width() };
     let snap = |x: f32| if pixels_per_point > 0.0 && pixels_per_point.is_finite() { (x * pixels_per_point).round() / pixels_per_point } else { x };
     let mut bounds = egui::Rect::NOTHING;
-    for (i, placed) in inner.rows.iter_mut().enumerate() {
-        if map.row_is_rtl(i) {
-            placed.pos.x = snap((inner.rect.min.x + width - placed.row.size.x).max(inner.rect.min.x));
+    for (placed, at) in inner.rows.iter_mut().zip(moves) {
+        if let Some((at, hang)) = at {
+            // Inside the galley on both sides, but for the spaces the row starts with.
+            let at = at.min(width - placed.row.size.x);
+            placed.pos.x = snap((inner.rect.min.x + at).max(inner.rect.min.x - hang));
         }
         bounds |= placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2());
     }
@@ -1272,24 +1594,38 @@ fn restore_deferred(ui: &Ui, id: Id) {
     }
 }
 
-fn show_reordered(ui: &mut Ui, id: Id, text: &mut String, mut s: Settings, multiline: bool) -> TextEditOutput {
+/// Shows the field `id` whose text needs the screen-order treatment; returns egui's output, the
+/// map of the text as drawn and the logical place of the caret.
+fn show_reordered(
+    ui: &mut Ui,
+    id: Id,
+    text: &mut String,
+    mut s: Settings,
+    multiline: bool,
+    hook: &mut Option<LayoutHook<'_>>,
+) -> (TextEditOutput, Arc<ScreenMap>, Option<usize>) {
     let ctx = ui.ctx().clone();
     let cache: SharedCache = Rc::default();
     let caret: SharedCaret = Rc::default();
 
     // The layouter: the default one of a `TextEdit`, but for the text in display order.
-    let font = s.font.clone().resolve(ui.style());
-    let row_height = ui.fonts_mut(|f| f.row_height(&font));
-    let line_height = row_height + ui.spacing().extra_text_line_spacing;
-    let color = s.text_color.or(ui.visuals().override_text_color).unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
-    let look = Look { font: font.clone(), color, halign: s.halign.unwrap_or(Align::Min), line_height };
+    let look = Look::of(ui, &s);
 
-    // A multi-line field wraps its paragraphs itself, at the width egui hands the layouter; the
-    // width is wanted before that (to put the cursor egui kept on the screen).
+    // A multi-line field wraps its paragraphs itself, at the width egui hands the layouter (or the
+    // width its owner says); the width is wanted before that (to put the cursor egui kept on the screen).
     let estimate = multiline.then(|| estimate_wrap_width(ui, &s));
-    let wrap_width: Option<f32> = estimate.map(|width| width + ctx.data(|d| d.get_temp::<WrapShift>(id)).unwrap_or_default().0);
+    let egui_width: Option<f32> = estimate.map(|width| width + ctx.data(|d| d.get_temp::<WrapShift>(id)).unwrap_or_default().0);
+    let wrap_override = s.wrap_override;
+    let wrap_width: Option<f32> = egui_width.map(|width| wrap_override.unwrap_or(width));
     if let (Some(width), Ok(mut shared)) = (wrap_width, cache.try_borrow_mut()) {
-        shared.wrap = Some(Wrap { ctx: ctx.clone(), font, width, neutral_rtl: crate::rtl::mirrored() });
+        shared.wrap = Some(Wrap {
+            ctx: ctx.clone(),
+            font: look.font.clone(),
+            width,
+            neutral_rtl: crate::rtl::mirrored(),
+            forced_rtl: s.forced_rtl,
+            measure: s.measure.clone(),
+        });
     }
     if let Some(kept) = ctx.data(|d| d.get_temp::<KeptMap>(id)) {
         seed_cache(&cache, kept, text);
@@ -1334,7 +1670,7 @@ fn show_reordered(ui: &mut Ui, id: Id, text: &mut String, mut s: Settings, multi
         let logical_len = map.logical_len();
         let (plain_arrows, only_motion) = ui.input(|i| (i.events.iter().any(is_plain_arrow), i.events.iter().all(|e| !edits_text(e))));
         let stops: Vec<Pos2> = if plain_arrows && only_motion {
-            let galley = look.layout(ui, &map, wrap_width);
+            let galley = galley_of(hook, &look, ui, &map, egui_width);
             (0..=map.screen_len()).map(|v| galley.pos_from_cursor(CCursor::new(v)).min).collect()
         } else {
             Vec::new()
@@ -1383,13 +1719,18 @@ fn show_reordered(ui: &mut Ui, id: Id, text: &mut String, mut s: Settings, multi
     let preedit: SharedPreedit = Rc::new(Cell::new(ctx.data(|d| d.get_temp(id))));
 
     let layout_cache = Rc::clone(&cache);
+    // The width egui laid the text out at in the end, which can differ from the estimate.
+    let laid_out_at: Rc<Cell<Option<f32>>> = Rc::default();
+    let layout_seen = Rc::clone(&laid_out_at);
     let layout_look = look.clone();
+    let layout_hook = &mut *hook;
     let mut layouter = move |ui: &Ui, buffer: &dyn TextBuffer, width: f32| -> Arc<Galley> {
         if multiline {
-            set_wrap_width(&layout_cache, width);
+            set_wrap_width(&layout_cache, wrap_override.unwrap_or(width));
+            layout_seen.set(Some(width));
         }
         let map = map_of(&layout_cache, buffer.as_str());
-        layout_look.layout(ui, &map, multiline.then_some(width))
+        galley_of(layout_hook, &layout_look, ui, &map, multiline.then_some(width))
     };
 
     let mut out = {
@@ -1414,10 +1755,12 @@ fn show_reordered(ui: &mut Ui, id: Id, text: &mut String, mut s: Settings, multi
             d.remove_temp::<Preedit>(id);
         }
     });
-    if let (Some(estimate), Some(laid_out)) = (estimate, cache.try_borrow().ok().and_then(|c| c.wrap.as_ref().map(|w| w.width))) {
+    if let (Some(estimate), Some(laid_out), Some(wrapped_at)) =
+        (estimate, laid_out_at.get(), cache.try_borrow().ok().and_then(|c| c.wrap.as_ref().map(|w| w.width)))
+    {
         let shift = laid_out - estimate;
         ctx.data_mut(|d| {
-            d.insert_temp(id, WrapUsed(laid_out.to_bits()));
+            d.insert_temp(id, WrapUsed(wrapped_at.to_bits()));
             if shift.is_finite() && shift.abs() > 0.01 {
                 d.insert_temp(id, WrapShift(shift));
             } else {
@@ -1445,6 +1788,7 @@ fn show_reordered(ui: &mut Ui, id: Id, text: &mut String, mut s: Settings, multi
             out.state.clone().store(&ctx, id);
         }
     }
+    let mut caret_at = None;
     if let Some(range) = out.state.cursor.char_range() {
         let v = range.primary.index.0.min(map.screen_len());
         let known = caret.get().filter(|c| c.v == v && map.screen_positions(c.l).contains(&v));
@@ -1457,6 +1801,7 @@ fn show_reordered(ui: &mut Ui, id: Id, text: &mut String, mut s: Settings, multi
             (None, None) => Some(keys.unwrap_or(Moved::External)),
         };
         let l = how.map_or_else(|| logical_for(&map, v, known), |how| derive_logical(&map, v, how));
+        caret_at = Some(l);
         if multiline && !bidi::has_rtl(text) {
             // Nothing right to left is left in the field, so the next frame draws it as a plain
             // `TextEdit` whose cursor counts the text's characters, not the screen's (a line
@@ -1467,7 +1812,7 @@ fn show_reordered(ui: &mut Ui, id: Id, text: &mut String, mut s: Settings, multi
             ctx.data_mut(|d| d.insert_temp(id, Caret { l, v }));
         }
     }
-    out
+    (out, map, caret_at)
 }
 
 /// Stores the cursor `range` (screen indices of `map`, its primary at logical place `l`) of the
@@ -3078,5 +3423,446 @@ mod tests {
         let again = field.caret();
         field.frame(vec![]);
         assert_eq!(field.caret(), again);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The layout hook, and the pieces around it.
+
+    /// What a layout hook was told.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Seen {
+        prewrapped: bool,
+        wrap_width: Option<f32>,
+        shaper: String,
+        /// The map is the text as stored.
+        identity: bool,
+    }
+
+    type Seens = Rc<RefCell<Vec<Seen>>>;
+
+    /// A hook that records what it is told and lays out as the field does.
+    fn recording(seen: &Seens) -> impl FnMut(&Ui, &ScreenMap, &LayoutCtx<'_>) -> Arc<Galley> + 'static {
+        let seen = Rc::clone(seen);
+        move |ui, map, ctx| {
+            seen.borrow_mut().push(Seen {
+                prewrapped: ctx.prewrapped,
+                wrap_width: ctx.wrap_width,
+                shaper: map.shaper.clone(),
+                identity: map.shown.iter().enumerate().all(|(i, l)| i == *l) && map.row_rtl.is_empty(),
+            });
+            ctx.layout(ui, map)
+        }
+    }
+
+    /// How a test sets a field up (its builder calls) each time the field is shown.
+    type Build<'a> = &'a dyn for<'t> Fn(BidiEdit<'t>) -> BidiEdit<'t>;
+
+    /// A field in its own context, shown by hand, at a pixel ratio, in a font of a size, `width`
+    /// wide and without margins: the text area is exactly `width`.
+    struct Rig {
+        ctx: egui::Context,
+        id: Id,
+        time: f64,
+        text: String,
+        multiline: bool,
+        width: f32,
+        size: f32,
+    }
+
+    impl Rig {
+        fn new(fonts: egui::FontDefinitions, pixels_per_point: f32, multiline: bool, width: f32, size: f32, text: &str) -> Self {
+            let ctx = egui::Context::default();
+            ctx.set_os(egui::os::OperatingSystem::Nix);
+            ctx.set_fonts(fonts);
+            ctx.set_pixels_per_point(pixels_per_point);
+            let mut rig = Self { ctx, id: Id::new("rig"), time: 0.0, text: text.to_owned(), multiline, width, size };
+            // The pixel ratio and the fonts take effect from the second frame.
+            rig.frame(vec![], &|edit| edit);
+            rig
+        }
+
+        /// A rig with the Arabic face (`None` without one: the test skips).
+        fn arabic(pixels_per_point: f32, multiline: bool, width: f32, size: f32, text: &str) -> Option<Self> {
+            Some(Self::new(bidi::arabic_test_fonts()?, pixels_per_point, multiline, width, size, text))
+        }
+
+        fn frame(&mut self, events: Vec<Event>, build: Build<'_>) -> BidiOutput {
+            self.time += 0.1;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(3000.0, 1000.0))),
+                events,
+                time: Some(self.time),
+                ..Default::default()
+            };
+            let (id, width, size, multiline) = (self.id, self.width, self.size, self.multiline);
+            let text = &mut self.text;
+            let mut out = None;
+            let frame = self.ctx.run_ui(raw, |ui| {
+                ui.memory_mut(|m| m.request_focus(id));
+                let edit = if multiline { BidiEdit::multiline(text) } else { BidiEdit::singleline(text) };
+                let edit = edit.id(id).desired_width(width).margin(Margin::ZERO).font(FontId::proportional(size));
+                out = Some(build(edit).show_mapped(ui));
+            });
+            frame.drop_without_applying_deltas();
+            out.expect("the field is shown every frame")
+        }
+
+        /// Clicks at `at` (not a double click) and shows the field once more.
+        fn click(&mut self, at: Pos2, build: Build<'_>) -> BidiOutput {
+            self.time += 2.0;
+            self.frame(vec![Event::PointerMoved(at)], build);
+            let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            self.frame(vec![button(true)], build);
+            self.frame(vec![button(false)], build);
+            self.frame(vec![], build)
+        }
+    }
+
+    /// Everything about where `galley` puts its text, to compare two layouts of the same text.
+    fn shape_of(galley: &Galley) -> String {
+        let mut out = format!("{:?} {:?}\n", galley.job.text, galley.rect);
+        for placed in &galley.rows {
+            out += &format!("{:?} {:?} {}", placed.pos, placed.row.size, placed.ends_with_newline);
+            for g in &placed.row.glyphs {
+                out += &format!(" {}@{:.2}+{:.2}", g.chr, g.pos.x, g.advance_width);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn latin_fonts() -> egui::FontDefinitions {
+        crate::theme::font_definitions()
+    }
+
+    /// Two Arabic words ("salam alaykum"): drawn the second first, from the left.
+    const SALAM: &str = "\u{633}\u{644}\u{627}\u{645} \u{639}\u{644}\u{64A}\u{643}\u{645}";
+
+    #[test]
+    fn a_layout_hook_is_told_what_kind_of_field_it_lays_out_and_gets_the_map() {
+        let seen = Seens::default();
+        let run = |fonts: egui::FontDefinitions, multiline: bool, text: &str| {
+            let mut rig = Rig::new(fonts, 1.0, multiline, 200.0, 16.0, text);
+            seen.borrow_mut().clear();
+            let out = rig.frame(vec![], &|edit| edit.layout(recording(&seen)));
+            let last = seen.borrow().last().cloned().expect("the hook is called");
+            (last, out)
+        };
+        // Latin, multi-line: egui wraps, the map is the text.
+        let (latin, _) = run(latin_fonts(), true, "hello world");
+        assert_eq!(latin, Seen { prewrapped: false, wrap_width: Some(200.0), shaper: "hello world".into(), identity: true });
+        // Latin, single line: no width.
+        let (latin, _) = run(latin_fonts(), false, "hello world");
+        assert_eq!(latin, Seen { prewrapped: false, wrap_width: None, shaper: "hello world".into(), identity: true });
+        let Some(fonts) = bidi::arabic_test_fonts() else { return };
+        // Arabic, multi-line: the field has wrapped the lines, which are in display order.
+        let (arabic, out) = run(fonts.clone(), true, SALAM);
+        let map = bidi::wrapped_screen_map(SALAM, crate::rtl::mirrored(), None, |_| true);
+        assert_eq!(arabic, Seen { prewrapped: true, wrap_width: Some(200.0), shaper: map.shaper.clone(), identity: false });
+        assert_ne!(arabic.shaper, SALAM, "the words are in display order");
+        assert_eq!(*out.map, map);
+        // Arabic, single line: the whole line in display order, laid out by egui as one line.
+        let (arabic, _) = run(fonts, false, SALAM);
+        assert_eq!(arabic, Seen { prewrapped: false, wrap_width: None, shaper: bidi::visual(SALAM).into_owned(), identity: false });
+    }
+
+    #[test]
+    fn a_password_is_laid_out_by_egui_and_never_shown_to_a_hook() {
+        let seen = Seens::default();
+        let mut rig = Rig::new(latin_fonts(), 1.0, false, 200.0, 16.0, "hunter2");
+        let out = rig.frame(vec![], &|edit| edit.password(true).layout(recording(&seen)));
+        assert!(seen.borrow().is_empty(), "{:?}", seen.borrow());
+        assert!(!out.out.galley.job.text.contains("hunter2"), "masked: {:?}", out.out.galley.job.text);
+        assert_eq!(rig.text, "hunter2");
+    }
+
+    #[test]
+    fn the_fields_own_layout_through_a_hook_is_the_layout_without_one() {
+        let hooked = |rig: &mut Rig| rig.frame(vec![], &|edit| edit.layout(|ui, map, ctx| ctx.layout(ui, map)));
+        let plain = |rig: &mut Rig| rig.frame(vec![], &|edit| edit);
+        let mut cases = vec![(latin_fonts(), true, "alpha beta gamma delta epsilon zeta\nsecond"), (latin_fonts(), false, "alpha beta")];
+        if let Some(fonts) = bidi::arabic_test_fonts() {
+            cases.extend([(fonts.clone(), true, PARAGRAPH), (fonts.clone(), true, "ab \u{633}\u{644}\u{627}\u{645}\nxyz"), (fonts, false, SALAM)]);
+        }
+        for (fonts, multiline, text) in cases {
+            for width in [60.0, 150.0, 400.0] {
+                let mut rig = Rig::new(fonts.clone(), 1.0, multiline, width, 16.0, text);
+                let with = hooked(&mut rig);
+                let without = plain(&mut rig);
+                assert_eq!(shape_of(&with.out.galley), shape_of(&without.out.galley), "{text:?} at {width}, multi-line {multiline}");
+                assert_eq!(with.out.response.response.rect, without.out.response.response.rect, "{text:?} at {width}");
+                assert_eq!(rig.text, text);
+            }
+        }
+    }
+
+    #[test]
+    fn a_hook_may_lay_the_text_out_in_sections_and_the_galley_is_still_one_glyph_per_character() {
+        for (text, width) in [(SALAM, 400.0), (PARAGRAPH, 150.0), ("ab \u{633}\u{644}\u{627}\u{645} cd\n\u{639}\u{644}\u{64A} x", 90.0)] {
+            let Some(mut rig) = Rig::arabic(1.0, true, width, 16.0, text) else { return };
+            let sections_seen = Rc::new(RefCell::new(Vec::<String>::new()));
+            let record = Rc::clone(&sections_seen);
+            let out = rig.frame(vec![], &|edit| {
+                let record = Rc::clone(&record);
+                edit.layout(move |ui, map, ctx| {
+                    // One section for each word (a space ends one), alternating colors.
+                    let mut job = ctx.job(map);
+                    job.text.clear();
+                    job.sections.clear();
+                    let colors = [ctx.color(), Color32::BLUE];
+                    let mut pieces = Vec::new();
+                    let mut rest = map.shaper.as_str();
+                    while !rest.is_empty() {
+                        let end = rest.find([' ', '\n']).map_or(rest.len(), |at| at + 1);
+                        let (piece, tail) = rest.split_at(end);
+                        let mut format = egui::TextFormat::simple(ctx.font().clone(), colors[pieces.len() % 2]);
+                        format.line_height = Some(ctx.line_height());
+                        job.sections.push(egui::text::LayoutSection {
+                            leading_space: 0.0,
+                            byte_range: egui::text::ByteIndex(job.text.len())..egui::text::ByteIndex(job.text.len() + piece.len()),
+                            format,
+                        });
+                        job.text.push_str(piece);
+                        pieces.push(piece.to_owned());
+                        rest = tail;
+                    }
+                    record.borrow_mut().push(pieces.concat());
+                    assert_eq!(pieces.concat(), map.shaper, "the sections are the shaper text, in order");
+                    assert_eq!(job.text, map.shaper);
+                    let galley = ctx.lay_out(ui, map, job);
+                    ctx.place_rows(ui, galley, map)
+                })
+            });
+            assert!(!sections_seen.borrow().is_empty());
+            assert_rows_aligned(&out.out, &out.map, text);
+            assert!(out.out.galley.rows.iter().flat_map(|r| &r.row.glyphs).count() > 0);
+            assert_eq!(rig.text, text);
+        }
+    }
+
+    /// The width of the spaces a row starts with.
+    fn leading_spaces(row: &egui::epaint::text::Row) -> f32 {
+        row.glyphs.iter().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum()
+    }
+
+    /// Rows of an Arabic paragraph at `width`, as `(left, width)` in the text area.
+    fn rows_at(out: &BidiOutput) -> Vec<(f32, f32)> {
+        out.out.galley.rows.iter().map(|placed| (placed.pos.x, placed.row.size.x)).collect()
+    }
+
+    #[test]
+    fn aligned_rows_sit_where_the_alignment_says() {
+        for ppp in [1.0, 2.0] {
+            let tolerance = 1.0 / ppp + 0.01;
+            for (arabic, text, width) in [
+                (true, PARAGRAPH, 150.0_f32),
+                (false, LATIN, 120.0),
+                (true, "\u{633}\u{644}\u{627}\u{645}\n\u{639}\u{644}\u{64A}\u{643}\u{645} \u{633}\u{644}\u{627}\u{645}", 200.0),
+            ] {
+                for align in [RowAlign::Left, RowAlign::Center, RowAlign::Right, RowAlign::Justify] {
+                    let fonts = if arabic {
+                        let Some(fonts) = bidi::arabic_test_fonts() else { continue };
+                        fonts
+                    } else {
+                        latin_fonts()
+                    };
+                    let mut rig = Rig::new(fonts, ppp, true, width, 16.0, text);
+                    let out = rig.frame(vec![], &|edit| edit.layout(move |ui, map, ctx| ctx.layout_aligned(ui, map, align)));
+                    let rows = rows_at(&out);
+                    assert!(rows.len() >= 2, "{align:?}: {text:?} wraps at {width}: {rows:?}");
+                    // The galley spans the whole width, so egui puts it at the field's left edge.
+                    assert!((out.out.galley.rect.width() - width).abs() < 0.5, "{align:?}: {:?}", out.out.galley.rect);
+                    let last = rows.len() - 1;
+                    let leads: Vec<f32> = out.out.galley.rows.iter().map(|placed| leading_spaces(&placed.row)).collect();
+                    for (i, (x, w)) in rows.iter().copied().enumerate() {
+                        let expected = match align {
+                            RowAlign::Left => 0.0,
+                            RowAlign::Center => (width - w) / 2.0,
+                            // A row that does not fit with the space it keeps at its left end hangs over the edge by it (below).
+                            RowAlign::Right => width - w,
+                            RowAlign::Justify if arabic && i == last => width - w,
+                            RowAlign::Justify => 0.0,
+                        };
+                        let expected = expected.min(width - w).max(-leads[i]);
+                        assert!(
+                            (x - expected).abs() <= tolerance,
+                            "{align:?} row {i} of {text:?}: at {x}, wanted {expected} (width {w} in {width}, {ppp} px per point)"
+                        );
+                        assert!(x >= -leads[i] - 0.01 && x + w <= width + tolerance, "{align:?} row {i} stays inside: {x} + {w} in {width}");
+                    }
+                    if arabic {
+                        // Whatever the alignment, the words are in display order, laid out by the field.
+                        assert_rows_aligned(&out.out, &out.map, text);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rows_stay_aligned_to_the_text_area_at_every_pixel_ratio_and_size() {
+        for ppp in [1.0, 1.5, 2.0] {
+            for scale in [0.5_f32, 1.0, 2.0, 4.0] {
+                let (width, size) = ((130.0 * scale).round(), 16.0 * scale);
+                for align in [RowAlign::Right, RowAlign::Center, RowAlign::Left] {
+                    let Some(mut rig) = Rig::arabic(ppp, true, width, size, PARAGRAPH) else { return };
+                    let build: Build<'_> = &move |edit| edit.layout(move |ui, map, ctx| ctx.layout_aligned(ui, map, align));
+                    let out = rig.frame(vec![], build);
+                    let what = format!("{align:?} at {ppp} px per point, scale {scale}");
+                    let origin = out.out.galley_pos;
+                    assert!(out.out.galley.rows.len() >= 2, "{what}: wraps");
+                    for (i, placed) in out.out.galley.rows.iter().enumerate() {
+                        // A row keeps the space after its last word, at its left end in a right-to-left row, which
+                        // may hang over the edge: what is read still ends at the right edge.
+                        let (left, right) = (placed.pos.x, placed.pos.x + placed.row.size.x);
+                        if align == RowAlign::Right {
+                            assert!((right - width).abs() <= 1.0, "{what}: row {i} ends at {right}, the text area at {width}");
+                        }
+                        assert!(left >= -leading_spaces(&placed.row) - 0.01 && right <= width + 1.0, "{what}: row {i} is {left}..{right} in {width}");
+                    }
+                    // The caret (at the end of the text: the left end of the last row) is inside that row.
+                    let (_, caret_x) = cursor_of(&out.out);
+                    let last = out.out.galley.rows.last().expect("rows");
+                    let last_left = origin.x - out.out.galley.rect.left() + last.pos.x;
+                    assert!(
+                        caret_x >= last_left - 1.0 && caret_x <= last_left + last.row.size.x + 1.0,
+                        "{what}: the caret is at {caret_x}, the last row spans {last_left}..{}",
+                        last_left + last.row.size.x
+                    );
+                    // A click on the first glyph of the first row puts the caret next to it.
+                    let first_row = &out.out.galley.rows[0];
+                    let glyph = first_row.glyphs[0];
+                    let at = Pos2::new(
+                        origin.x - out.out.galley.rect.left() + first_row.pos.x + glyph.pos.x + 1.0,
+                        origin.y + first_row.pos.y + first_row.row.size.y / 2.0,
+                    );
+                    let clicked = rig.click(at, build);
+                    let (map, range) = (&clicked.map, clicked.logical_range().expect("a cursor"));
+                    assert_eq!(range.start, range.end, "{what}: a click selects nothing");
+                    assert!(
+                        map.logical_positions(0).contains(&range.start),
+                        "{what}: the click left the caret at {range:?}, not next to the first glyph: {:?}",
+                        map.logical_positions(0)
+                    );
+                    assert_eq!(rig.text, PARAGRAPH);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_space_a_wrapped_row_keeps_hangs_over_the_edge_instead_of_pushing_the_words_in() {
+        // "salam alaykum" at a width that takes "salam" but not "salam" and the space after it: the
+        // first row is the space (at its left end) and the word, wider than the field by the space.
+        let row_width =
+            |text: &str| Rig::arabic(1.0, true, 1000.0, 40.0, text).map(|mut rig| rig.frame(vec![], &|edit| edit).out.galley.rows[0].row.size.x);
+        let (Some(word), Some(with_space)) = (row_width("\u{633}\u{644}\u{627}\u{645}"), row_width("\u{633}\u{644}\u{627}\u{645} ")) else { return };
+        let space = with_space - word;
+        assert!(space > 4.0, "{space}");
+        let width = (word + space / 2.0).floor();
+        let mut rig = Rig::arabic(1.0, true, width, 40.0, SALAM).expect("the face is there");
+        let out = rig.frame(vec![], &|edit| edit.layout(|ui, map, ctx| ctx.layout_aligned(ui, map, RowAlign::Right)));
+        // (The second word is wider than the field and breaks between letters.)
+        assert!(out.out.galley.rows.len() >= 2, "wraps after the first word: {:?}", out.map.shaper);
+        let row = &out.out.galley.rows[0];
+        assert_eq!(row.glyphs[0].chr, ' ', "the space is the row's first glyph, at its left end");
+        assert!(row.row.size.x > width, "the row is wider than the field: {} in {width}", row.row.size.x);
+        assert!(row.pos.x < 0.0 && row.pos.x >= -space - 0.5, "the space hangs over the left edge: {}", row.pos.x);
+        assert!(
+            (row.pos.x + row.row.size.x - width).abs() <= 0.6,
+            "what is read ends at the right edge: {} + {} in {width}",
+            row.pos.x,
+            row.row.size.x
+        );
+        // The galley is as wide as the field, not as wide as that row.
+        assert!((out.out.galley.rect.width() - width).abs() < 0.5, "{:?}", out.out.galley.rect);
+        // Centred and left-aligned, the word stays inside the field too.
+        for (align, left) in [(RowAlign::Center, true), (RowAlign::Left, false)] {
+            let out = rig.frame(vec![], &move |edit| edit.layout(move |ui, map, ctx| ctx.layout_aligned(ui, map, align)));
+            let row = &out.out.galley.rows[0];
+            assert!(row.pos.x + row.row.size.x <= width + 0.6, "{align:?}: {} + {} in {width}", row.pos.x, row.row.size.x);
+            assert!(row.pos.x >= -space - 0.5 && (!left || row.pos.x <= 0.0), "{align:?}: {}", row.pos.x);
+        }
+    }
+
+    #[test]
+    fn a_wrap_width_of_the_owners_and_a_measure_of_the_owners_decide_where_lines_break() {
+        let Some(mut rig) = Rig::arabic(1.0, true, 150.0, 16.0, PARAGRAPH) else { return };
+        let rows = |out: &BidiOutput| out.out.galley.rows.len();
+        let own = rig.frame(vec![], &|edit| edit);
+        assert!(rows(&own) >= 3);
+        // Not at all: one row to the paragraph, wider than the field.
+        let unwrapped = rig.frame(vec![], &|edit| edit.wrap_at(f32::INFINITY));
+        assert_eq!(rows(&unwrapped), 1);
+        assert!(unwrapped.out.galley.rows[0].row.size.x > 150.0);
+        assert_eq!(rig.text, PARAGRAPH);
+        // A narrower width breaks it into more rows, a wider one into fewer.
+        let narrow = rig.frame(vec![], &|edit| edit.wrap_at(60.0));
+        let wide = rig.frame(vec![], &|edit| edit.wrap_at(400.0));
+        assert!(rows(&narrow) > rows(&own) && rows(&wide) < rows(&own), "{} {} {}", rows(&narrow), rows(&own), rows(&wide));
+        // The galley is still placed for the width egui gave: the rows end at the right edge of the field.
+        let (left, width) = rows_at(&narrow)[0];
+        assert!((left + width - 150.0).abs() <= 1.0, "{left} {width}");
+        // A measure of the owner's: ten units to a character, 55 to a line, so five characters (spaces
+        // are measured with the line, as `wrapped_screen_map` asks for lines without their trailing spaces).
+        let measured = rig.frame(vec![], &|edit| edit.wrap_at(55.0).measure(|_, line| line.chars().count() as f32 * 10.0));
+        let map = &measured.map;
+        for row in map.shaper.split('\n') {
+            // The spaces after the last word of a line belong to it but are not measured.
+            assert!(row.trim_matches(' ').chars().count() <= 5, "{row:?}");
+        }
+        assert!(rows(&measured) > rows(&own));
+        assert_eq!(rig.text, PARAGRAPH);
+    }
+
+    #[test]
+    fn a_forced_direction_decides_every_paragraph_of_the_field() {
+        let text = "ab \u{633}\u{644}\u{627}\u{645}";
+        let Some(mut rig) = Rig::arabic(1.0, true, 200.0, 16.0, text) else { return };
+        let auto = rig.frame(vec![], &|edit| edit);
+        assert_eq!(auto.map.row_rtl, [false], "the first strong letter is Latin");
+        let forced = rig.frame(vec![], &|edit| edit.forced_rtl(Some(true)));
+        assert_eq!(forced.map.row_rtl, [true]);
+        assert_ne!(forced.map.shaper, auto.map.shaper, "the Arabic word comes first from the left");
+        // The row is against the right edge, as a right-to-left paragraph's is.
+        let (left, width) = rows_at(&forced)[0];
+        assert!((left + width - 200.0).abs() <= 1.0, "{left} {width}");
+        assert_rows_aligned(&forced.out, &forced.map, text);
+        assert_eq!(rig.text, text);
+    }
+
+    #[test]
+    fn the_logical_range_of_a_selection_is_the_hull_of_the_characters_between_its_ends() {
+        let Some(mut rig) = Rig::arabic(1.0, true, 300.0, 16.0, AB_ALI) else { return };
+        // Nothing selected yet: the caret, at the end of the text.
+        let out = rig.frame(vec![], &|edit| edit);
+        assert_eq!(out.logical_range(), Some(5..5));
+        // Select all: the whole text.
+        let all = Event::Key { key: Key::A, physical_key: Some(Key::A), pressed: true, repeat: false, modifiers: Modifiers::COMMAND };
+        let out = rig.frame(vec![all], &|edit| edit);
+        assert_eq!(out.logical_range(), Some(0..5));
+        // Home, then Shift+Right twice: the first two screen places, "a" and "b".
+        let home = Event::Key { key: Key::Home, physical_key: Some(Key::Home), pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        rig.frame(vec![home], &|edit| edit);
+        let right =
+            Event::Key { key: Key::ArrowRight, physical_key: Some(Key::ArrowRight), pressed: true, repeat: false, modifiers: Modifiers::SHIFT };
+        rig.frame(vec![right.clone()], &|edit| edit);
+        let out = rig.frame(vec![right.clone()], &|edit| edit);
+        assert_eq!(out.logical_range(), Some(0..2));
+        // The newest letter is drawn after "ab" and is the last of the text: three places select "ab" and it.
+        let out = rig.frame(vec![right], &|edit| edit);
+        assert_eq!(out.logical_range(), Some(0..5), "the hull covers what lies between: {:?}", out.map.shown);
+    }
+
+    #[test]
+    fn the_logical_range_of_a_plain_field_is_its_cursor() {
+        let mut rig = Rig::new(latin_fonts(), 1.0, true, 300.0, 16.0, "hello world");
+        let out = rig.frame(vec![], &|edit| edit);
+        assert_eq!(out.logical_range(), Some(11..11));
+        assert_eq!(*out.map, ScreenMap::identity("hello world"));
+        let key = |key, modifiers| Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers };
+        rig.frame(vec![key(Key::Home, Modifiers::NONE)], &|edit| edit);
+        let out = rig.frame(vec![key(Key::ArrowRight, Modifiers::SHIFT), key(Key::ArrowRight, Modifiers::SHIFT)], &|edit| edit);
+        assert_eq!(out.logical_range(), Some(0..2));
     }
 }

@@ -9,7 +9,7 @@ mod bidi_edit;
 mod form;
 mod scrollbar;
 mod submenu;
-pub use bidi_edit::BidiEdit;
+pub use bidi_edit::{BidiEdit, RowAlign};
 pub use form::{FormRows, form_grid, start_block};
 pub use scrollbar::scroll_area;
 

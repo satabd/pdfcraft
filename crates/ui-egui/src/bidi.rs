@@ -137,18 +137,11 @@ pub const VIRTUAL: usize = usize::MAX;
 /// The [`ScreenMap`] of `text`: [`visual`] with the position of every character kept. Text without
 /// right-to-left script maps to itself.
 pub fn screen_map(text: &str) -> ScreenMap {
+    if !has_rtl(text) {
+        return ScreenMap::identity(text);
+    }
     let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
     let count = offsets.len();
-    if !has_rtl(text) {
-        return ScreenMap {
-            shaper: text.to_owned(),
-            shown: (0..count).collect(),
-            drawn: text.chars().collect(),
-            rtl: vec![false; count],
-            to_screen: (0..count).map(Some).collect(),
-            row_rtl: Vec::new(),
-        };
-    }
     let mut map = ScreenMap {
         shaper: String::with_capacity(text.len()),
         shown: Vec::with_capacity(count),
@@ -183,7 +176,9 @@ pub fn screen_map(text: &str) -> ScreenMap {
 /// line separators) is broken into lines that `fits` accepts, and each line put in display order
 /// by the Unicode bidirectional algorithm (UAX #9) for the paragraph's direction, which is that of
 /// its first strong character (`neutral_rtl` for one without, such as an empty line or digits
-/// only, which would not say where it belongs).
+/// only, which would not say where it belongs). `forced_rtl` overrides that for every paragraph
+/// (`Some(true)` reads them all right to left, `Some(false)` left to right): a caller whose text
+/// has its own rule for the direction (a block that reads as a whole one way) says so.
 ///
 /// The map's [`ScreenMap::shaper`] is the lines joined by `'\n'`, so egui lays one line on each of
 /// its rows. A line break the wrapping makes is [`VIRTUAL`]: it maps to no character of the text
@@ -196,7 +191,7 @@ pub fn screen_map(text: &str) -> ScreenMap {
 /// `fits` measures a line in logical order, without the spaces after its last word; a word wider
 /// than a line is broken between characters. It is called for the same text many times over; the
 /// caller bounds its cost.
-pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, mut fits: impl FnMut(&str) -> bool) -> ScreenMap {
+pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, forced_rtl: Option<bool>, mut fits: impl FnMut(&str) -> bool) -> ScreenMap {
     let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
     let count = offsets.len();
     let mut map = ScreenMap {
@@ -207,7 +202,8 @@ pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, mut fits: impl FnMut(&s
         to_screen: vec![None; count],
         row_rtl: Vec::new(),
     };
-    let info = BidiInfo::new(text, None);
+    let base = forced_rtl.map(|rtl| if rtl { Level::rtl() } else { Level::ltr() });
+    let info = BidiInfo::new(text, base);
     let mut inherited = neutral_rtl;
     for para in &info.paragraphs {
         let whole = text.get(para.range.clone()).unwrap_or_default();
@@ -215,7 +211,9 @@ pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, mut fits: impl FnMut(&s
         let content = para.range.start..para.range.start.saturating_add(content_len);
         // unicode-bidi ends a paragraph at the `\r` of `\r\n`; the `\n` is no new paragraph.
         let continues = whole == "\n" && text.get(..para.range.start).is_some_and(|before| before.ends_with('\r'));
-        let rtl_para = if para.level.is_rtl() {
+        let rtl_para = if let Some(forced) = forced_rtl {
+            forced
+        } else if para.level.is_rtl() {
             true
         } else {
             match unicode_bidi::get_base_direction(whole) {
@@ -264,6 +262,20 @@ pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, mut fits: impl FnMut(&s
 }
 
 impl ScreenMap {
+    /// The map of `text` drawn exactly as it is stored: every character at its own place, all
+    /// reading left to right. What a field that does not reorder (a plain `egui::TextEdit`) shows.
+    pub fn identity(text: &str) -> Self {
+        let count = text.chars().count();
+        ScreenMap {
+            shaper: text.to_owned(),
+            shown: (0..count).collect(),
+            drawn: text.chars().collect(),
+            rtl: vec![false; count],
+            to_screen: (0..count).map(Some).collect(),
+            row_rtl: Vec::new(),
+        }
+    }
+
     /// Appends the logical character `logical`, drawn as `c`, at the next screen position.
     fn push_shown(&mut self, logical: usize, c: char, rtl: bool) {
         let screen = self.shown.len();
@@ -425,6 +437,33 @@ impl ScreenMap {
     /// the last, read left to right).
     pub fn row_is_rtl(&self, row: usize) -> bool {
         self.row_rtl.get(row).copied().unwrap_or(false)
+    }
+
+    /// The logical index of each character of [`Self::shaper`] (so `shaper.chars().count()` entries):
+    /// what a caller that lays the text out piece by piece (a style per character of the stored
+    /// text) needs to know about the text egui is given. [`VIRTUAL`] for the line break a wrapped
+    /// text makes, and for nothing else.
+    ///
+    /// The shaper text is the screen text with every stretch of right-to-left script put back in
+    /// logical order (see `push_for_shaper`); this does the same to the logical indices, so
+    /// character `i` of the shaper text is character `shaper_source()[i]` of the stored text,
+    /// except that a bracket drawn mirrored in a right-to-left run is the mirror of its source.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the Edit text editor styles the shaper text by the stored text's characters"))]
+    pub fn shaper_source(&self) -> Vec<usize> {
+        // The shaper text is built from the drawn characters and nothing else, so one entry for
+        // each of them, permuted the way `push_for_shaper` permutes the characters.
+        let mut out = Vec::with_capacity(self.shown.len());
+        let mut stretch: Vec<usize> = Vec::new();
+        for (c, &logical) in self.drawn.iter().zip(&self.shown) {
+            if is_shaped_rtl(*c) {
+                stretch.push(logical);
+            } else {
+                out.extend(stretch.drain(..).rev());
+                out.push(logical);
+            }
+        }
+        out.extend(stretch.drain(..).rev());
+        out
     }
 }
 
@@ -1226,7 +1265,7 @@ mod tests {
     fn a_wrapped_arabic_paragraph_has_two_places_for_the_caret_at_the_break_and_reads_from_the_right() {
         // "abj dhw" (alef ba jim, space, dal heh waw): two words of three letters.
         let text = "\u{627}\u{628}\u{62C} \u{62F}\u{647}\u{648}";
-        let map = wrapped_screen_map(text, false, at_most(3));
+        let map = wrapped_screen_map(text, false, None, at_most(3));
         // Row 0: the space (reading ends there, so it is at the left), then the word's letters
         // from the last to the first; the break; row 1: the second word the same way.
         assert_eq!(map.shown, [3, 2, 1, 0, VIRTUAL, 6, 5, 4]);
@@ -1250,7 +1289,7 @@ mod tests {
 
     #[test]
     fn a_wrapped_latin_paragraph_keeps_its_spaces_and_has_two_screen_places_at_the_break() {
-        let map = wrapped_screen_map("ab cd ef", false, at_most(5));
+        let map = wrapped_screen_map("ab cd ef", false, None, at_most(5));
         assert_eq!(map.shaper, "ab cd \nef");
         assert_eq!(map.shown, [0, 1, 2, 3, 4, 5, VIRTUAL, 6, 7]);
         assert_eq!(map.row_rtl, [false, false]);
@@ -1259,35 +1298,35 @@ mod tests {
         assert_eq!(map.logical_positions(6), [6]);
         assert_eq!(map.logical_positions(7), [6]);
         // A word wider than a line breaks between its characters.
-        let long = wrapped_screen_map("abcdefgh", false, at_most(3));
+        let long = wrapped_screen_map("abcdefgh", false, None, at_most(3));
         assert_eq!(long.shaper, "abc\ndef\ngh");
         assert_eq!(long.logical_len(), 8);
         assert_eq!(long.logical_of_screen(0..long.screen_len()), (0..8).collect::<Vec<_>>());
         // Spaces at the ends of the text and a space-only paragraph stay.
-        let spaces = wrapped_screen_map("  ab   ", false, at_most(9));
+        let spaces = wrapped_screen_map("  ab   ", false, None, at_most(9));
         assert_eq!(spaces.shaper, "  ab   ");
-        assert_eq!(wrapped_screen_map("   ", false, at_most(1)).shaper, "   ");
+        assert_eq!(wrapped_screen_map("   ", false, None, at_most(1)).shaper, "   ");
     }
 
     #[test]
     fn paragraphs_end_at_the_texts_own_line_breaks_and_follow_their_first_strong_letter() {
         // The break is a character of the text and is drawn.
-        let map = wrapped_screen_map("ab\n\u{627}\u{628}\n", false, |_| true);
+        let map = wrapped_screen_map("ab\n\u{627}\u{628}\n", false, None, |_| true);
         assert_eq!(map.shaper, "ab\n\u{627}\u{628}\n", "the letters of a right-to-left word go to the shaper in typing order");
         assert_eq!(map.shown, [0, 1, 2, 4, 3, 5]);
         // Left to right, right to left, and the empty line after the last break goes with the paragraph above it.
         assert_eq!(map.row_rtl, [false, true, true]);
         assert_eq!(map.screen_len(), 6);
         // A paragraph without a strong letter takes the direction of the one before it, or the interface's.
-        assert_eq!(wrapped_screen_map("12\n\n\u{627}\n3", false, |_| true).row_rtl, [false, false, true, true]);
-        assert_eq!(wrapped_screen_map("12\n3", true, |_| true).row_rtl, [true, true]);
+        assert_eq!(wrapped_screen_map("12\n\n\u{627}\n3", false, None, |_| true).row_rtl, [false, false, true, true]);
+        assert_eq!(wrapped_screen_map("12\n3", true, None, |_| true).row_rtl, [true, true]);
         // `\r\n` is one break: the `\n` is drawn nowhere.
-        let crlf = wrapped_screen_map("a\r\nb", false, |_| true);
+        let crlf = wrapped_screen_map("a\r\nb", false, None, |_| true);
         assert_eq!((crlf.shaper.as_str(), crlf.shown.as_slice(), crlf.row_rtl.as_slice()), ("a\nb", [0, 1, 3].as_slice(), [false, false].as_slice()));
         assert_eq!(crlf.to_screen, [Some(0), Some(1), None, Some(2)]);
-        assert_eq!(wrapped_screen_map("a\r\n", false, |_| true).row_rtl.len(), 2);
+        assert_eq!(wrapped_screen_map("a\r\n", false, None, |_| true).row_rtl.len(), 2);
         // Nothing at all.
-        let empty = wrapped_screen_map("", false, |_| true);
+        let empty = wrapped_screen_map("", false, None, |_| true);
         assert_eq!((empty.shaper.as_str(), empty.screen_len(), empty.row_rtl.len()), ("", 0, 0));
         assert_eq!((empty.screen_positions(0), empty.logical_positions(0)), (vec![0], vec![0]));
     }
@@ -1316,7 +1355,7 @@ mod tests {
     fn a_wrapped_map_draws_every_character_once_and_round_trips_the_caret() {
         for text in wrapped_corpus() {
             for width in [1, 2, 3, 5, 8, 1000] {
-                let map = wrapped_screen_map(&text, width % 2 == 0, at_most(width));
+                let map = wrapped_screen_map(&text, width % 2 == 0, None, at_most(width));
                 let (m, n) = (map.logical_len(), map.screen_len());
                 assert_eq!(m, text.chars().count());
                 assert_eq!((map.shaper.chars().count(), map.drawn.len()), (n, n), "{text:?} at {width}");
@@ -1361,6 +1400,131 @@ mod tests {
         }
     }
 
+    /// The shaper text of `map` rebuilt from the stored `text` through [`ScreenMap::shaper_source`],
+    /// asserting along the way that the mapping is sound.
+    fn assert_shaper_source(text: &str, map: &ScreenMap, what: &str) {
+        let chars: Vec<char> = text.chars().collect();
+        let source = map.shaper_source();
+        let shaper: Vec<char> = map.shaper.chars().collect();
+        assert_eq!(source.len(), shaper.len(), "{what}: one source for each shaper character");
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, (&c, &logical)) in shaper.iter().zip(&source).enumerate() {
+            if logical == VIRTUAL {
+                assert_eq!(c, '\n', "{what}: only a line break is virtual (shaper {i})");
+                continue;
+            }
+            let own = chars.get(logical).copied();
+            assert!(own.is_some(), "{what}: shaper {i} -> {logical} is no character of the text");
+            let own = own.unwrap_or_default();
+            // Equal, or a bracket mirrored in a right-to-left run, or a separator the field draws as a line break.
+            assert!(
+                c == own || c == mirrored(own) || (c == '\n' && is_paragraph_separator(own)),
+                "{what}: shaper {i} is {c:?} but the text has {own:?} at {logical}"
+            );
+            assert!(seen.insert(logical), "{what}: {logical} twice");
+        }
+        // Every drawn character of the text is there once, in the stretch it was drawn in.
+        let drawn: std::collections::BTreeSet<usize> = map.shown.iter().copied().filter(|l| *l != VIRTUAL).collect();
+        assert_eq!(seen, drawn, "{what}");
+        // A wrapped map's `\n` that is no character of the text is exactly the virtual entries.
+        let virtual_breaks = source.iter().filter(|l| **l == VIRTUAL).count();
+        assert_eq!(virtual_breaks, map.shown.iter().filter(|l| **l == VIRTUAL).count(), "{what}");
+    }
+
+    #[test]
+    fn the_shaper_text_is_the_stored_text_through_shaper_source() {
+        for text in wrapped_corpus() {
+            assert_shaper_source(&text, &screen_map(&text), &format!("{text:?} unwrapped"));
+            for width in [1, 2, 3, 5, 8, 1000] {
+                for forced in [None, Some(true), Some(false)] {
+                    let map = wrapped_screen_map(&text, width % 2 == 0, forced, at_most(width));
+                    assert_shaper_source(&text, &map, &format!("{text:?} at {width} forced {forced:?}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_shaper_gets_each_arabic_word_in_logical_order_and_the_words_in_display_order() {
+        // "abj dhw": alef ba jim, a space, dal heh waw, in one row.
+        let text = "\u{627}\u{628}\u{62C} \u{62F}\u{647}\u{648}";
+        let one_row = wrapped_screen_map(text, false, None, |_| true);
+        // Displayed from the left: the second word, the space, the first word.
+        assert_eq!(one_row.shaper_source(), [4, 5, 6, 3, 0, 1, 2]);
+        // Wrapped, the break between the rows is virtual and each row is a stretch of its own.
+        let wrapped = wrapped_screen_map(text, false, None, at_most(3));
+        assert_eq!(wrapped.shaper_source(), [3, 0, 1, 2, VIRTUAL, 4, 5, 6]);
+        // Latin around Arabic stays where it is drawn.
+        let mixed = wrapped_screen_map("ab \u{627}\u{628}", false, None, |_| true);
+        assert_eq!(mixed.shaper_source(), [0, 1, 2, 3, 4]);
+        // A bracket is mirrored where it is drawn in a right-to-left run, and stays out of the stretch.
+        let bracket = wrapped_screen_map("\u{627}(\u{628})", false, None, |_| true);
+        assert_eq!(bracket.shaper, "(\u{628})\u{627}");
+        assert_eq!(bracket.shaper_source(), [3, 2, 1, 0]);
+        // Without right-to-left script it is the identity.
+        let latin = screen_map("hello world");
+        assert_eq!(latin.shaper_source(), (0..11).collect::<Vec<_>>());
+        assert!(screen_map("").shaper_source().is_empty());
+    }
+
+    #[test]
+    fn a_forced_direction_equals_the_automatic_one_when_the_first_strong_character_agrees() {
+        let mut compared = 0;
+        for text in wrapped_corpus() {
+            // One paragraph: the corpus's other texts hold several, which may disagree.
+            if text.chars().any(is_paragraph_separator) {
+                continue;
+            }
+            let Some(rtl) = first_strong_rtl(&text) else { continue };
+            for width in [2, 5, 1000] {
+                let auto = wrapped_screen_map(&text, !rtl, None, at_most(width));
+                let forced = wrapped_screen_map(&text, !rtl, Some(rtl), at_most(width));
+                assert_eq!(forced, auto, "{text:?} at {width}, forced {rtl}");
+                compared += 1;
+            }
+        }
+        assert!(compared > 30, "the corpus must have texts to compare: {compared}");
+    }
+
+    #[test]
+    fn the_blocks_direction_rule_is_the_engines_and_counts_letters() {
+        // The engine writes a block back by the majority of its letters, not by its first strong one:
+        // a caller that forces the direction with it can disagree with what `wrapped_screen_map` finds alone.
+        let text = "ab \u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD}";
+        assert!(pdfcraft_engine::rtl_base(text));
+        assert_eq!(first_strong_rtl(text), Some(false));
+        let auto = wrapped_screen_map(text, false, None, |_| true);
+        let forced = wrapped_screen_map(text, false, Some(pdfcraft_engine::rtl_base(text)), |_| true);
+        assert_eq!((auto.row_rtl.as_slice(), forced.row_rtl.as_slice()), ([false].as_slice(), [true].as_slice()));
+        assert!(!pdfcraft_engine::rtl_base("abc"));
+        assert!(!pdfcraft_engine::rtl_base(""));
+    }
+
+    #[test]
+    fn a_forced_direction_overrides_the_paragraphs_own() {
+        let arabic = "\u{627}\u{628} \u{62C}";
+        let latin = "ab cd";
+        let ltr = wrapped_screen_map(arabic, true, Some(false), |_| true);
+        assert_eq!(ltr.row_rtl, [false], "Arabic text in a block that reads left to right is a left-to-right row");
+        let rtl = wrapped_screen_map(arabic, false, Some(true), |_| true);
+        assert_eq!(rtl.row_rtl, [true]);
+        // Latin then Arabic: the first strong letter says left to right; forced, the Arabic word comes first from the left.
+        let mixed = "ab \u{627}\u{628}";
+        let auto = wrapped_screen_map(mixed, false, None, |_| true);
+        assert_eq!((auto.row_rtl.as_slice(), auto.shown.as_slice()), ([false].as_slice(), [0, 1, 2, 4, 3].as_slice()));
+        let forced = wrapped_screen_map(mixed, false, Some(true), |_| true);
+        assert_eq!((forced.row_rtl.as_slice(), forced.shown.as_slice()), ([true].as_slice(), [4, 3, 2, 0, 1].as_slice()));
+        // A paragraph of Latin in a block that reads right to left is a right-to-left row; its words keep their order.
+        let latin_in_rtl = wrapped_screen_map(latin, false, Some(true), |_| true);
+        assert_eq!(latin_in_rtl.row_rtl, [true]);
+        assert_eq!(latin_in_rtl.shaper, latin);
+        // Every paragraph, and a line of digits only, takes it.
+        let paragraphs = wrapped_screen_map("ab\n12\n\u{627}", false, Some(true), |_| true);
+        assert_eq!(paragraphs.row_rtl, [true, true, true]);
+        let paragraphs = wrapped_screen_map("ab\n12\n\u{627}", true, Some(false), |_| true);
+        assert_eq!(paragraphs.row_rtl, [false, false, false]);
+    }
+
     #[test]
     fn embeddings_nested_to_the_limit_of_the_algorithm_do_not_panic() {
         // Sixty-three unclosed right-to-left embeddings put the letters after them at the deepest
@@ -1371,7 +1535,7 @@ mod tests {
             let _ = visual(&text);
             let _ = screen_map(&text);
             for width in [1, 2, 3, 100] {
-                let map = wrapped_screen_map(&text, false, at_most(width));
+                let map = wrapped_screen_map(&text, false, None, at_most(width));
                 assert_eq!(map.logical_len(), text.chars().count());
                 assert_eq!(map.logical_of_screen(0..usize::MAX).len(), text.chars().filter(|c| !is_bidi_control(*c)).count());
             }
@@ -1383,18 +1547,18 @@ mod tests {
     fn wrapping_survives_hostile_measures_and_long_input() {
         // A measure that accepts nothing, then only the first call, then everything.
         for text in wrapped_corpus() {
-            let none = wrapped_screen_map(&text, false, |_| false);
+            let none = wrapped_screen_map(&text, false, None, |_| false);
             assert_eq!(none.logical_len(), text.chars().count());
             let mut first = true;
-            let once = wrapped_screen_map(&text, true, |_| std::mem::take(&mut first));
+            let once = wrapped_screen_map(&text, true, None, |_| std::mem::take(&mut first));
             assert_eq!(once.logical_len(), text.chars().count());
         }
         let long = "\u{627}\u{628} ".repeat(5_000);
-        let map = wrapped_screen_map(&long, false, at_most(40));
+        let map = wrapped_screen_map(&long, false, None, at_most(40));
         assert!(map.screen_len() >= long.chars().count());
         assert_eq!(map.logical_of_screen(0..usize::MAX).len(), long.chars().count());
         let word = "\u{633}".repeat(3_000);
-        assert_eq!(wrapped_screen_map(&word, false, at_most(7)).shaper.matches('\n').count(), 3_000 / 7);
+        assert_eq!(wrapped_screen_map(&word, false, None, at_most(7)).shaper.matches('\n').count(), 3_000 / 7);
     }
 
     /// With an Arabic face the glyphs of the galley egui builds from the shaper text come in

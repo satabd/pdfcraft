@@ -52,6 +52,9 @@ pub use pdfcraft_organize::view::{InitialView, Layout as InitialLayout, Magnific
 pub use pdfcraft_cos::Algorithm;
 pub use pdfcraft_create::{CONVERTIBLE, CreateError, ImageResolution, SourceKind, decode_text, source_kind};
 pub use pdfcraft_edit::added::{text_rect as added_text_rect, text_width as added_text_width};
+/// Whether a block of text reads right to left as a whole (more right-to-left letters than left-to-right ones), the rule
+/// Edit text writes a block back by.
+pub use pdfcraft_edit::bidi::rtl_base;
 pub use pdfcraft_edit::{
     Added, AddedImage, AddedText, Align as TextAlign, Background, Content as AddedContent, Family as FontFamily, HeaderFooter, MarkKind, Watermark,
 };

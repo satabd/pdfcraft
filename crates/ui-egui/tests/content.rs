@@ -107,6 +107,119 @@ fn text_tool_drafts_grow_for_latin_and_arabic() {
     }
 }
 
+/// The galleys of every text the last frame painted, with where each is painted.
+fn painted_galleys(h: &Harness<'static, PdfCraftApp>) -> Vec<(Pos2, std::sync::Arc<egui::Galley>)> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<(Pos2, std::sync::Arc<egui::Galley>)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((text.pos, std::sync::Arc::clone(&text.galley))),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &h.output().shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// The decoded streams of the saved document that mention `needle`.
+fn saved_streams_with(h: &Harness<'static, PdfCraftApp>, needle: &str) -> Vec<String> {
+    let state = h.state();
+    let bytes = state.session.save_bytes(state.views[0].id).unwrap();
+    let doc = pdfcraft_cos::Document::open(bytes).unwrap();
+    doc.object_numbers()
+        .into_iter()
+        .filter_map(|n| match &*doc.get(pdfcraft_cos::ObjRef::new(n, 0)) {
+            pdfcraft_cos::Object::Stream(stream) => stream.decoded().ok(),
+            _ => None,
+        })
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .filter(|text| text.contains(needle))
+        .collect()
+}
+
+/// Typed Arabic shows in the Add text box as it will be on the page: the words in display order, the
+/// first word to the right of the second, while the draft keeps the typing order, and the saved text is
+/// what was typed, with the page's copy of it (`/ActualText`) in typing order too.
+#[test]
+fn typed_arabic_in_the_add_text_box_shows_in_display_order_and_is_saved_in_typing_order() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        return;
+    }
+    let input = "سلام عليكم";
+    for zoom in ["100", "150", "300"] {
+        let mut h = harness();
+        h.state_mut().set_option("zoom", zoom).unwrap();
+        h.run_steps(4);
+        assert!(h.state_mut().execute("edit.text"));
+        h.run_steps(2);
+        let point = at(&h, 40.0, 100.0);
+        click(&mut h, point);
+        h.event(egui::Event::Text(input.into()));
+        h.run_steps(4);
+        let draft = h.state().views[0].content.draft.as_ref().expect("the editor is open");
+        assert_eq!(draft.text, input, "the draft keeps the typing order at {zoom}%");
+        // What is painted: the second word first from the left, the letters of each word in the order
+        // the shaper joins them, so the first word's glyphs lie to the right of the second word's.
+        let galleys = painted_galleys(&h);
+        let (_, galley) =
+            galleys.iter().find(|(_, g)| g.job.text.contains('\u{633}')).unwrap_or_else(|| panic!("the box paints the Arabic text at {zoom}%"));
+        assert_eq!(galley.job.text, "عليكم سلام", "the words are in display order at {zoom}%");
+        let glyphs: Vec<(char, f32)> = galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|g| (g.chr, g.pos.x))).collect();
+        assert_eq!(glyphs.len(), "عليكم سلام".chars().count(), "a glyph for every character at {zoom}%");
+        let (second, first) = glyphs.split_at("عليكم ".chars().count());
+        let second_right = second.iter().map(|g| g.1).fold(f32::MIN, f32::max);
+        let first_left = first.iter().map(|g| g.1).fold(f32::MAX, f32::min);
+        assert!(first_left > second_right, "the first word is right of the second at {zoom}%: {first_left} against {second_right}");
+        if let Ok(dir) = std::env::var("PDFCRAFT_SHOTS") {
+            h.render().unwrap().save(format!("{dir}/add-text-arabic-{zoom}.png")).unwrap();
+        }
+        h.get_by_label("Done adding text").click();
+        h.run_steps(3);
+        assert_eq!(texts(&h), [input], "the text is saved as typed at {zoom}%");
+        let actual: String = input.encode_utf16().map(|u| format!("{u:04X}")).collect();
+        let marked = saved_streams_with(&h, &format!("/ActualText <FEFF{actual}>"));
+        assert!(!marked.is_empty(), "the page keeps the typing order for copy and search at {zoom}%");
+    }
+}
+
+/// The rows of the Add text box sit where the text's alignment puts them, in the box as on the page:
+/// Arabic with the default alignment (left) starts at the box's left edge, with Align right it ends at
+/// the right edge; Latin text follows the alignment too.
+#[test]
+fn rows_of_the_add_text_box_follow_the_texts_alignment() {
+    // The text typed, and the text the box paints (the words of Arabic in display order).
+    for (text, painted, needs_arabic) in [("سلام عليكم", "عليكم سلام", true), ("Hello there", "Hello there", false)] {
+        if needs_arabic && pdfcraft_fonts::document_arabic_font().is_none() {
+            continue;
+        }
+        for align in [pdfcraft_engine::TextAlign::Left, pdfcraft_engine::TextAlign::Center, pdfcraft_engine::TextAlign::Right] {
+            let mut h = harness();
+            assert!(h.state_mut().execute("edit.text"));
+            h.run_steps(2);
+            let point = at(&h, 40.0, 100.0);
+            click(&mut h, point);
+            h.state_mut().views[0].content.draft.as_mut().expect("the editor is open").style.align = align;
+            h.event(egui::Event::Text(text.into()));
+            h.run_steps(4);
+            let galleys = painted_galleys(&h);
+            let (pos, galley) =
+                galleys.iter().find(|(_, g)| g.job.text == painted).unwrap_or_else(|| panic!("the box paints {text:?} as {painted:?}"));
+            let row = &galley.rows[0];
+            let (left, right) = (pos.x + row.pos.x, pos.x + row.pos.x + row.row.size.x);
+            let (area_left, area_right) = (pos.x, pos.x + galley.rect.width());
+            let what = format!("{text:?} aligned {align:?}: the row is {left}..{right} in {area_left}..{area_right}");
+            match align {
+                pdfcraft_engine::TextAlign::Left => assert!((left - area_left).abs() <= 1.0, "{what}"),
+                pdfcraft_engine::TextAlign::Right => assert!((right - area_right).abs() <= 1.0, "{what}"),
+                _ => assert!(((left - area_left) - (area_right - right)).abs() <= 1.5, "{what}"),
+            }
+            assert!(right > left && right <= area_right + 1.0 && left >= area_left - 1.0, "{what}");
+        }
+    }
+}
+
 #[test]
 fn text_tool_single_click_retypes_added_text_without_another_item() {
     for command in ["edit.text", "edit.edit_text"] {

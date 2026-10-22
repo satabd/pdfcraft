@@ -534,15 +534,19 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
         let [cr, cg, cb] = t.style.color.map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
+            // Typed Arabic and Hebrew read in display order, the rows of the box where the text's
+            // alignment puts them, as the saved text will (`added.rs` draws them the same way).
+            let align = row_align(t.style.align);
             let resp = ui.add(
-                egui::TextEdit::multiline(&mut t.text)
+                widgets::BidiEdit::multiline(&mut t.text)
                     .font(font)
                     .desired_width(r.width().max(60.0))
                     .desired_rows(1)
                     .background_color(if background_ready { Color32::TRANSPARENT } else { Color32::WHITE })
                     .text_color(Color32::from_rgb(cr, cg, cb))
                     .hint_text(tl!("Type text"))
-                    .id_salt("added-text-edit"),
+                    .id_salt("added-text-edit")
+                    .layout(move |ui, map, ctx| ctx.layout_aligned(ui, map, align)),
             );
             if t.focus {
                 resp.request_focus();
@@ -583,6 +587,16 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
     }
     let edit = view.content.draft.take().and_then(|d| finish(&mut view.content, d, added));
     (edit, done)
+}
+
+/// Where the editor puts the rows of the text: the alignment the saved text will have.
+fn row_align(align: TextAlign) -> widgets::RowAlign {
+    match align {
+        TextAlign::Left => widgets::RowAlign::Left,
+        TextAlign::Center => widgets::RowAlign::Center,
+        TextAlign::Right => widgets::RowAlign::Right,
+        TextAlign::Justify => widgets::RowAlign::Justify,
+    }
 }
 
 /// A finished draft as an edit: new text is added (and selected once it exists), retyped text
