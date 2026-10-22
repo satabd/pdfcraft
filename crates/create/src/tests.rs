@@ -4,13 +4,13 @@ use pdfcraft_cos::{SaveOptions, write_full};
 
 use super::*;
 
-fn reopen(doc: &Document) -> Document {
+pub(crate) fn reopen(doc: &Document) -> Document {
     let bytes = write_full(doc, &SaveOptions::default()).unwrap();
     hayro_syntax::Pdf::new(bytes.clone()).expect("parses");
     Document::open(Arc::new(bytes)).unwrap()
 }
 
-fn pages(doc: &Document) -> Vec<Dict> {
+pub(crate) fn pages(doc: &Document) -> Vec<Dict> {
     let pages = doc.get(doc.root().unwrap()).as_dict().unwrap().reference(b"Pages").unwrap();
     let kids = doc.get(pages).as_dict().unwrap().get(b"Kids").unwrap().as_array().unwrap().clone();
     kids.iter().map(|k| doc.resolve(k).as_dict().cloned().unwrap()).collect()

@@ -695,6 +695,135 @@ fn retyped_arabic_without_the_arabic_face_is_refused_and_changes_nothing() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Arabic in a header, a Bates number and a watermark is shaped with the Arabic face, searchable,
+/// and survives save and reopen; the page picture changes.
+#[test]
+fn arabic_header_bates_and_watermark_are_shaped_through_tools_save_and_reopen() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic headers and watermarks");
+        return;
+    }
+    let dir = workdir("arabic-stamps");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let render = |a: &mut Automation, id: u64, page: u64| a.call("page_render", &json!({"doc":id,"page":page,"dpi":72})).unwrap();
+    let blank = render(&mut a, id, 1);
+
+    // A header with the token expanded inside the Arabic line, and a Bates number with an Arabic prefix.
+    ok(&mut a, "doc_header_footer", json!({"doc":id,"header_center":"مرحبا بالعالم <<Page 1 of n>>","footer_left":"<<Bates Number#4#7#سري-#>>"}));
+    let headed = render(&mut a, id, 1);
+    assert_ne!(headed, blank, "the Arabic header is drawn");
+    for (query, page) in [("مرحبا بالعالم", 1), ("مرحبا بالعالم", 3), ("سري-0007", 1), ("سري-0009", 3)] {
+        let found = ok(&mut a, "text_find", json!({"doc":id,"query":query}));
+        assert!(found["matches"].as_array().unwrap().iter().any(|m| m["page"] == page), "{query:?} on page {page}: {found}");
+    }
+    let text = page_text(&mut a, id);
+    assert!(words(&text[0]).contains("مرحبا بالعالم Page 1 of 3") && words(&text[1]).contains("سري-0008"), "{text:?}");
+
+    // A rotated watermark.
+    ok(&mut a, "doc_watermark", json!({"doc":id,"text":"سري","rotation":45,"opacity":0.4}));
+    let marked = render(&mut a, id, 1);
+    assert_ne!(marked, headed, "the Arabic watermark is drawn");
+    assert!(ok(&mut a, "text_find", json!({"doc":id,"query":"سري"}))["matches"].as_array().unwrap().len() >= 3);
+
+    // Save and reopen: the same text, hits and pictures.
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"stamped.pdf"}));
+    let re = ok(&mut a, "doc_open", json!({"path":"stamped.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(page_text(&mut a, re), page_text(&mut a, id));
+    assert_eq!(render(&mut a, re, 1), marked);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"سري-0008"}))["count"], 1);
+
+    // Replacing the header drops the old text.
+    ok(&mut a, "doc_header_footer", json!({"doc":re,"header_center":"السلام عليكم","replace":true}));
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"بالعالم"}))["count"], 0);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"السلام عليكم"}))["count"], 3);
+    ok(&mut a, "doc_remove_marks", json!({"doc":re,"kind":"header_footer"}));
+    ok(&mut a, "doc_remove_marks", json!({"doc":re,"kind":"watermark"}));
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"سري"}))["count"], 0);
+    // What is left is the Bates footer's page, which was a different mark kind (a header/footer): gone too.
+    assert_eq!(render(&mut a, re, 1), blank);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the Arabic face the marks are refused as they always were, and nothing changes.
+#[test]
+fn arabic_header_and_watermark_without_the_arabic_face_are_refused_and_change_nothing() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("arabic-stamps-no-face");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let render = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+    for (tool, args) in [
+        ("doc_header_footer", json!({"doc":id,"header_center":"مرحبا"})),
+        ("doc_header_footer", json!({"doc":id,"footer_left":"<<Bates Number#4#7#سري-#>>"})),
+        ("doc_watermark", json!({"doc":id,"text":"سري"})),
+    ] {
+        let e = err(&mut a, tool, args).to_string();
+        assert!(e.contains("the standard fonts can't draw") && e.contains("U+06"), "{tool}: {e}");
+    }
+    assert_eq!(a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap(), render);
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"unchanged.pdf"}));
+    assert_eq!(ok(&mut a, "doc_info", json!({"doc":id}))["pages"].as_array().unwrap().len(), 3);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A new document from Arabic text, and a comment summary that quotes Arabic, are readable.
+#[test]
+fn arabic_create_from_text_and_comment_summaries_are_shaped_not_escaped() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic text documents");
+        return;
+    }
+    let dir = workdir("arabic-create");
+    let mut a = auto(&dir);
+    let paragraph = "مرحبا بالعالم هذا نص عربي طويل يكفي ليلتف على عدة أسطر داخل الصفحة لأنه يحتوي على كلمات كثيرة جدا ومتنوعة وكل كلمة منها \
+                     تأخذ مكانها من السطر حتى ينتهي السطر ويبدأ سطر جديد في الفقرة نفسها ثم تنتهي الفقرة بكلمة أخيرة";
+    let text = format!("Report\n{paragraph}");
+    let id = ok(&mut a, "doc_create", json!({"from":"text","text":text}))["doc"].as_u64().unwrap();
+    let extracted = page_text(&mut a, id);
+    assert_eq!(words(&extracted[0]), format!("Report {paragraph}"), "{extracted:?}");
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":id,"query":"بالعالم"}))["count"], 1);
+    let blank = ok(&mut a, "doc_create", json!({"from":"text","text":"Report"}))["doc"].as_u64().unwrap();
+    assert_ne!(
+        a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap(),
+        a.call("page_render", &json!({"doc":blank,"page":1,"dpi":72})).unwrap()
+    );
+    // Save and reopen keeps it.
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"arabic.pdf"}));
+    let re = ok(&mut a, "doc_open", json!({"path":"arabic.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(page_text(&mut a, re), extracted);
+
+    // A summary quotes the comment as it is.
+    let doc = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    ok(&mut a, "comment_add", json!({"doc":doc,"page":1,"type":"note","at":[40,40],"contents":"ملاحظة مهمة OK","author":"Ada"}));
+    ok(&mut a, "comments_summarize", json!({"doc":doc,"out":"summary.pdf"}));
+    let summary = ok(&mut a, "doc_open", json!({"path":"summary.pdf"}))["doc"].as_u64().unwrap();
+    let text = page_text(&mut a, summary).join("\n");
+    assert!(text.contains("ملاحظة مهمة") && !text.contains("[U+06") && !text.contains("U+XXXX"), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the face, Arabic text is refused for a new document and escaped in a summary, as before.
+#[test]
+fn arabic_create_from_text_without_the_arabic_face_is_refused_and_summaries_escape() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("arabic-create-no-face");
+    let mut a = auto(&dir);
+    let e = err(&mut a, "doc_create", json!({"from":"text","text":"Notes\nمرحبا"})).to_string();
+    assert!(e.contains("(line 2)") && e.contains("U+0645"), "{e}");
+    let doc = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    ok(&mut a, "comment_add", json!({"doc":doc,"page":1,"type":"note","at":[40,40],"contents":"مرحبا OK","author":"Ada"}));
+    ok(&mut a, "comments_summarize", json!({"doc":doc,"out":"summary.pdf"}));
+    let summary = ok(&mut a, "doc_open", json!({"path":"summary.pdf"}))["doc"].as_u64().unwrap();
+    let text = page_text(&mut a, summary).join("\n");
+    assert!(text.contains("[U+0645][U+0631][U+062D][U+0628][U+0627] OK") && text.contains("[U+XXXX]"), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Find ignores harakat, tatweel and presentation forms: a bare query finds vowelled text, and
 /// a lam-alef ligature glyph is found by its two letters (public Acrobat behaviour).
 #[test]

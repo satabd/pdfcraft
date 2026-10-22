@@ -83,7 +83,7 @@ fn fake_outline(_: ShapedScript, id: u32) -> Result<GlyphOutline, GlyphError> {
     Ok(GlyphOutline { contours: vec![vec![[0.0, 0.0], [advance, 0.0], [advance, 0.5], [0.0, 0.5]]], width: advance, bbox: [0.0, 0.0, advance, 0.5] })
 }
 
-const FAKE: Shaper = Shaper { shape: fake_shape, has: fake_has, outline: fake_outline, arabic_available: || true };
+pub(crate) const FAKE: Shaper = Shaper { shape: fake_shape, has: fake_has, outline: fake_outline, arabic_available: || true };
 
 fn no_shape(_: ShapedScript, _: &str, _: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
     Err(GlyphError::NoFont)
@@ -94,13 +94,13 @@ fn no_outline(_: ShapedScript, _: u32) -> Result<GlyphOutline, GlyphError> {
 }
 
 /// A build with no Arabic face.
-const NO_FACE: Shaper = Shaper { shape: no_shape, has: |_, _| false, outline: no_outline, arabic_available: || false };
+pub(crate) const NO_FACE: Shaper = Shaper { shape: no_shape, has: |_, _| false, outline: no_outline, arabic_available: || false };
 
 /// Uses a shaper on this thread until dropped.
-struct Using;
+pub(crate) struct Using;
 
 impl Using {
-    fn shaper(shaper: Shaper) -> Using {
+    pub(crate) fn shaper(shaper: Shaper) -> Using {
         pdfcraft_fonts::shaped_text::set_test_shaper(Some(shaper));
         Using
     }
@@ -112,7 +112,7 @@ impl Drop for Using {
     }
 }
 
-fn fake() -> Using {
+pub(crate) fn fake() -> Using {
     Using::shaper(FAKE)
 }
 
