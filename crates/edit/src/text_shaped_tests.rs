@@ -9,7 +9,6 @@ use crate::EditError;
 use crate::added::{Align, Shaper};
 use crate::tests::{arabic_ligature_page, hebrew_page, page_content_bytes, reopen, text_page};
 use crate::text::{self, BlockStyle};
-use crate::text_shaped::TEST_SHAPER;
 
 // ---- the stand-in face ----
 
@@ -102,14 +101,14 @@ struct Using;
 
 impl Using {
     fn shaper(shaper: Shaper) -> Using {
-        TEST_SHAPER.with(|s| s.set(Some(shaper)));
+        pdfcraft_fonts::shaped_text::set_test_shaper(Some(shaper));
         Using
     }
 }
 
 impl Drop for Using {
     fn drop(&mut self) {
-        TEST_SHAPER.with(|s| s.set(None));
+        pdfcraft_fonts::shaped_text::set_test_shaper(None);
     }
 }
 

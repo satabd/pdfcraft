@@ -42,6 +42,21 @@ delete_field(&mut doc, "email")?;
   that have them. Not in a document that declares PDF/A, which forbids that flag (`declares_pdfa`).
   `undrawn_fields` lists the marked fields; the engine reports each edit that draws one, and
   flattening refuses to make that `?` permanent.
+- Arabic is the exception: a value (or combo/list option) with Arabic script is drawn shaped by
+  `pdfcraft_fonts::shaped_text`, the same layout Add text and Edit text use. The craft-fonts
+  `Arab` face joins the letters, and each distinct shape becomes a glyph of a Type 3 font added to
+  the document and listed in the appearance's `/Resources /Font` next to the field font
+  (`PCFmAr<n>`). Latin letters and digits keep their place in Unicode bidirectional order and are
+  drawn with the form's font when it holds them, else Helvetica. Each line is a
+  `/Span <</ActualText …>>` in typing order, so copy, search and flattening read the value. A
+  paragraph whose first strong character is right-to-left is right-aligned unless the widget, its
+  field or the form states `/Q`; multiline values wrap on the shaped widths, paragraph by
+  paragraph; auto font size measures the shaped width. Nothing is `?`, so the widget is not marked
+  and `/NeedAppearances` is not set (`field_appearance_drawn` now takes `&mut Document` to add
+  the fonts). Without the face, for text it can't draw (more than 4,096 distinct shapes,
+  Arabic next to characters the font can't show, Hebrew in the same value, over 200,000 bytes) and
+  in comb fields, the previous behaviour stays: `?`, the mark and `/NeedAppearances`. Button
+  captions still draw Arabic as `?`.
 - Check boxes and radio buttons switch `/V` and each widget's `/AS`. Widgets with no appearances
   get PdfCraft's own (a drawn check mark or dot; no symbol font needed).
 - Values are validated (options, `MaxLen`, single vs multi-select, NoToggleToOff, read-only) and a

@@ -16,13 +16,23 @@
 //! (`/NeedAppearances`). Widths use the approximate metrics of `pdfcraft-fonts` (Helvetica, or one
 //! em per full-width character in composite fonts).
 //!
+//! Arabic is drawn shaped instead: a value (or combo/list option) with Arabic script is laid out
+//! by `pdfcraft_fonts::shaped_text` (Unicode bidirectional order, joined forms, marks) and drawn
+//! from Type 3 fonts built from the craft-fonts Arabic face, which [`field_appearance_drawn`] adds
+//! to the document. Each line is a `/Span` with `/ActualText` in typing order; a right-to-left
+//! paragraph is right-aligned unless a `/Q` is stated. Nothing is `?`, so no mark or
+//! `/NeedAppearances` follows. Without the face, or for text it can't draw, and in comb fields,
+//! the `?` drawing above is the fallback.
+//!
 //! `/MK /R` (0, 90, 180, 270, counterclockwise) lays the content out in the upright box and sets
 //! the appearance `/Matrix` so that box lands on the widget rectangle. Any other value is 0, and
 //! rotation 0 leaves `/Matrix` off.
 
-use pdfcraft_cos::{Dict, Document, Object, Stream};
+use pdfcraft_content::Op;
+use pdfcraft_cos::{Dict, Document, Object, PdfString, Stream};
 use pdfcraft_fonts::pdf::Metrics;
-use pdfcraft_fonts::{UnicodeCMap, cjk_width, helvetica_width, literal, win_ansi, wrap_with};
+use pdfcraft_fonts::shaped_text::{self, Measure, ShapedTextError, TextOp};
+use pdfcraft_fonts::{ShapedScript, UnicodeCMap, cjk_width, helvetica_width, literal, win_ansi, wrap_with};
 
 use crate::{Field, FieldKind, Widget, acroform, flags};
 
@@ -157,11 +167,24 @@ enum FontText {
     Simple(Box<Metrics>),
     /// A composite font with a predefined Unicode CMap.
     Unicode(UnicodeCMap),
+    /// Arabic is drawn shaped from Type 3 fonts built from PdfCraft's Arabic face
+    /// (`pdfcraft_fonts::shaped_text`); the Latin letters, digits and punctuation between it are
+    /// drawn with the font inside.
+    Shaped(Box<FontText>),
 }
 
 impl FontText {
+    /// The font that draws Latin text: the font itself, or the one next to shaped Arabic.
+    fn latin(&self) -> &FontText {
+        match self {
+            Self::Shaped(inner) => inner.latin(),
+            other => other,
+        }
+    }
+
     fn encode(&self, s: &str) -> Vec<u8> {
         match self {
+            Self::Shaped(latin) => latin.encode(s),
             Self::WinAnsi => win_ansi(s),
             // Selection checks every displayed string first; wrapping only removes line breaks.
             Self::Simple(metrics) => metrics.encode(&s.replace('\t', " ")).unwrap_or_default(),
@@ -171,6 +194,7 @@ impl FontText {
 
     fn can_encode(&self, s: &str) -> bool {
         match self {
+            Self::Shaped(latin) => latin.can_encode(&shaped_text::latin_of(s)),
             Self::Simple(metrics) => metrics.encode(&s.replace('\t', " ")).is_some(),
             _ => true,
         }
@@ -181,6 +205,13 @@ impl FontText {
     /// [`field_appearance_drawn`], so that `?` is never silent (AGENTS.md §4).
     fn first_unencodable(&self, s: &str) -> Option<char> {
         match self {
+            // The Arabic face draws what it has; the font next to it, the rest.
+            Self::Shaped(latin) => {
+                let face = shaped_text::current_shaper();
+                s.chars()
+                    .find(|c| shaped_text::is_arabic_script(*c) && !(face.has)(ShapedScript::Arabic, *c))
+                    .or_else(|| latin.first_unencodable(&shaped_text::latin_of(s)))
+            }
             Self::WinAnsi => pdfcraft_fonts::first_undrawable(s),
             Self::Simple(metrics) => {
                 s.chars().map(|c| if c == '\t' { ' ' } else { c }).find(|c| metrics.encode(c.encode_utf8(&mut [0; 4])).is_none())
@@ -189,8 +220,10 @@ impl FontText {
         }
     }
 
+    /// The width of Latin text; shaped Arabic is measured by `shaped_text::Measure`.
     fn width(&self, s: &str, size: f64) -> f64 {
         match self {
+            Self::Shaped(latin) => latin.width(s, size),
             Self::WinAnsi | Self::Simple(_) => helvetica_width(s, size),
             Self::Unicode(_) => cjk_width(s, size),
         }
@@ -405,22 +438,81 @@ pub fn list_rows(doc: &Document, f: &Field, w: &Widget) -> ListRows {
     list_rows_of(doc, &f.da, fobj.as_dict(), &wd)
 }
 
+/// Most bytes of field text laid out and shaped for one appearance: every character becomes a
+/// shaped cluster in memory. A longer value is stored as typed and drawn with `?` and the mark.
+const MAX_SHAPED_BYTES: usize = 200_000;
+
+/// The `/Q` the widget, its field (or a parent of it) or the form states, if any does: only then
+/// is the alignment the author's choice, and right-to-left text is not right-aligned on its own.
+fn explicit_quadding(doc: &Document, f: &Field, wd: &Dict) -> Option<i64> {
+    let q = |d: &Dict| d.get(b"Q").and_then(|o| doc.resolve(o).as_int());
+    if let Some(v) = q(wd) {
+        return Some(v);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut next = Some(f.obj);
+    // A parent chain can be cyclic or absurdly deep in a hostile file.
+    while let Some(r) = next.filter(|r| seen.len() < 64 && seen.insert(*r)) {
+        let obj = doc.get(r);
+        let Some(d) = obj.as_dict() else { break };
+        if let Some(v) = q(d) {
+            return Some(v);
+        }
+        next = d.get(b"Parent").and_then(Object::as_ref);
+    }
+    acroform(doc).and_then(|af| q(&af))
+}
+
+/// One piece of text to draw: where, what (line breaks already spaces) and which way its
+/// paragraph runs.
+struct Draw {
+    x: f64,
+    y: f64,
+    text: String,
+    rtl: bool,
+}
+
 /// The appearance of a text or choice field's widget showing `values`. Characters its font can't
-/// hold come out as `?`; [`field_appearance_drawn`] says which.
-pub fn field_appearance(doc: &Document, f: &Field, w: &Widget, values: &[String]) -> Stream {
+/// hold come out as `?`; [`field_appearance_drawn`] says which. Arabic is shaped (see
+/// [`field_appearance_drawn`]), which adds its fonts to `doc`.
+pub fn field_appearance(doc: &mut Document, f: &Field, w: &Widget, values: &[String]) -> Stream {
     field_appearance_as(doc, f, w, values, true)
 }
 
 /// [`field_appearance`], where `format` false means `values` are already what to show (a
 /// custom Format script ran).
-pub fn field_appearance_as(doc: &Document, f: &Field, w: &Widget, values: &[String], format: bool) -> Stream {
+pub fn field_appearance_as(doc: &mut Document, f: &Field, w: &Widget, values: &[String], format: bool) -> Stream {
     field_appearance_drawn(doc, f, w, values, format).0
 }
 
 /// [`field_appearance_as`] with the first character it drew as `?` because the field's font can't
 /// hold it: the form's font is a simple (WinAnsi) font, Helvetica stands in for one PdfCraft can't
 /// write with (an embedded subset, `Identity-H`), or a UCS-2 CMap meets a character beyond U+FFFF.
-pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[String], format: bool) -> (Stream, Option<char>) {
+///
+/// Arabic is the exception: text with Arabic script is drawn shaped (joined forms, marks, mixed
+/// Latin and digits in Unicode bidirectional order) from Type 3 fonts built from PdfCraft's Arabic
+/// face, which are added to `doc` and listed in the appearance's resources next to the field
+/// font. Its `/ActualText` keeps the typed order for copy and search. A paragraph that runs right
+/// to left is right-aligned unless the widget, field or form states a `/Q`. Nothing is `?`, so no
+/// character is reported. A build without the face, text the face can't draw, an Arabic comb
+/// field or a value over 200,000 bytes falls back to the `?` drawing, and is reported.
+pub fn field_appearance_drawn(doc: &mut Document, f: &Field, w: &Widget, values: &[String], format: bool) -> (Stream, Option<char>) {
+    match draw_field(doc, f, w, values, format, true) {
+        Ok(drawn) => drawn,
+        // Shaping failed before anything was added to `doc`: draw it the old way.
+        Err(_) => draw_field(doc, f, w, values, format, false).unwrap_or_else(|_| (Stream::flate(Dict::new(), b""), None)),
+    }
+}
+
+/// [`field_appearance_drawn`]; `allow_shaping` false never shapes (and then never fails).
+fn draw_field(
+    doc: &mut Document,
+    f: &Field,
+    w: &Widget,
+    values: &[String],
+    format: bool,
+    allow_shaping: bool,
+) -> Result<(Stream, Option<char>), ShapedTextError> {
     // The Format event: what is shown, not what is stored.
     let formatted: Vec<String>;
     let values = if format
@@ -445,45 +537,75 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
         values.first().cloned().unwrap_or_default()
     };
     let text = if f.has(flags::PASSWORD) { "*".repeat(text.chars().count()) } else { text };
+    let multiline = f.kind == FieldKind::Text && f.has(flags::MULTILINE);
+    let comb = f.has(flags::COMB) && !f.has(flags::MULTILINE) && !f.has(flags::PASSWORD) && f.max_len.is_some_and(|m| m > 0);
+    // Everything this field will draw, one string per row.
+    let shown: Vec<&str> = if f.kind == FieldKind::List { f.options.iter().map(|(_, d)| d.as_str()).collect() } else { vec![text.as_str()] };
     let can_show = |enc: &FontText| {
         if f.kind == FieldKind::List {
             f.options.iter().all(|(_, display)| enc.can_encode(display))
-        } else if f.kind == FieldKind::Text && f.has(flags::MULTILINE) {
+        } else if multiline {
             text.split(['\n', '\r']).all(|line| enc.can_encode(line))
         } else {
             enc.can_encode(&text)
         }
     };
-    let (font_name, font_obj, enc) = match dr_font(doc, &da.font).filter(|(_, enc)| can_show(enc)) {
+    // Arabic is shaped (when the face exists, the text is of a size a person types, and the field
+    // is not a comb, whose cells hold one character each).
+    let shaping_wanted = allow_shaping
+        && !comb
+        && shown.iter().any(|s| shaped_text::has_arabic(s))
+        && shown.iter().map(|s| s.len()).sum::<usize>() <= MAX_SHAPED_BYTES
+        && (shaped_text::current_shaper().arabic_available)();
+    let dr = dr_font(doc, &da.font);
+    // The form's own font is kept when it holds all the text (and, for shaping, every character).
+    let plain = dr.clone().filter(|(_, enc)| can_show(enc) && (!shaping_wanted || shown.iter().all(|s| enc.first_unencodable(s).is_none())));
+    let (font_name, font_obj, enc) = match plain {
         Some((o, enc)) => (da.font.clone(), o, enc),
+        None if shaping_wanted => {
+            // Latin letters, digits and punctuation next to the Arabic keep the form's font when it
+            // holds them (and their mirrored brackets), else Helvetica.
+            let latin: String = shown.iter().map(|s| shaped_text::latin_of(s)).collect::<String>().replace(['\n', '\r', '\t'], " ");
+            let wanted = shaped_text::with_mirrors(&latin);
+            match dr.filter(|(_, enc)| enc.can_encode(&wanted) && enc.first_unencodable(&wanted).is_none()) {
+                Some((o, enc)) => (da.font.clone(), o, FontText::Shaped(Box::new(enc))),
+                None => ("Helv".to_string(), helvetica(), FontText::Shaped(Box::new(FontText::WinAnsi))),
+            }
+        }
         None => ("Helv".to_string(), helvetica(), FontText::WinAnsi),
     };
-    let width_of = |text: &str, size: f64| enc.width(text, size);
+    let shaped = matches!(enc, FontText::Shaped(_));
+    // Latin text is measured in the font that draws it, at one point: widths scale with the size.
+    let latin_width = |s: &str| enc.latin().width(s, 1.0);
+    let measures = shaped.then(|| [Measure::new(false, 1.0, &latin_width), Measure::new(true, 1.0, &latin_width)]);
+    // The width of `s` at `size` in a paragraph that runs `rtl` or not.
+    let width_dir = |s: &str, size: f64, rtl: bool| -> f64 {
+        match &measures {
+            // A line break in a single-line value is drawn as a space.
+            Some(m) if s.contains(['\n', '\r']) => m.get(usize::from(rtl)).map_or(0.0, |m| m.line(&s.replace(['\n', '\r'], " "))) * size,
+            Some(m) => m.get(usize::from(rtl)).map_or(0.0, |m| m.line(s)) * size,
+            None => enc.width(s, size),
+        }
+    };
+    let is_rtl = |s: &str| shaped && shaped_text::first_strong_is_rtl(s);
+    // The same for a string whose direction is its own (auto font size, where lines of a
+    // multiline value are measured together).
+    let width_of = |s: &str, size: f64| width_dir(s, size, is_rtl(s));
     let (mut c, bw) = frame(doc, &wd, width, height);
     let pad = 2.0 + bw;
     let inner_w = (width - 2.0 * pad).max(1.0);
-    let q = wd.get(b"Q").and_then(|o| doc.resolve(o).as_int()).unwrap_or(f.quadding);
-    let mut body: Vec<u8> = Vec::new();
-    // The first character drawn that the font can't hold (drawn as `?`), for the caller to report.
-    let mut unencodable: Option<char> = None;
-    let mut show = |body: &mut Vec<u8>, x: f64, y: f64, text: &str| {
-        // A line break in a single-line value is a space, as in viewers (multiline text is split).
-        let text: String = text.chars().map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c }).collect();
-        if unencodable.is_none() {
-            unencodable = enc.first_unencodable(&text);
-        }
-        body.extend(format!("1 0 0 1 {} {} Tm ", n(x), n(y)).bytes());
-        body.extend(literal(&enc.encode(&text)));
-        body.extend_from_slice(b" Tj\n");
-    };
-    let x_for = |text: &str, size: f64| -> f64 {
-        let tw = width_of(text, size);
-        match q {
+    let q_stated = explicit_quadding(doc, f, &wd);
+    let q = q_stated.unwrap_or(f.quadding);
+    // Where a line of `tw` points starts: right-to-left text is right-aligned unless the author
+    // stated an alignment.
+    let x_for = |tw: f64, rtl: bool| -> f64 {
+        match if q_stated.is_none() && rtl { 2 } else { q } {
             1 => pad + (inner_w - tw) / 2.0,
             2 => width - pad - tw,
             _ => pad,
         }
     };
+    let mut draws: Vec<Draw> = Vec::new();
     let mut size = da.size;
     match f.kind {
         FieldKind::List => {
@@ -500,23 +622,28 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
                 if values.contains(export) {
                     c.push_str(&format!("0.6 0.75 0.86 rg\n{} {} {} {} re f\n", n(bw), n(y - line), n(width - 2.0 * bw), n(line)));
                 }
-                show(&mut body, pad, y - line + size * 0.25, display);
+                // Options are left-aligned, except right-to-left ones when no alignment is stated.
+                let rtl = is_rtl(display);
+                let x = if rtl && q_stated.is_none() { x_for(width_dir(display, size, rtl), rtl) } else { pad };
+                draws.push(Draw { x, y: y - line + size * 0.25, text: display.clone(), rtl });
                 y -= line;
             }
         }
         _ => {
-            let comb = f.has(flags::COMB) && !f.has(flags::MULTILINE) && !f.has(flags::PASSWORD) && f.max_len.is_some_and(|m| m > 0);
-            if f.kind == FieldKind::Text && f.has(flags::MULTILINE) {
+            if multiline {
                 if size == 0.0 {
                     size = auto_text_size(&text, inner_w, height - 2.0 * pad, true, width_of);
                 }
                 let mut y = height - pad - size * 0.85;
-                for line in wrap_with(&text, size, inner_w, width_of) {
-                    if y < -size {
-                        break;
+                'paragraphs: for para in text.split(['\n', '\r']) {
+                    let rtl = is_rtl(para);
+                    for line in wrap_with(para, size, inner_w, |s, sz| width_dir(s, sz, rtl)) {
+                        if y < -size {
+                            break 'paragraphs;
+                        }
+                        draws.push(Draw { x: x_for(width_dir(&line, size, rtl), rtl), y, text: line, rtl });
+                        y -= size * 1.15;
                     }
-                    show(&mut body, x_for(&line, size), y, &line);
-                    y -= size * 1.15;
                 }
             } else {
                 if size == 0.0 {
@@ -534,11 +661,70 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
                     let cell = width / cells as f64;
                     for (i, ch) in text.chars().take(cells).enumerate() {
                         let s = ch.to_string();
-                        show(&mut body, cell * i as f64 + (cell - width_of(&s, size)) / 2.0, y, &s);
+                        draws.push(Draw { x: cell * i as f64 + (cell - width_of(&s, size)) / 2.0, y, text: s, rtl: false });
                     }
                 } else {
-                    show(&mut body, x_for(&text, size), y, &text);
+                    let rtl = is_rtl(&text);
+                    draws.push(Draw { x: x_for(width_dir(&text, size, rtl), rtl), y, text: text.clone(), rtl });
                 }
+            }
+        }
+    }
+    // A line break in a single-line value is a space, as in viewers (multiline text is split).
+    for d in &mut draws {
+        if d.text.contains(['\n', '\r']) {
+            d.text = d.text.chars().map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c }).collect();
+        }
+    }
+
+    let mut fonts = Dict::new();
+    fonts.set(font_name.clone().into_bytes(), font_obj);
+    // The lines with Arabic in them are drawn shaped; the fonts they need are added to `doc` last,
+    // after everything that can fail.
+    let plan = if shaped {
+        let lines: Vec<(String, bool)> = draws.iter().filter(|d| shaped_text::has_arabic(&d.text)).map(|d| (d.text.clone(), d.rtl)).collect();
+        let latin_enc = enc.latin();
+        let show = |s: &str| -> Result<Vec<TextOp>, ShapedTextError> {
+            if let Some(c) = latin_enc.first_unencodable(s) {
+                return Err(ShapedTextError(format!("\"{c}\" can't be drawn next to Arabic text in this field's font")));
+            }
+            Ok(vec![TextOp::new("Tj", vec![Object::String(PdfString::literal(latin_enc.encode(s)))])])
+        };
+        let latin = shaped_text::LatinShow { font: &font_name, show: &show };
+        let names = shaped_text::PlanFonts { max_glyphs: shaped_text::GLYPHS_PER_FONT, name_prefix: "PCFmAr", font_name: None };
+        Some(shaped_text::plan_directed(doc, &mut fonts, &lines, names, &latin)?)
+    } else {
+        None
+    };
+
+    let mut body: Vec<u8> = Vec::new();
+    // The first character drawn that the font can't hold (drawn as `?`), for the caller to report.
+    let mut unencodable: Option<char> = None;
+    // The font the text state holds after the lines so far.
+    let mut current = font_name.clone();
+    let mut planned = 0usize;
+    for d in &draws {
+        body.extend(format!("1 0 0 1 {} {} Tm ", n(d.x), n(d.y)).bytes());
+        match &plan {
+            Some(plan) if shaped_text::has_arabic(&d.text) => {
+                let ops: Vec<Op> = plan
+                    .line_ops(planned, size, &mut current)
+                    .into_iter()
+                    .map(|o| Op { op: o.operator, operands: o.operands, inline: None, span: 0..0 })
+                    .collect();
+                planned += 1;
+                body.extend(pdfcraft_content::serialize_ops(&ops));
+            }
+            _ => {
+                if unencodable.is_none() {
+                    unencodable = enc.first_unencodable(&d.text);
+                }
+                if current != font_name {
+                    body.extend(format!("/{font_name} {} Tf ", n(size)).bytes());
+                    current.clone_from(&font_name);
+                }
+                body.extend(literal(&enc.encode(&d.text)));
+                body.extend_from_slice(b" Tj\n");
             }
         }
     }
@@ -558,8 +744,6 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
     );
     content.extend(body);
     content.extend_from_slice(b"ET\nQ\nEMC\n");
-    let mut fonts = Dict::new();
-    fonts.set(font_name.into_bytes(), font_obj);
     let mut res = Dict::new();
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     let mut d = Dict::new();
@@ -567,7 +751,7 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
     d.set(b"Subtype".to_vec(), Object::name("Form"));
     set_form_box(&mut d, place);
     d.set(b"Resources".to_vec(), Object::Dict(res));
-    (Stream::flate(d, &content), unencodable)
+    Ok((Stream::flate(d, &content), unencodable))
 }
 
 /// On/Off appearances for a check box or radio button that has none (a check mark or a dot,

@@ -40,6 +40,18 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
 - `shape_hebrew` / `hebrew_has`: the Regular `Hebr` face shaped with harfrust for Hebrew Add
   Text content, one cluster per letter with its points and cantillation marks (positioned by the
   face), drawn by the same Type 3 writer as Arabic and Thai. `GlyphError::NoFont` without the face.
+- `shaped_text` (pub module): the shaped-text layout shared by every writer that draws Arabic
+  (and Hebrew/Thai pieces) itself, so Add text and Edit text (`pdfcraft-edit`), form-field
+  appearances (`pdfcraft-forms`) and later annotations agree. `shaped_pieces` orders a line with
+  UAX #9 and cuts it into Latin pieces and shaped clusters; `type3_shaped` builds one Type 3
+  font per 240 distinct clusters (ToUnicode = the cluster's text); `plan` / `plan_directed` lay
+  out lines (at most 4,096 distinct clusters, every outline read before the document is touched,
+  fonts added in chunks with collision-free resource names) and `ShapedPlan::line_ops` returns the
+  operators of one line as a `/Span <</ActualText …>> BDC … EMC` of `Tf`/`Tj` runs, as `TextOp`s
+  (this crate sits below the content-stream crate); `Measure` gives line widths for wrapping and
+  alignment; `first_strong_is_rtl` gives a paragraph's direction. `Shaper` holds the face
+  functions as plain pointers; `set_test_shaper` (feature `test-shaper`, enabled by the
+  dev-dependencies of the crates that test with a stand-in face) swaps them on a thread.
 - `document_japanese_font` / `japanese_glyph`: the face (Shippori Mincho, then BIZ UDMincho) whose
   outlines become the Type 3 fallback font for Japanese text written into PDFs. Without it,
   `japanese_glyph` returns `GlyphError::NoFont` and the editor reports a clear error.

@@ -6968,3 +6968,84 @@ fn text_box_and_callout_fill_and_border_through_tools() {
         assert_eq!(session.get(saved).unwrap().comment_props(0, index).unwrap().fill, None);
     }
 }
+
+/// Arabic typed into a form field is drawn shaped (not `?`) by the field's own appearance: the
+/// page shows it, text extraction and search read it in the typed order, no viewer is asked to
+/// redraw the form, and flattening, saving and reopening keep it.
+#[test]
+fn arabic_form_values_are_drawn_shaped_flattened_and_kept_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in form fields");
+        return;
+    }
+    let dir = workdir("form-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "rect": [20, 20, 180, 42], "name": "who" }));
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "multiline": true, "rect": [20, 60, 120, 140], "name": "about" }));
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+
+    let typed = "مرحبا بالعالم";
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "who": typed } }));
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"][0]["value"], typed);
+    let filled = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(filled, empty, "the page shows the Arabic text");
+    assert!(page_text(&mut a, doc)[0].contains(typed), "{:?}", page_text(&mut a, doc));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "بالعالم" }))["matches"].as_array().unwrap().len(), 1);
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "about": "رقم 42 Report مرحبا بالعالم الجميل في هذا اليوم" } }));
+    assert!(out.get("warnings").is_none(), "{out}");
+
+    // Saved and reopened: the same picture and text, and the form still wants no redraw.
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "filled.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "filled.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains(typed));
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": re }))["fields"][0]["value"], typed);
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+
+    // Flattening is not refused (nothing is `?`): the fields go, the text stays on the page.
+    ok(&mut a, "doc_flatten", json!({ "doc": doc, "comments": false, "fields": true }));
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"].as_array().unwrap().len(), 0);
+    assert!(page_text(&mut a, doc)[0].contains(typed));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "بالعالم" }))["matches"].as_array().unwrap().len(), 2);
+    assert_ne!(a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap(), empty);
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "flat.pdf" }));
+    let flat = ok(&mut a, "doc_open", json!({ "path": "flat.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, flat)[0].contains(typed));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The same fill in a build with no Arabic face keeps the value, draws `?`, says so, and refuses
+/// to flatten the `?` into the page.
+#[test]
+fn arabic_form_values_without_the_arabic_face_are_kept_marked_and_not_flattened() {
+    use pdfcraft_fonts::shaped_text::{Shaper, set_test_shaper};
+    struct NoFace;
+    impl Drop for NoFace {
+        fn drop(&mut self) {
+            set_test_shaper(None);
+        }
+    }
+    set_test_shaper(Some(Shaper {
+        shape: |_, _, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        has: |_, _| false,
+        outline: |_, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        arabic_available: || false,
+    }));
+    let _guard = NoFace;
+    let dir = workdir("form-arabic-no-face");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "rect": [20, 20, 180, 42], "name": "who" }));
+    let typed = "مرحبا";
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "who": typed } }));
+    let warned =
+        out["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).any(|m| m.contains("form field \"who\"") && m.contains("U+0645"));
+    assert!(warned, "{out}");
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"][0]["value"], typed);
+    assert!(page_text(&mut a, doc)[0].contains('?'));
+    let e = err(&mut a, "doc_flatten", json!({ "doc": doc })).to_string();
+    assert!(e.contains("nothing was flattened"), "{e}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
