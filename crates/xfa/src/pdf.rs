@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
+use pdfcraft_fonts::shaped_text::{self, LatinShow, PlanFonts, ShapedPlan, ShapedTextError, TextOp};
 use pdfcraft_fonts::{literal, win_ansi};
 
 use crate::XfaError;
@@ -239,7 +240,87 @@ fn signed_fields(doc: &Document, catalog: &Dict) -> HashMap<String, Signed> {
     out
 }
 
+/// The lines of a page that are drawn shaped, and the plans (fonts) that draw them.
+#[derive(Default)]
+struct PageShaped {
+    /// Per standard-font resource name (the face the Latin pieces are set in), the plan of all
+    /// the lines set in it.
+    plans: HashMap<&'static str, ShapedPlan>,
+    /// Per item index: the face's resource name and the line's index in its plan.
+    lines: HashMap<usize, (&'static str, usize)>,
+}
+
+/// The resource-name prefix of the Type 3 fonts that draw Arabic: a name nothing else on a page has.
+const SHAPED_FONT_PREFIX: &str = "PCXfAr";
+
+/// The content-stream bytes of `ops`.
+fn ops_bytes(ops: &[TextOp]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for op in ops {
+        for operand in &op.operands {
+            pdfcraft_cos::serialize(operand, &mut out);
+            out.push(b' ');
+        }
+        out.extend_from_slice(&op.operator);
+        out.push(b'\n');
+    }
+    out
+}
+
+/// How the Latin pieces next to Arabic are shown: their WinAnsi bytes (a character the standard
+/// fonts lack is `?`, reported by the caller).
+fn show_latin(s: &str) -> Result<Vec<TextOp>, ShapedTextError> {
+    Ok(vec![TextOp::new("Tj", vec![Object::String(PdfString::literal(win_ansi(s)))])])
+}
+
 impl Emitter<'_> {
+    /// Say once that the standard fonts can't draw `c`, which is shown as `?`.
+    fn warn_undrawable(&mut self, c: char) {
+        const PREFIX: &str = "some of the form's text has characters the standard fonts can't draw";
+        if !self.warnings.iter().any(|w| w.starts_with(PREFIX)) {
+            self.warnings.push(format!(
+                "{PREFIX} (the first is \"{}\" (U+{:04X})); they are shown as ? until PdfCraft can embed fonts for them",
+                c.escape_debug(),
+                u32::from(c)
+            ));
+        }
+    }
+
+    /// Lay out the page's text with Arabic and add the Type 3 fonts that draw it to `fonts`, one
+    /// plan per standard face (its Latin pieces are set in that face). Text the Arabic face can't
+    /// show is left out of the plans: it is drawn as ever, with a warning saying why.
+    fn plan_shaped(&mut self, page: &Page, fonts: &mut Dict) -> PageShaped {
+        let mut by_face: BTreeMap<&'static str, Vec<(usize, String, bool)>> = BTreeMap::new();
+        for (i, item) in page.items.iter().enumerate() {
+            if let Item::Text(s) = item
+                && shaped_text::has_arabic(&s.text)
+            {
+                by_face.entry(s.face.resource_name()).or_default().push((i, s.text.clone(), s.rtl));
+            }
+        }
+        let mut out = PageShaped::default();
+        for (face, texts) in by_face {
+            let lines: Vec<(String, bool)> = texts.iter().map(|(_, t, rtl)| (t.clone(), *rtl)).collect();
+            let latin = LatinShow { font: face, show: &show_latin };
+            let names = PlanFonts { max_glyphs: shaped_text::GLYPHS_PER_FONT, name_prefix: SHAPED_FONT_PREFIX, font_name: None };
+            match shaped_text::plan_directed(self.doc, fonts, &lines, names, &latin) {
+                Ok(plan) => {
+                    for (line, (i, _, _)) in texts.iter().enumerate() {
+                        out.lines.insert(*i, (face, line));
+                    }
+                    out.plans.insert(face, plan);
+                }
+                Err(e) => {
+                    let why = format!("some of the form's Arabic text can't be drawn: {e}");
+                    if !self.warnings.contains(&why) {
+                        self.warnings.push(why);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn da(face: &Face) -> Vec<u8> {
         format!("/{} {} Tf {} rg", face.resource_name(), n(face.size), rgb(face.color)).into_bytes()
     }
@@ -293,7 +374,9 @@ impl Emitter<'_> {
                     crate::model::HAlign::Right => 2,
                     _ => 0,
                 };
-                if q != 0 {
+                // Stated, even when it is left: text that runs right to left is right-aligned only
+                // when the template does not say where it goes.
+                if q != 0 || w.h_stated {
                     d.set(b"Q".to_vec(), Object::Int(q));
                 }
                 if let Some(v) = &w.value {
@@ -336,7 +419,9 @@ impl Emitter<'_> {
                     crate::model::HAlign::Right => 2,
                     _ => 0,
                 };
-                if q != 0 {
+                // Stated, even when it is left: text that runs right to left is right-aligned only
+                // when the template does not say where it goes.
+                if q != 0 || w.h_stated {
                     d.set(b"Q".to_vec(), Object::Int(q));
                 }
                 let values = |v: &str| -> Object {
@@ -577,6 +662,9 @@ impl Emitter<'_> {
         let mut xobjects = Dict::new();
         let mut annots = Vec::new();
         let h = page.height;
+        // Arabic is drawn from generated Type 3 fonts, which the page's font dictionary lists.
+        let mut font_dict = Dict::new();
+        let shaped = self.plan_shaped(page, &mut font_dict);
         for (i, item) in page.items.iter().enumerate() {
             match item {
                 Item::Fill { rect, color } => {
@@ -598,17 +686,26 @@ impl Emitter<'_> {
                     );
                 }
                 Item::Text(s) => {
+                    // Text with Arabic: shaped, one `/ActualText` span a line.
+                    if let Some((plan, line)) = shaped.lines.get(&i).and_then(|(face, line)| shaped.plans.get(face).map(|p| (p, *line))) {
+                        if let Some(c) = pdfcraft_fonts::first_undrawable(&shaped_text::latin_of(&s.text)) {
+                            self.warn_undrawable(c);
+                        }
+                        let name = s.face.resource_name();
+                        fonts.insert(name, s.face.family.base_font(s.face.bold, s.face.italic));
+                        content.extend(
+                            format!("BT /{name} {} Tf {} rg 1 0 0 1 {} {} Tm\n", n(s.face.size), rgb(s.face.color), n(s.x), n(h - s.baseline))
+                                .bytes(),
+                        );
+                        let mut current = name.to_owned();
+                        content.extend(ops_bytes(&plan.line_ops(line, s.face.size, &mut current)));
+                        content.extend_from_slice(b"ET\n");
+                        continue;
+                    }
                     // The form's own text, set in the standard fonts: what they can't draw is
                     // shown as `?` and reported once (the layout goes on), never silently.
                     if let Some(c) = pdfcraft_fonts::first_undrawable(&s.text) {
-                        const PREFIX: &str = "some of the form's text has characters the standard fonts can't draw";
-                        if !self.warnings.iter().any(|w| w.starts_with(PREFIX)) {
-                            self.warnings.push(format!(
-                                "{PREFIX} (the first is \"{}\" (U+{:04X})); they are shown as ? until PdfCraft can embed fonts for them",
-                                c.escape_debug(),
-                                u32::from(c)
-                            ));
-                        }
+                        self.warn_undrawable(c);
                     }
                     let name = s.face.resource_name();
                     fonts.insert(name, s.face.family.base_font(s.face.bold, s.face.italic));
@@ -631,7 +728,6 @@ impl Emitter<'_> {
                 }
             }
         }
-        let mut font_dict = Dict::new();
         for (name, base) in fonts {
             font_dict.set(name.as_bytes().to_vec(), standard_font(base));
         }

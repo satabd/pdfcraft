@@ -170,4 +170,6 @@ pub fn render_into(doc: &mut Document) -> Result<Report, XfaError> {
 }
 
 #[cfg(test)]
+mod shaped_tests;
+#[cfg(test)]
 mod tests;
