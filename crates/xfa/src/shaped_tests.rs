@@ -287,8 +287,10 @@ fn without_the_arabic_face_the_text_is_reported_and_shown_as_question_marks_as_b
 #[test]
 fn hostile_arabic_text_does_not_panic() {
     let _face = Using::shaper(FAKE);
-    // A very long text without spaces, one with only marks and controls, and an empty one.
-    let long = "ب".repeat(60_000);
+    // A text without spaces longer than the shaping cap (4000 characters; a longer one only
+    // costs CI time, 60 000 took twelve seconds on the emulated FreeBSD runner), one with only
+    // marks and controls, and an empty one.
+    let long = "ب".repeat(4_500);
     for text in [long.as_str(), "\u{064B}\u{064B}\u{200F}\u{202E}\u{202C}", "\u{200F}", "(((مرحبا)))", "\u{0600}"] {
         let xdp = form_of(&draw(text, ""));
         let mut doc = Document::open(Arc::new(shell(&xdp))).unwrap();
