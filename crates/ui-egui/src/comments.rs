@@ -1564,11 +1564,12 @@ pub(crate) fn caret_snap(text: &PageText, vx: f32, vy: f32) -> Option<([f32; 2],
 /// The box for `text` at `size` with its displayed top-left corner at `at`, on a page turned by
 /// `rotation` (its `/Rotate`): on a quarter-turned page it is taller than wide in user space.
 pub fn text_box_rect(at: [f64; 2], text: &str, size: f64, rotation: i64) -> [f64; 4] {
-    use pdfcraft_engine::annot_text::{text_width, wrap};
+    use pdfcraft_engine::annot_text::{line_count, longest_line};
     let pad = 2.0;
-    let longest = text.lines().map(|l| text_width(l, size)).fold(0.0, f64::max);
+    // Measured as the appearance draws it: Arabic on its shaped widths, the rest in Helvetica.
+    let longest = longest_line(text, size);
     let w = (longest + 2.0 * pad + 4.0).clamp(40.0, 300.0);
-    let lines = wrap(text, size, w - 2.0 * pad).len().max(1);
+    let lines = line_count(text, size, w - 2.0 * pad);
     let h = lines as f64 * size * 1.2 + 2.0 * pad + 2.0;
     pdfcraft_engine::text_box_at(rotation, at, w, h).unwrap_or([at[0], at[1] - h, at[0] + w, at[1]])
 }
@@ -2167,5 +2168,26 @@ mod tests {
         let long = text_box_rect([0.0, 500.0], &"word ".repeat(80), 12.0, 0);
         assert_eq!(long[2], 300.0);
         assert!(long[3] - long[1] > 50.0);
+    }
+
+    #[test]
+    fn arabic_text_boxes_are_measured_on_the_shaped_widths() {
+        if pdfcraft_fonts::document_arabic_font().is_none() {
+            eprintln!("set CRAFT_FONTS_DIR to measure Arabic text boxes");
+            return;
+        }
+        use pdfcraft_fonts::shaped_text::Measure;
+        let helvetica = |s: &str| pdfcraft_fonts::helvetica_width(s, 1.0);
+        let text = "مرحبا بالعالم الجميل";
+        let shaped = Measure::new(true, 1.0, &helvetica).line(text) * 12.0;
+        let r = text_box_rect([0.0, 500.0], text, 12.0, 0);
+        assert!((r[2] - r[0] - (shaped + 8.0)).abs() < 0.01, "{} vs {}", r[2] - r[0], shaped + 8.0);
+        // Several lines of it wrap on those widths; the box is tall enough for exactly them.
+        let long = text.repeat(16);
+        let r = text_box_rect([0.0, 500.0], &long, 12.0, 0);
+        assert_eq!(r[2], 300.0);
+        let lines = pdfcraft_engine::annot_text::line_count(&long, 12.0, 296.0);
+        assert!(lines >= 3);
+        assert!((r[3] - r[1] - (lines as f64 * 14.4 + 6.0)).abs() < 0.01, "{r:?} {lines}");
     }
 }

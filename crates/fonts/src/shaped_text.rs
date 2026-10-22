@@ -486,6 +486,73 @@ pub fn type3_shaped(
     doc.add(Object::Dict(font))
 }
 
+// ---- outlines as paths ----
+
+/// A coordinate for a content stream, to hundredths of a point.
+fn coord(v: f64) -> String {
+    let s = format!("{v:.2}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" || s.is_empty() { "0".into() } else { s.into() }
+}
+
+/// The start of the marked-content span that holds one line of text in typing order:
+/// `/Span <</ActualText <FEFF…>>> BDC` and a line break. End it with `EMC`. Viewers copy and search
+/// that text rather than the glyphs drawn inside.
+pub fn actual_text_bdc(logical: &str) -> Vec<u8> {
+    let mut out = b"/Span <</ActualText <FEFF".to_vec();
+    for unit in logical.encode_utf16() {
+        out.extend(format!("{unit:04X}").bytes());
+    }
+    out.extend_from_slice(b">>> BDC\n");
+    out
+}
+
+/// Append the path operators that fill `clusters` with their outlines to `out`, for drawing
+/// shaped text where no font can be added (an appearance stream built from a dictionary alone):
+/// the pen starts at (`x`, `y`) on the baseline, and one `f` ends each cluster. Returns where the
+/// pen ends, advanced by each cluster's width as [`Measure`] counts it.
+///
+/// Every outline is read before `out` is touched, so a failure appends nothing. Coordinates are
+/// in hundredths of a point; a glyph holds at most a few thousand points.
+pub fn cluster_paths(out: &mut Vec<u8>, clusters: &[ShapedCluster], shaper: &Shaper, x: f64, y: f64, size: f64) -> Result<f64, ShapedTextError> {
+    if !(x.is_finite() && y.is_finite() && size.is_finite()) {
+        return Err(ShapedTextError("the text's position or size is not a number".into()));
+    }
+    let mut outlines: HashMap<(ShapedScript, u32), GlyphOutline> = HashMap::new();
+    for c in clusters {
+        for (id, _) in &c.glyphs {
+            if let std::collections::hash_map::Entry::Vacant(entry) = outlines.entry((c.script, *id)) {
+                entry.insert((shaper.outline)(c.script, *id).map_err(|e| script_error(c.script, e, &c.text))?);
+            }
+        }
+    }
+    let mut pen = x;
+    let mut text = String::new();
+    for c in clusters {
+        let mut any = false;
+        for (id, [dx, dy]) in &c.glyphs {
+            let Some(g) = outlines.get(&(c.script, *id)) else { continue };
+            for contour in &g.contours {
+                for (j, p) in contour.iter().enumerate() {
+                    let (px, py) = (pen + (p[0] + dx) * size, y + (p[1] + dy) * size);
+                    if !(px.is_finite() && py.is_finite()) {
+                        return Err(ShapedTextError("the text's position or size is out of range".into()));
+                    }
+                    text.push_str(&format!("{} {} {}\n", coord(px), coord(py), if j == 0 { "m" } else { "l" }));
+                }
+                text.push_str("h\n");
+                any = true;
+            }
+        }
+        if any {
+            text.push_str("f\n");
+        }
+        pen += width_em(c) * size;
+    }
+    out.extend_from_slice(text.as_bytes());
+    Ok(pen)
+}
+
 // ---- planning lines ----
 
 /// How the Latin pieces of a line are drawn: in the resource `font`, with the operators `show`
@@ -697,5 +764,52 @@ impl ShapedPlan {
         }
         ops.push(TextOp::new("EMC", vec![]));
         ops
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    fn square(_: ShapedScript, id: u32) -> Result<GlyphOutline, GlyphError> {
+        if id == 99 {
+            return Err(GlyphError::TooComplex);
+        }
+        Ok(GlyphOutline { contours: vec![vec![[0.0, 0.0], [0.5, 0.0], [0.5, 0.25]]], width: 0.5, bbox: [0.0, 0.0, 0.5, 0.25] })
+    }
+
+    const SQUARES: Shaper = Shaper { shape: |_, _, _| Ok(Vec::new()), has: |_, _| true, outline: square, arabic_available: || true };
+
+    fn cluster(id: u32, advance: f64, offset: [f64; 2]) -> ShapedCluster {
+        ShapedCluster { script: ShapedScript::Arabic, glyphs: vec![(id, offset)], advance, text: "x".into() }
+    }
+
+    #[test]
+    fn clusters_become_filled_paths_at_the_pen() {
+        let mut out = b"q\n".to_vec();
+        let clusters = [cluster(1, 0.5, [0.0, 0.0]), cluster(2, 0.0, [0.1, 0.2])];
+        let pen = cluster_paths(&mut out, &clusters, &SQUARES, 10.0, 20.0, 10.0).unwrap();
+        assert_eq!(pen, 15.0, "the pen advances by the first cluster's width only");
+        assert_eq!(String::from_utf8(out).unwrap(), "q\n10 20 m\n15 20 l\n15 22.5 l\nh\nf\n16 22 m\n21 22 l\n21 24.5 l\nh\nf\n");
+    }
+
+    #[test]
+    fn a_glyph_that_cannot_be_read_appends_nothing() {
+        let mut out = b"q\n".to_vec();
+        let clusters = [cluster(1, 0.5, [0.0, 0.0]), cluster(99, 0.5, [0.0, 0.0])];
+        assert!(cluster_paths(&mut out, &clusters, &SQUARES, 0.0, 0.0, 12.0).is_err());
+        assert_eq!(out, b"q\n");
+        for (x, size) in [(f64::NAN, 12.0), (0.0, f64::INFINITY), (f64::MAX, 1e308)] {
+            assert!(cluster_paths(&mut out, &clusters[..1], &SQUARES, x, 0.0, size).is_err(), "{x} {size}");
+            assert_eq!(out, b"q\n", "{x} {size}");
+        }
+        assert_eq!(cluster_paths(&mut out, &[], &SQUARES, 3.0, 0.0, 12.0), Ok(3.0));
+    }
+
+    #[test]
+    fn the_span_holds_the_typed_text_as_utf16() {
+        assert_eq!(actual_text_bdc("اب"), b"/Span <</ActualText <FEFF06270628>>> BDC\n");
+        assert_eq!(actual_text_bdc("a\u{1F600}"), b"/Span <</ActualText <FEFF0061D83DDE00>>> BDC\n");
+        assert_eq!(actual_text_bdc(""), b"/Span <</ActualText <FEFF>>> BDC\n");
     }
 }

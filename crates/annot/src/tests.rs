@@ -6,7 +6,7 @@ use super::*;
 
 /// Two pages. Page 1 has an inline Square annotation in a direct /Annots array; page 2 has an
 /// indirect /Annots array holding a Stamp (a type we cannot redraw).
-fn fixture() -> Document {
+pub(crate) fn fixture() -> Document {
     let objs: Vec<&[u8]> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>",                                       // 1
         b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 612 792] >>", // 2
@@ -32,11 +32,11 @@ fn fixture() -> Document {
     Document::open(Arc::new(out)).expect("opens")
 }
 
-fn meta(id: &str) -> Meta {
+pub(crate) fn meta(id: &str) -> Meta {
     Meta { date: Some("D:20261001120000Z".into()), id: id.into() }
 }
 
-fn new(page: usize, shape: Shape) -> NewAnnotation {
+pub(crate) fn new(page: usize, shape: Shape) -> NewAnnotation {
     NewAnnotation {
         page,
         shape,
@@ -47,14 +47,14 @@ fn new(page: usize, shape: Shape) -> NewAnnotation {
 }
 
 /// Save incrementally and reopen, so every check runs against what a reader would see.
-fn reopen(doc: &Document) -> Document {
+pub(crate) fn reopen(doc: &Document) -> Document {
     let bytes = write_incremental(doc, &SaveOptions::default()).expect("writes");
     // A second, independent parser must accept the result too.
     hayro_syntax::Pdf::new(bytes.clone()).expect("hayro-syntax parses the output");
     Document::open(Arc::new(bytes)).expect("reopens")
 }
 
-fn list(doc: &Document, page: usize) -> Vec<Dict> {
+pub(crate) fn list(doc: &Document, page: usize) -> Vec<Dict> {
     let p = page_refs(doc).unwrap()[page];
     annots(doc, p).iter().map(|o| doc.resolve(o).as_dict().cloned().unwrap()).collect()
 }
