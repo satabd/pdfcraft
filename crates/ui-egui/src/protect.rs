@@ -6,7 +6,7 @@ use egui::{Align, Color32, Layout};
 use pdfcraft_engine::{Changes, Edit, Printing, Protection};
 
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, widgets};
+use crate::{PdfCraftApp, rtl, widgets};
 
 /// The dialog's state while it is open.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,7 +94,7 @@ fn radio(ui: &mut egui::Ui, t: &Tokens, on: bool, label: &str) -> egui::Response
 pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (bool, bool) {
     use pdfcraft_engine::Algorithm as A;
     let d = &mut app.protect_draft;
-    ui.label(egui::RichText::new(tl!("Protect Using Password")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Protect Using Password"));
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(6.0);
@@ -135,62 +135,65 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     }
     if d.advanced {
         let p = &mut d.protection;
-        egui::Grid::new("protect-advanced").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label(tl!("Compatibility"));
-            let algos = [
-                (A::Aes256, tl!("Acrobat X and later (256-bit AES)")),
-                (A::Aes128, tl!("Acrobat 7.0 and later (128-bit AES)")),
-                (A::Rc4_128, tl!("Acrobat 5.0 and later (128-bit RC4)")),
-                (A::Rc4_40, tl!("Acrobat 3.0 and later (40-bit RC4)")),
-            ];
-            let cur = algos.iter().find(|(a, _)| *a == p.algorithm).map_or(algos[0].1, |(_, l)| *l);
-            egui::ComboBox::from_id_salt("protect-algo").width(300.0).selected_text(cur).show_ui(ui, |ui| {
-                for (a, l) in algos {
-                    ui.selectable_value(&mut p.algorithm, a, l);
-                }
-            });
-            ui.end_row();
-            ui.label(tl!("Encrypt"));
-            ui.vertical(|ui| {
-                widgets::radio_value(ui, &mut p.encrypt_metadata, true, tl!("All document contents"));
-                // Unencrypted metadata needs crypt filters (Acrobat 6.0 and later).
-                ui.add_enabled_ui(p.algorithm != A::Rc4_40 && p.algorithm != A::Rc4_128, |ui| {
-                    widgets::radio_value(ui, &mut p.encrypt_metadata, false, tl!("All document contents except metadata"));
-                });
-            });
-            ui.end_row();
-            if !d.viewing {
-                ui.label(tl!("Printing allowed"));
-                let opts =
-                    [(Printing::None, tl!("None")), (Printing::Low, tl!("Low Resolution (150 dpi)")), (Printing::High, tl!("High Resolution"))];
-                let cur = opts.iter().find(|(o, _)| *o == p.printing).map_or(tl!("High Resolution"), |(_, l)| *l);
-                egui::ComboBox::from_id_salt("protect-print").width(300.0).selected_text(cur).show_ui(ui, |ui| {
-                    for (o, l) in opts {
-                        ui.selectable_value(&mut p.printing, o, l);
-                    }
-                });
-                ui.end_row();
-                ui.label(tl!("Changes allowed"));
-                let opts = [
-                    (Changes::None, tl!("None")),
-                    (Changes::Pages, tl!("Inserting, deleting, and rotating pages")),
-                    (Changes::FillSign, tl!("Filling in form fields and signing existing signature fields")),
-                    (Changes::CommentFillSign, tl!("Commenting, filling in form fields, and signing existing signature fields")),
-                    (Changes::AnyExceptExtract, tl!("Any except extracting pages")),
+        widgets::form_grid(ui, "protect-advanced", [12.0, 8.0], None, |rows| {
+            rows.row(tl!("Compatibility"), |ui, _| {
+                let algos = [
+                    (A::Aes256, tl!("Acrobat X and later (256-bit AES)")),
+                    (A::Aes128, tl!("Acrobat 7.0 and later (128-bit AES)")),
+                    (A::Rc4_128, tl!("Acrobat 5.0 and later (128-bit RC4)")),
+                    (A::Rc4_40, tl!("Acrobat 3.0 and later (40-bit RC4)")),
                 ];
-                let cur = opts.iter().find(|(o, _)| *o == p.changes).map_or(tl!("None"), |(_, l)| *l);
-                egui::ComboBox::from_id_salt("protect-changes").width(300.0).selected_text(cur).show_ui(ui, |ui| {
-                    for (o, l) in opts {
-                        ui.selectable_value(&mut p.changes, o, l);
+                let cur = algos.iter().find(|(a, _)| *a == p.algorithm).map_or(algos[0].1, |(_, l)| *l);
+                egui::ComboBox::from_id_salt("protect-algo").width(300.0).selected_text(cur).show_ui(ui, |ui| {
+                    for (a, l) in algos {
+                        ui.selectable_value(&mut p.algorithm, a, l);
                     }
                 });
-                ui.end_row();
-                ui.label("");
-                ui.vertical(|ui| {
-                    ui.add(widgets::checkbox(&mut p.copy, tl!("Enable copying of text, images, and other content")));
-                    ui.add(widgets::checkbox(&mut p.accessibility, tl!("Enable text access for screen reader devices for the visually impaired")));
+            });
+            rows.row(tl!("Encrypt"), |ui, _| {
+                rtl::vertical(ui, |ui| {
+                    widgets::radio_value(ui, &mut p.encrypt_metadata, true, tl!("All document contents"));
+                    // Unencrypted metadata needs crypt filters (Acrobat 6.0 and later).
+                    ui.add_enabled_ui(p.algorithm != A::Rc4_40 && p.algorithm != A::Rc4_128, |ui| {
+                        widgets::radio_value(ui, &mut p.encrypt_metadata, false, tl!("All document contents except metadata"));
+                    });
                 });
-                ui.end_row();
+            });
+            if !d.viewing {
+                rows.row(tl!("Printing allowed"), |ui, _| {
+                    let opts =
+                        [(Printing::None, tl!("None")), (Printing::Low, tl!("Low Resolution (150 dpi)")), (Printing::High, tl!("High Resolution"))];
+                    let cur = opts.iter().find(|(o, _)| *o == p.printing).map_or(tl!("High Resolution"), |(_, l)| *l);
+                    egui::ComboBox::from_id_salt("protect-print").width(300.0).selected_text(cur).show_ui(ui, |ui| {
+                        for (o, l) in opts {
+                            ui.selectable_value(&mut p.printing, o, l);
+                        }
+                    });
+                });
+                rows.row(tl!("Changes allowed"), |ui, _| {
+                    let opts = [
+                        (Changes::None, tl!("None")),
+                        (Changes::Pages, tl!("Inserting, deleting, and rotating pages")),
+                        (Changes::FillSign, tl!("Filling in form fields and signing existing signature fields")),
+                        (Changes::CommentFillSign, tl!("Commenting, filling in form fields, and signing existing signature fields")),
+                        (Changes::AnyExceptExtract, tl!("Any except extracting pages")),
+                    ];
+                    let cur = opts.iter().find(|(o, _)| *o == p.changes).map_or(tl!("None"), |(_, l)| *l);
+                    egui::ComboBox::from_id_salt("protect-changes").width(300.0).selected_text(cur).show_ui(ui, |ui| {
+                        for (o, l) in opts {
+                            ui.selectable_value(&mut p.changes, o, l);
+                        }
+                    });
+                });
+                rows.row("", |ui, _| {
+                    rtl::vertical(ui, |ui| {
+                        ui.add(widgets::checkbox(&mut p.copy, tl!("Enable copying of text, images, and other content")));
+                        ui.add(widgets::checkbox(
+                            &mut p.accessibility,
+                            tl!("Enable text access for screen reader devices for the visually impaired"),
+                        ));
+                    });
+                });
             }
         });
         if p.algorithm == A::Rc4_40 || p.algorithm == A::Rc4_128 {

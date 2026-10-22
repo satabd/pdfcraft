@@ -1,12 +1,12 @@
 //! Small custom widgets built on the design tokens.
 
-use egui::{Align2, Color32, CornerRadius, Rect, Response, Sense, Stroke, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, Response, Sense, Stroke, vec2};
 
 use crate::theme::{self, Tokens};
 use crate::{PdfCraftApp, icons, rtl};
 
 mod form;
-pub use form::{FormRows, form_grid};
+pub use form::{FormRows, form_grid, start_block};
 
 /// Horizontal and vertical inset of a single-line field.
 const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
@@ -119,12 +119,23 @@ pub(crate) fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 
     ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE).size().x)
 }
 
-/// Draw `text` from `pos` (left, vertically centered) so it never runs past `max_width`.
-pub(crate) fn paint_left(ui: &egui::Ui, pos: egui::Pos2, text: &str, font: egui::FontId, color: Color32, max_width: f32) {
-    fn logical(s: &str) -> std::borrow::Cow<'_, str> {
-        std::borrow::Cow::Borrowed(s)
+/// Draw a line of the interface at the start edge, never past `max_width`: `pos` is the middle of
+/// the text's start edge, its left end in English and its right end when mirrored (the line runs
+/// leftwards, clipped to `[pos.x - max_width, pos.x]`). A line that does not fit is cut in logical
+/// order, so the "…" lands where the reader stops: at the right of English text and at the left of
+/// Arabic. True when it was cut.
+pub(crate) fn paint_start(
+    ui: &egui::Ui,
+    pos: egui::Pos2,
+    text: &crate::i18n::Logical<'_>,
+    font: egui::FontId,
+    color: Color32,
+    max_width: f32,
+) -> bool {
+    fn interface(s: &str) -> std::borrow::Cow<'_, str> {
+        if rtl::mirrored() { std::borrow::Cow::Owned(crate::bidi::display_rtl(s)) } else { std::borrow::Cow::Borrowed(s) }
     }
-    paint_fitted(ui, pos, text, font, color, max_width, false, logical);
+    paint_fitted(ui, pos, text.as_str(), font, color, max_width, true, interface)
 }
 
 /// Draw `text` from a document (a layer name) at the start edge: the fitted line is put in
@@ -167,11 +178,14 @@ fn paint_fitted(
     max_width: f32,
     start: bool,
     reorder: impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
-) {
-    let fitted = fit_line(text, max_width, |s| text_width(ui, s, &font));
+) -> bool {
+    // Measured as it is painted, in display order.
+    let fitted = fit_line(text, max_width, |s| text_width(ui, &reorder(s), &font));
+    let cut = fitted != text;
     let shown = reorder(&fitted).into_owned();
     let anchor = if start { rtl::flip(Align2::LEFT_CENTER) } else { Align2::LEFT_CENTER };
     ui.painter().with_clip_rect(fitted_clip(pos, max_width, start)).text(pos, anchor, shown, font, color);
+    cut
 }
 
 /// A mode-bar tab: text with an underline when active.
@@ -237,11 +251,14 @@ pub fn ghost_button_sized(ui: &mut egui::Ui, icon: &str, label: &str, height: f3
     theme::hand(resp)
 }
 
-/// A search-field lookalike that opens the command palette.
-pub fn search_box(ui: &mut egui::Ui, placeholder: &str, width: f32) -> Response {
+/// A search-field lookalike that opens the command palette. The `placeholder` is cut in logical
+/// order when it does not fit, so its "…" is at the end of what is read.
+pub fn search_box(ui: &mut egui::Ui, placeholder: &crate::i18n::Logical<'_>, width: f32) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), placeholder));
+    // The accessible name and the tooltip are the label as the catalog gives it, in display order.
+    let named = if rtl::mirrored() { crate::bidi::display_rtl(placeholder.as_str()) } else { placeholder.as_str().to_owned() };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &named));
     let press = theme::Press::track(ui, &resp);
     let fill = press.fill(t.field, t.hover, t.pressed);
     let edge = t.border.lerp_to_gamma(t.text_muted, press.hover * 0.35);
@@ -263,16 +280,11 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, width: f32) -> Response 
         ((rect.left() + 34.0).min(text_right), text_right)
     };
     let text_rect = Rect::from_min_max(egui::pos2(text_left, rect.top()), egui::pos2(text_right, rect.bottom()));
-    let mut job = egui::text::LayoutJob::simple_singleline(placeholder.to_owned(), theme::regular(13.0), t.text_faint);
-    job.wrap = egui::text::TextWrapping { max_width: text_rect.width(), max_rows: 1, break_anywhere: true, ..Default::default() };
-    let text = ui.fonts_mut(|f| f.layout_job(job));
-    let elided = text.elided;
     // The placeholder starts at the start edge of its room: flush right when mirrored.
-    let text_x = rtl::block_left(rtl::start(text_rect, 0.0), text.size().x);
-    ui.painter().with_clip_rect(text_rect).galley(egui::pos2(text_x, rect.center().y - text.size().y * 0.5), text, t.text_faint);
+    let elided = paint_start(ui, rtl::start_center(text_rect, 0.0), placeholder, theme::regular(13.0), t.text_faint, text_rect.width());
     ui.painter().with_clip_rect(rect).galley(shortcut_pos, shortcut, t.text_faint);
     let resp = resp.on_hover_cursor(egui::CursorIcon::Text);
-    if elided { resp.on_hover_text(placeholder) } else { resp }
+    if elided { resp.on_hover_text(&named) } else { resp }
 }
 
 pub fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> Response {
@@ -307,6 +319,29 @@ pub fn menu_entry(ui: &mut egui::Ui, enabled: bool, label: &str, shortcut: Optio
     let name = if shortcut.is_empty() { label.to_owned() } else { format!("{label} {shortcut}") };
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &name));
     resp
+}
+
+/// A [`menu_entry`] with the icon `icon` (15 points, in the text colour) at its start edge, before
+/// the label. A mirrored icon that points somewhere is flipped by [`icons::image`].
+pub fn menu_icon_entry(ui: &mut egui::Ui, enabled: bool, icon: &str, label: &str) -> Response {
+    let image = icons::image(icon, 15.0, ui.visuals().text_color());
+    if !rtl::mirrored() {
+        return ui.add_enabled(enabled, egui::Button::image_and_text(image, label));
+    }
+    let mut atoms = egui::Atoms::new(label);
+    atoms.push_left(egui::Atom::grow());
+    atoms.push_right(image);
+    let resp = ui.add_enabled(enabled, egui::Button::new(atoms));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    resp
+}
+
+/// A line of a menu that is not a button (a check box, a radio button, a section label), at the
+/// start edge of the menu. In English that is `add(ui)` as it is. Mirrored, the line is justified
+/// against the right edge, so its label is flush right as a [`menu_entry`]'s is. Where the menu
+/// has no width yet (an unbounded one) it is also `add(ui)` as it is.
+pub fn menu_choice<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    if rtl::mirrored() && ui.available_width().is_finite() { ui.with_layout(Layout::top_down_justified(Align::Max), add).inner } else { add(ui) }
 }
 
 /// A submenu button inside a menu (a top-level menu button elsewhere). Mirrored, its label is
@@ -395,6 +430,12 @@ fn toggle<'a>(widget: impl egui::Widget + 'a, radius: Option<u8>) -> impl egui::
         })
         .inner
     }
+}
+
+/// The title of a dialog, at its start edge (the right when mirrored). Every dialog body sets its
+/// width first ([`show_modal`]), which a title against the right edge needs.
+pub fn dialog_title(ui: &mut egui::Ui, text: impl Into<String>) -> Response {
+    rtl::page(ui, |ui| ui.label(egui::RichText::new(text).font(theme::semibold(18.0))))
 }
 
 pub fn section_title(ui: &mut egui::Ui, text: &str) {
@@ -891,18 +932,27 @@ mod tests {
                 ctx.set_fonts(theme::font_definitions());
                 let placeholder = "Werkzeuge und Befehle suchen";
                 let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                    search_box(ui, placeholder, width);
+                    search_box(ui, &crate::i18n::Logical::from(placeholder), width);
                 });
                 let text_shapes: Vec<_> = output
                     .shapes
                     .iter()
                     .filter_map(|shape| if let egui::Shape::Text(text) = &shape.shape { Some((shape.clip_rect, text)) } else { None })
                     .collect();
-                let (clip, hint) = text_shapes.iter().find(|(_, text)| text.galley.job.text == placeholder).unwrap();
                 let (_, shortcut) = text_shapes.iter().find(|(_, text)| text.galley.job.text.contains('K')).unwrap();
                 assert_eq!(shortcut.galley.job.text, expected);
+                // With no room left beside the shortcut nothing is painted at all.
+                let Some((clip, hint)) = text_shapes.iter().find(|(_, text)| text.galley.job.text.starts_with("Werk")) else {
+                    assert!(width < 100.0, "the hint is painted at width {width}");
+                    output.drop_without_applying_deltas();
+                    continue;
+                };
                 assert!(clip.right() <= shortcut.pos.x - 9.0, "hint must leave a gap before the shortcut at width {width}");
-                assert!(hint.galley.elided, "the long original German hint must be elided at width {width}");
+                assert!(
+                    hint.galley.job.text.ends_with('\u{2026}') && hint.galley.job.text != placeholder,
+                    "the long original German hint must be cut with an ellipsis at width {width}: {:?}",
+                    hint.galley.job.text
+                );
                 assert_eq!(hint.galley.rows.len(), 1);
                 output.drop_without_applying_deltas();
             }
@@ -922,16 +972,24 @@ mod tests {
             let placeholder = "Werkzeuge und Befehle suchen";
             let mut rect = Rect::NOTHING;
             let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                rect = search_box(ui, placeholder, width).rect;
+                rect = search_box(ui, &crate::i18n::Logical::from(placeholder), width).rect;
             });
             let texts: Vec<_> = output
                 .shapes
                 .iter()
                 .filter_map(|shape| if let egui::Shape::Text(text) = &shape.shape { Some((shape.clip_rect, text)) } else { None })
                 .collect();
-            let (clip, hint) = texts.iter().find(|(_, text)| text.galley.job.text == placeholder).unwrap();
             let (_, shortcut) = texts.iter().find(|(_, text)| text.galley.job.text.contains('K')).unwrap();
             assert!(shortcut.pos.x < rect.center().x, "the shortcut is at the left at width {width}");
+            let Some((clip, hint)) = texts.iter().find(|(_, text)| text.galley.job.text.starts_with("Werk")) else {
+                assert!(
+                    width < 100.0,
+                    "the placeholder is painted at width {width}: {:?}",
+                    texts.iter().map(|t| t.1.galley.job.text.clone()).collect::<Vec<_>>()
+                );
+                output.drop_without_applying_deltas();
+                continue;
+            };
             assert!(clip.left() >= shortcut.pos.x + shortcut.galley.size().x + 9.0, "a gap after the shortcut at width {width}");
             assert!(clip.right() <= rect.right() - 33.0, "room for the icon at the right at width {width}");
             assert!(hint.galley.rows.len() == 1);
@@ -1443,6 +1501,42 @@ mod tests {
         fn drop(&mut self) {
             crate::i18n::set_current(crate::i18n::Lang::EN);
         }
+    }
+
+    /// The line `text` painted by [`paint_start`] in a room `max_width` wide, and whether it was cut.
+    fn painted_start_line(text: &str, max_width: f32) -> (String, bool) {
+        let ctx = egui::Context::default();
+        ctx.set_os(egui::os::OperatingSystem::Nix);
+        ctx.set_fonts(theme::font_definitions());
+        let mut cut = false;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cut = paint_start(ui, egui::pos2(300.0, 50.0), &crate::i18n::Logical::from(text), theme::regular(13.0), Color32::WHITE, max_width);
+        });
+        let painted = output
+            .shapes
+            .iter()
+            .find_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.job.text.clone()) } else { None })
+            .unwrap_or_default();
+        output.drop_without_applying_deltas();
+        (painted, cut)
+    }
+
+    /// A line that does not fit is cut where the reader stops: the "…" ends English text and
+    /// begins (at the left of) Arabic, which keeps the first words of the sentence.
+    #[test]
+    fn a_cut_line_has_its_ellipsis_where_the_reader_stops() {
+        let (english, cut) = painted_start_line("Find tools and commands in this document", 90.0);
+        assert!(cut && english.starts_with("Find") && english.ends_with('\u{2026}'), "{english:?}");
+        let (whole, cut) = painted_start_line("Find tools", 300.0);
+        assert!(!cut && whole == "Find tools", "{whole:?}");
+
+        let _arabic = ArabicUi::on();
+        let sentence = "ابحث عن الأدوات والأوامر في هذا المستند";
+        let (arabic, cut) = painted_start_line(sentence, 90.0);
+        assert!(cut, "the sentence does not fit 90 points");
+        assert!(arabic.starts_with('\u{2026}'), "the ellipsis is at the left of the painted line: {arabic:?}");
+        let first_word = crate::bidi::display_rtl("ابحث");
+        assert!(arabic.contains(first_word.as_str()), "and the sentence's first word survives at the right: {arabic:?}");
     }
 
     #[test]

@@ -215,6 +215,44 @@ impl FormRows<'_> {
     }
 }
 
+/// What [`start_block`] remembers from the previous frame: how wide the block was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BlockWidth(f32);
+
+/// `add_contents` as a block that sits against the start edge of the space it is given, for
+/// content that can only be laid out from its own left edge (an `egui::Grid` of swatches, say)
+/// inside a field of a mirrored [`form_grid`]. In a left-to-right language, and where the width
+/// is unbounded, it is `add_contents(ui)` as it is.
+///
+/// Mirrored, the block is measured in one frame and placed against the right edge in the next
+/// (the first frame of a new block is discarded, as for a [`form_grid`]).
+pub fn start_block<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    if !(rtl::mirrored() && ui.available_width().is_finite()) {
+        return add_contents(ui);
+    }
+    let id = ui.next_auto_id();
+    ui.skip_ahead_auto_ids(1);
+    let previous = ui.data(|d| d.get_temp::<BlockWidth>(id));
+    if previous.is_none() && ui.is_visible() {
+        ui.ctx().request_discard("new start_block");
+    }
+    let avail = ui.available_rect_before_wrap();
+    let width = previous.map_or(avail.width(), |BlockWidth(w)| finite_or(w, 0.0).clamp(0.0, avail.width().max(0.0)));
+    let rect = Rect::from_min_max(pos2((avail.right() - width).max(avail.left()), avail.top()), avail.right_bottom());
+    let mut block = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)).id_salt(id));
+    let result = add_contents(&mut block);
+    let used = block.min_rect();
+    // Sit against the right edge even when the block is narrower than it was measured.
+    let used = Rect::from_min_max(pos2((avail.right() - used.width()).max(avail.left()), used.top()), pos2(avail.right(), used.bottom()));
+    ui.allocate_rect(used, Sense::hover());
+    let measured = BlockWidth(finite_or(block.min_rect().width(), 0.0));
+    if previous != Some(measured) {
+        ui.ctx().request_repaint();
+        ui.data_mut(|d| d.insert_temp(id, measured));
+    }
+    result
+}
+
 /// A cell of a mirrored form: a right-to-left row centred in `rect`, whose contents keep the
 /// style's item spacing.
 fn cell(ui: &mut Ui, rect: Rect, salt: (&'static str, usize), item_spacing: Vec2) -> Ui {
@@ -379,6 +417,57 @@ mod tests {
         for rect in rects {
             assert!(rect.min.is_finite() && rect.max.is_finite() && !rect.any_nan(), "{rect:?}");
         }
+    }
+
+    /// A block holding an `egui::Grid`, in a field of a form: where the grid sat in the first
+    /// frame, and the caption next to it.
+    fn run_block(arabic: bool) -> (Rect, Rect, Rect) {
+        let _arabic = arabic.then(ArabicUi::on);
+        let ctx = egui::Context::default();
+        let mut got = (Rect::NOTHING, Rect::NOTHING, Rect::NOTHING);
+        for _ in 0..5 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(WIDTH, 300.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    got.0 = ui.available_rect_before_wrap();
+                    form_grid(ui, "block", [12.0, 8.0], None, |rows| {
+                        rows.row("Colour", |ui, caption| {
+                            got.1 = caption.rect;
+                            got.2 = start_block(ui, |ui| {
+                                egui::Grid::new("swatches")
+                                    .show(ui, |ui| {
+                                        for row in 0..2 {
+                                            for _ in 0..3 {
+                                                ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                                            }
+                                            if row == 0 {
+                                                ui.end_row();
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .rect
+                            });
+                        });
+                    });
+                });
+            });
+            out.textures_delta.clear();
+        }
+        got
+    }
+
+    #[test]
+    fn a_start_block_keeps_a_grid_beside_its_caption_in_arabic_and_is_the_plain_grid_in_english() {
+        let (panel, caption, grid) = run_block(true);
+        assert!(grid.min.is_finite() && grid.max.is_finite(), "{grid:?}");
+        assert!(grid.width() > 60.0, "the grid keeps its natural width: {grid:?}");
+        assert!(grid.right() <= caption.left(), "the grid {grid:?} is left of its caption {caption:?}");
+        assert!(caption.right() <= panel.right() + 0.5, "inside the form: {caption:?} {panel:?}");
+        assert!(caption.left() - grid.right() < 40.0, "and next to it, not at the far left: {grid:?} {caption:?}");
+        let (panel, caption, grid) = run_block(false);
+        assert!(caption.right() <= grid.left() && (grid.left() - caption.right()) < 40.0, "{caption:?} {grid:?}");
+        assert!(grid.left() >= panel.left());
     }
 
     /// A short caption's closing colon moves to the visual left of the caption (the side of the

@@ -6,7 +6,7 @@ use egui::{Align, Color32, Layout};
 use pdfcraft_engine::DocId;
 use pdfcraft_engine::compare::{Comparison, Kind};
 
-use crate::theme::{self, Tokens};
+use crate::theme::Tokens;
 use crate::{PdfCraftApp, RightPanel, widgets};
 
 /// The last comparison.
@@ -45,7 +45,7 @@ pub fn colour(kind: Kind) -> Color32 {
 
 /// The Compare Files dialog: pick the older document. Returns (compare, cancel).
 pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (bool, bool) {
-    ui.label(egui::RichText::new(tl!("Compare Files")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Compare Files"));
     ui.add_space(8.0);
     let Some((_, new)) = app.active_ids() else { return (false, true) };
     let others: Vec<(DocId, String)> =
@@ -54,21 +54,19 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         app.compare_old = others.first().map(|(id, _)| *id);
     }
     let new_name = app.session.get(new).map(|d| d.name.clone()).unwrap_or_default();
-    egui::Grid::new("compare-files").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-        ui.label(tl!("Old file:"));
-        let shown = others
-            .iter()
-            .find(|(id, _)| Some(*id) == app.compare_old)
-            .map_or(tl!("Open the older version first").to_string(), |(_, n)| crate::bidi::visual(n).into_owned());
-        egui::ComboBox::from_id_salt("compare-old").selected_text(shown).width(320.0).show_ui(ui, |ui| {
-            for (id, n) in &others {
-                ui.selectable_value(&mut app.compare_old, Some(*id), crate::bidi::visual(n).into_owned());
-            }
+    widgets::form_grid(ui, "compare-files", [12.0, 10.0], None, |rows| {
+        rows.row(tl!("Old file:"), |ui, _| {
+            let shown = others
+                .iter()
+                .find(|(id, _)| Some(*id) == app.compare_old)
+                .map_or(tl!("Open the older version first").to_string(), |(_, n)| crate::bidi::visual(n).into_owned());
+            egui::ComboBox::from_id_salt("compare-old").selected_text(shown).width(320.0).show_ui(ui, |ui| {
+                for (id, n) in &others {
+                    ui.selectable_value(&mut app.compare_old, Some(*id), crate::bidi::visual(n).into_owned());
+                }
+            });
         });
-        ui.end_row();
-        ui.label(tl!("New file:"));
-        ui.label(egui::RichText::new(crate::bidi::visual(&new_name)).strong());
-        ui.end_row();
+        rows.row(tl!("New file:"), |ui, _| _ = ui.label(egui::RichText::new(crate::bidi::visual(&new_name)).strong()));
     });
     ui.add_space(4.0);
     widgets::small_text(ui, &tl_logical!("Text is compared word by word; the differences are shown on the new file."), t.text_muted);

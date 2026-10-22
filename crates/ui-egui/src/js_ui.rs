@@ -161,7 +161,7 @@ fn buttons(ui: &mut egui::Ui, primary: &str, others: &[&str]) -> Option<String> 
 
 /// The JavaScript console. Returns `true` to close.
 pub(crate) fn console_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
-    ui.label(egui::RichText::new(tl!("JavaScript Console")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("JavaScript Console"));
     ui.add_space(6.0);
     if !app.session.javascript() {
         ui.label(egui::RichText::new(tl!("JavaScript is turned off (Preferences ▸ JavaScript).")).small().color(t.text_muted));
@@ -202,7 +202,7 @@ pub(crate) fn console_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens)
 
 /// Document JavaScripts: list, edit, add and delete. Returns `true` to close.
 pub(crate) fn document_js_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
-    ui.label(egui::RichText::new(tl!("Document JavaScripts")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Document JavaScripts"));
     ui.add_space(6.0);
     let scripts = app.active_ids().and_then(|(_, id)| app.session.get(id)).map(|d| d.document_scripts()).unwrap_or_default();
     let mut edit: Option<Edit> = None;
@@ -262,7 +262,7 @@ fn reading_mode_label(mode: &str) -> &'static str {
 
 /// Preferences: interface language and size, appearance, identity and JavaScript. Returns `true` to close.
 pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
-    ui.label(egui::RichText::new(tl!("Preferences")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Preferences"));
     ui.horizontal(|ui| {
         ui.label(tl!("Interface language"));
         let selected = crate::i18n::Lang::from_code(&app.language).map_or(tl!("Auto"), crate::i18n::Lang::name);

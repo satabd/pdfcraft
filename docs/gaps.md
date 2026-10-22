@@ -300,9 +300,12 @@ update the numbers.
   rail at the left, mode bar, tab strip, rows and dialog footers from the right, directional icons
   flipped, fields aligned to the script typed (`rtl` module; the stock arrangement only, a
   rearranged layout is kept).
-- **Missing:** the rest of the right-to-left layout (menus and submenus, dialog bodies and
-  `egui::Grid` columns, the Comments, Signatures and Compare panels, the order of document tabs,
-  the canvas), bidirectional text in the text layout itself (text being typed); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+- **Done (2026-10-22, later):** every caption-and-field dialog form is a `widgets::form_grid`, every menu and
+  context menu has its label at the start and its shortcut at the end, dialog titles and tab strips start at
+  the right, and truncated tool rows and the search box cut in logical order.
+- **Missing:** the rest of the right-to-left layout (the side a submenu opens on, scrollbars, the dock's
+  tab bars, the data tables that stay `egui::Grid`s, the Comments, Signatures and Compare panel bodies, the
+  order of document tabs, the canvas), bidirectional text in the text layout itself (text being typed); catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
   Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
   like other non-English languages (no translated help; engine/OS details stay English).
@@ -390,6 +393,7 @@ update the numbers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Gap 14: every dialog caption-and-field form, every menu and context menu, dialog titles and tab strips are mirrored for Arabic, and truncated labels cut in logical order; submenu side, scrollbars, dock tab bars, tab order, the canvas and the data tables stay left to right. Estimates unchanged |
 | 2026-10-22 | minor | Gap 14: the Arabic interface mirrors its frame (Tools at the right, navigation panes and rail at the left, mode bar, tab strip, rows and dialog footers from the right, directional icons flipped, fields aligned to the script typed); menus, dialog bodies and grids, some panels, the tab order and the canvas are not mirrored. Estimates unchanged |
 | 2026-10-21 | minor | Gap 14: Arabic interface text that wraps goes through logical-order lookups; document text across the panels is painted in display order; Find folds harakat, presentation forms and digits. Gap 3: Edit text shapes Arabic replacement text (`edit.rtl-cjk-editing` notes). Estimates unchanged |
 | 2026-10-15 | minor | Gap 12: the text oracle scores reading order as well as word F1, which is a bag of words and cannot see order; the first measurement separated 18 improvements from 6 regressions in a change F1 called unchanged on 26 of 29 files. Estimates unchanged. |

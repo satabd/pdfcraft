@@ -861,62 +861,62 @@ fn image_menu(
         (tl!("Flip Vertical"), Some(E::Flip { horizontal: false })),
     ];
     for (label, change) in items {
-        if ui.button(label).clicked() {
+        if crate::widgets::menu_entry(ui, true, label, None).clicked() {
             view.pending_edit = change.map(|c| Edit::EditPageImage { page, index: hit, change: c });
             ui.close();
         }
     }
     // Crop: the handles trim instead of resizing until Done.
-    if ui.button(tl!("Crop Image")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Crop Image"), None).clicked() {
         if let (Some(s), Some(im)) = (view.image_selection.as_mut(), images.get(hit)) {
             s.crop = Some(CropMode::new(im.visible_rect.unwrap_or(im.rect)));
         }
         ui.close();
     }
     let cropped = images.get(hit).is_some_and(|im| im.visible_rect.is_some_and(|v| v.iter().zip(im.rect.iter()).any(|(a, b)| (a - b).abs() > 0.01)));
-    if ui.add_enabled(cropped, egui::Button::new(tl!("Remove Crop"))).clicked() {
+    if crate::widgets::menu_entry(ui, cropped, tl!("Remove Crop"), None).clicked() {
         if let Some(im) = images.get(hit) {
             view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Crop(im.rect) });
         }
         ui.close();
     }
     let raster = images.get(hit).is_some_and(|image| !image.is_form);
-    if ui.add_enabled(raster, egui::Button::new(tl!("Replace Image…"))).clicked() {
+    if crate::widgets::menu_entry(ui, raster, tl!("Replace Image…"), None).clicked() {
         *action = Some(ImageAction::Replace(page, hit));
         ui.close();
     }
-    if ui.add_enabled(raster, egui::Button::new(tl!("Save Image As…"))).clicked() {
+    if crate::widgets::menu_entry(ui, raster, tl!("Save Image As…"), None).clicked() {
         *action = Some(ImageAction::Save(page, hit));
         ui.close();
     }
     // Cutting and copying also find the picture inside grouped Form artwork.
-    if ui.button(tl!("Cut Image")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Cut Image"), None).clicked() {
         *action = Some(ImageAction::Cut(page, hit));
         ui.close();
     }
-    if ui.button(tl!("Copy Image")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Copy Image"), None).clicked() {
         *action = Some(ImageAction::Copy(page, hit));
         ui.close();
     }
-    if ui.button(tl!("Copy Image in Original Format")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Copy Image in Original Format"), None).clicked() {
         *action = Some(ImageAction::CopyFile(page, hit));
         ui.close();
     }
     ui.separator();
-    if ui.button(tl!("Redact Image")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Redact Image"), None).clicked() {
         *action = Some(ImageAction::Redact(page, hit));
         ui.close();
     }
-    if ui.button(tl!("Create Link…")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Create Link…"), None).clicked() {
         *action = Some(ImageAction::Link(page, hit));
         ui.close();
     }
-    if ui.button(tl!("Recognize Text…")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Recognize Text…"), None).clicked() {
         *action = Some(ImageAction::Recognize(page));
         ui.close();
     }
     ui.separator();
-    if ui.button(tl!("Delete")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Delete"), None).clicked() {
         view.image_selection = None;
         view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Delete });
         ui.close();

@@ -11,14 +11,18 @@
 //!
 //! Every helper is the identity when [`mirrored`] is false, so the English layout cannot change.
 //! The captions of a dialog form sit at the right of their fields ([`crate::widgets::form_grid`]
-//! builds the rows by hand, because `egui::Grid` cannot sit against a right edge), and the
-//! entries of the main menu put their label at the right and their shortcut at the left
-//! ([`crate::widgets::menu_entry`]).
+//! builds the rows by hand, because `egui::Grid` cannot sit against a right edge; a grid of swatches
+//! inside a field goes through [`crate::widgets::start_block`]), the entries of a menu or a context
+//! menu put their label at the right and their shortcut at the left ([`crate::widgets::menu_entry`],
+//! `menu_icon_entry`, `menu_choice`), a dialog title and a strip of tabs start at the right
+//! ([`crate::widgets::dialog_title`], [`horizontal_wrapped`]), and a label that does not fit its row
+//! is cut in logical order, so its "…" lands at the left of Arabic ([`crate::widgets::paint_start`]).
 //!
 //! What stays physical: the window controls, scrollbars, the document canvas and its overlays,
 //! the side a submenu opens on, the order of the document tabs, and the explicit "Tools panel
-//! side" preference. What is not mirrored yet: the other `egui::Grid` users (panels, tool pages,
-//! the Preferences and signing dialogs) and context menus built from plain `ui.button`s.
+//! side" preference. What is not mirrored yet: the data tables that stay `egui::Grid`s (the header
+//! and footer boxes, the bulk field properties, the contributor and model tables, the calendar and
+//! the swatch grid itself), the dock's own tab bars, and the painted lists of the Combine page.
 
 use egui::{Align, Align2, InnerResponse, Layout, Margin, Pos2, Rect, Ui, UiBuilder, Vec2, pos2, vec2};
 
@@ -100,6 +104,18 @@ pub fn horizontal<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> In
         ui.allocate_ui_with_layout(vec2(width, ui.spacing().interact_size.y), start_layout(Align::Center), add_contents)
     } else {
         ui.horizontal(add_contents)
+    }
+}
+
+/// `ui.horizontal_wrapped`, with the first item at the start edge and a wrapped line starting
+/// there too (a strip of tabs). Like [`horizontal`], an ordinary wrapping row where the width is
+/// unbounded.
+pub fn horizontal_wrapped<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let width = ui.available_size_before_wrap().x;
+    if mirrored() && width.is_finite() {
+        ui.allocate_ui_with_layout(vec2(width, ui.spacing().interact_size.y), start_layout(Align::Center).with_main_wrap(true), add_contents)
+    } else {
+        ui.horizontal_wrapped(add_contents)
     }
 }
 

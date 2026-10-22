@@ -91,14 +91,18 @@ fn all_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
 /// Draw a one-line row label without painting into the status chip or beyond the sidebar.
 /// `start_center` is the middle of the label's start edge: its left edge in English, its right
 /// edge when mirrored. Accessibility retains the complete name through the row's WidgetInfo.
-fn row_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32, start_center: egui::Pos2, max_width: f32) -> bool {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = egui::text::TextWrapping { max_width: max_width.max(1.0), max_rows: 1, break_anywhere: true, ..Default::default() };
-    let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let elided = galley.elided;
-    let rect = rtl::flip(Align2::LEFT_CENTER).anchor_size(start_center, galley.size());
-    ui.painter().galley(rect.min, galley, color);
-    elided
+///
+/// The text is cut in logical order ([`widgets::paint_start`]), so the ellipsis lands where the
+/// reader stops reading: at the left of an Arabic sentence, not at its beginning. True when cut.
+fn row_label(
+    ui: &mut egui::Ui,
+    text: &crate::i18n::Logical<'_>,
+    font: egui::FontId,
+    color: Color32,
+    start_center: egui::Pos2,
+    max_width: f32,
+) -> bool {
+    widgets::paint_start(ui, start_center, text, font, color, max_width.max(1.0))
 }
 
 fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
@@ -116,7 +120,8 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
         }
         _ => 8.0,
     };
-    let clipped = row_label(ui, tl!(g.label), theme::regular(13.5), t.text, rtl::start_center(body, 36.0), rect.width() - 36.0 - right_reserved);
+    let clipped =
+        row_label(ui, &tl_logical!(g.label), theme::regular(13.5), t.text, rtl::start_center(body, 36.0), rect.width() - 36.0 - right_reserved);
     match (g.badge, g.availability) {
         (Some(b), _) => {
             let font = theme::semibold(9.5);
@@ -236,7 +241,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
                 let r = Rect::from_center_size(rtl::end_center(body, w / 2.0 + 10.0), vec2(w + 10.0, 16.0));
                 // The label's room runs from its start to the chip, minus the icon column and a gap.
                 let room = body.width() - w - 15.0 - 42.0;
-                row_label(ui, tl!(item.label), theme::regular(13.0), fg, rtl::start_center(body, 34.0), room);
+                row_label(ui, &tl_logical!(item.label), theme::regular(13.0), fg, rtl::start_center(body, 34.0), room);
                 ui.painter().rect_filled(r, CornerRadius::same(4), fill);
                 ui.painter().text(r.center(), Align2::CENTER_CENTER, chip_label, font, cfg);
                 let resp = theme::hand(resp).on_hover_text(format!("{} — {}", tl!(item.label), item.command));
@@ -259,7 +264,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
                             // Add stays usable with no document open: it asks for a file first.
                             let enabled = (n == 0 && app.active.is_none()) || app.command_enabled(spec);
                             let label = crate::i18n::menu_label(spec.id, spec.label);
-                            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                            if widgets::menu_entry(ui, enabled, &label, None).clicked() {
                                 run = Some(spec.id);
                                 ui.close();
                             }
@@ -595,7 +600,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             let more = icons::button(ui, "ellipsis", 26.0, false, tl!("Bookmark options"));
                             egui::Popup::menu(&more).show(|ui| {
                                 ui.set_min_width(200.0);
-                                if bm_editable && ui.button(tl!("New bookmarks from structure")).clicked() {
+                                if bm_editable && widgets::menu_entry(ui, true, tl!("New bookmarks from structure"), None).clicked() {
                                     bm_action = Some(BmAction::FromStructure);
                                     ui.close();
                                 }
@@ -605,7 +610,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                         (1, tl!("Expand top-level bookmarks")),
                                         (0, tl!("Collapse all bookmarks")),
                                     ] {
-                                        if ui.button(label).clicked() {
+                                        if widgets::menu_entry(ui, true, label, None).clicked() {
                                             bm_expand = Some(levels);
                                             ui.close();
                                         }
@@ -1078,7 +1083,7 @@ fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineIte
             let current = cx.current;
             resp.context_menu(|ui| {
                 let mut pick = |ui: &mut egui::Ui, label: &str, enabled: bool, a: BmAction| {
-                    if ui.add_enabled(enabled, egui::Button::new(tl!(label))).clicked() {
+                    if widgets::menu_entry(ui, enabled, tl!(label), None).clicked() {
                         *cx.action = Some(a);
                         ui.close();
                     }
@@ -1202,31 +1207,31 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut crate::DocVie
                 if !view.target_pages().contains(&i) {
                     view.click_page(i, egui::Modifiers::NONE, true);
                 }
-                if ui.button(tl!("Extract pages")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Extract pages"), None).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::Extract);
                     ui.close();
                 }
-                if ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
+                if widgets::menu_entry(ui, editable, tl!("Replace pages…"), None).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::ReplacePages);
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(editable, egui::Button::new(tl!("Cut"))).clicked() {
+                if widgets::menu_entry(ui, editable, tl!("Cut"), None).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::CopyPages { cut: true });
                     ui.close();
                 }
-                if ui.button(tl!("Copy")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Copy"), None).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::CopyPages { cut: false });
                     ui.close();
                 }
-                if ui.add_enabled(editable, egui::Button::new(tl!("Paste after"))).clicked() {
+                if widgets::menu_entry(ui, editable, tl!("Paste after"), None).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::PastePages);
                     ui.close();
                 }
                 ui.separator();
                 let some_left = view.target_pages().len() < count;
                 // Never every page: a document keeps at least one.
-                if ui.add_enabled(editable && some_left, egui::Button::new(tl!("Delete pages"))).clicked() {
+                if widgets::menu_entry(ui, editable && some_left, tl!("Delete pages"), None).clicked() {
                     delete_pages(view, count);
                     ui.close();
                 }
@@ -1726,5 +1731,42 @@ mod bookmark_filter {
         // A child match keeps its parent: [0] and [0, 0].
         assert_eq!(outline_matches(&outline, &fold("KIŞ")).len(), 2);
         assert!(outline_matches(&outline, &fold("izmir")).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod row_label_cut {
+    use super::*;
+    use crate::i18n::{Lang, Logical, set_current};
+
+    /// What `row_label` paints for `text` in a room of `max_width`, and whether it cut it.
+    fn painted(text: &str, max_width: f32) -> (String, bool) {
+        let ctx = egui::Context::default();
+        ctx.set_os(egui::os::OperatingSystem::Nix);
+        ctx.set_fonts(theme::font_definitions());
+        let mut cut = false;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cut = row_label(ui, &Logical::from(text), theme::regular(13.0), Color32::WHITE, egui::pos2(250.0, 20.0), max_width);
+        });
+        let line = output
+            .shapes
+            .iter()
+            .find_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.job.text.clone()) } else { None })
+            .unwrap_or_default();
+        output.drop_without_applying_deltas();
+        (line, cut)
+    }
+
+    /// A tool name too long for its row loses its end, not its beginning: the "…" ends English
+    /// text and sits at the left of an Arabic sentence, whose first word stays at the right.
+    #[test]
+    fn a_long_row_label_loses_the_end_of_the_sentence() {
+        let (english, cut) = painted("Compare two versions of a document", 100.0);
+        assert!(cut && english.starts_with("Compare") && english.ends_with('\u{2026}'), "{english:?}");
+        set_current(Lang::from_code("ar").expect("ar registered"));
+        let (arabic, cut) = painted("قارن بين نسختين من المستند نفسه", 100.0);
+        set_current(Lang::EN);
+        assert!(cut && arabic.starts_with('\u{2026}'), "{arabic:?}");
+        assert!(arabic.contains(crate::bidi::display_rtl("قارن").as_str()), "the first word survives: {arabic:?}");
     }
 }

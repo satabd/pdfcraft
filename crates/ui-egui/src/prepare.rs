@@ -12,6 +12,7 @@ use pdfcraft_render::DocInfo;
 
 use crate::canvas::{DocView, PageXform};
 use crate::comments;
+use crate::rtl;
 use crate::theme;
 use crate::widgets;
 
@@ -927,6 +928,11 @@ fn flag_box(ui: &mut egui::Ui, flags: &mut u32, bit: u32, inverted: bool, label:
 /// Shared PDF `/Q` picker for text and choice-field Options.
 fn alignment(ui: &mut egui::Ui, quadding: &mut i64) {
     ui.label(tl!("Alignment:"));
+    alignment_combo(ui, quadding);
+}
+
+/// The choice of [`alignment`], for a row that has its own caption.
+fn alignment_combo(ui: &mut egui::Ui, quadding: &mut i64) {
     egui::ComboBox::from_id_salt("quadding")
         .selected_text(tl!(match (*quadding).clamp(0, 2) {
             1 => "Center",
@@ -944,9 +950,9 @@ fn alignment(ui: &mut egui::Ui, quadding: &mut i64) {
 pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Tokens) -> (bool, bool) {
     use crate::widgets;
     ui.set_width(600.0);
-    ui.label(egui::RichText::new(tl!(d.title())).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!(d.title()));
     ui.add_space(6.0);
-    ui.horizontal_wrapped(|ui| {
+    rtl::horizontal_wrapped(ui, |ui| {
         for (tab, label) in d.tabs() {
             if widgets::mode_tab(ui, tl!(label), d.tab == tab).clicked() {
                 d.tab = tab;
@@ -967,14 +973,14 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
         }
         match d.tab {
             FieldTab::General => {
-                egui::Grid::new("field-general").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                    let l = ui.label(tl!("Name:"));
-                    let r = ui.add(crate::widgets::line(&mut d.name).desired_width(340.0)).labelled_by(l.id);
-                    enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    ui.end_row();
-                    let l = ui.label(tl!("Tooltip:"));
-                    ui.add(crate::widgets::line(&mut d.tooltip).desired_width(340.0)).labelled_by(l.id);
-                    ui.end_row();
+                widgets::form_grid(ui, "field-general", [12.0, 10.0], None, |rows| {
+                    rows.row(tl!("Name:"), |ui, l| {
+                        let r = ui.add(crate::widgets::line(&mut d.name).desired_width(340.0)).labelled_by(l.id);
+                        enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    });
+                    rows.row(tl!("Tooltip:"), |ui, l| {
+                        ui.add(crate::widgets::line(&mut d.tooltip).desired_width(340.0)).labelled_by(l.id);
+                    });
                 });
                 ui.add_space(12.0);
                 widgets::section_title(ui, tl!("Common Properties"));
@@ -982,52 +988,51 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                 ui.add(widgets::checkbox(&mut d.required, tl!("Required")));
             }
             FieldTab::Appearance => {
-                egui::Grid::new("field-appearance").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                    ui.label(tl!("Font Size:"));
-                    let mut auto = d.font_size == 0.0;
-                    ui.horizontal(|ui| {
-                        if ui.add(widgets::checkbox(&mut auto, tl!("Auto"))).changed() {
-                            d.font_size = if auto { 0.0 } else { 12.0 };
-                        }
-                        ui.add_enabled(!auto, egui::DragValue::new(&mut d.font_size).range(2.0..=100.0).speed(0.25).suffix(" pt"));
+                widgets::form_grid(ui, "field-appearance", [12.0, 10.0], None, |rows| {
+                    rows.row(tl!("Font Size:"), |ui, _| {
+                        let mut auto = d.font_size == 0.0;
+                        rtl::horizontal(ui, |ui| {
+                            if ui.add(widgets::checkbox(&mut auto, tl!("Auto"))).changed() {
+                                d.font_size = if auto { 0.0 } else { 12.0 };
+                            }
+                            ui.add_enabled(!auto, egui::DragValue::new(&mut d.font_size).range(2.0..=100.0).speed(0.25).suffix(" pt"));
+                        });
                     });
-                    ui.end_row();
                     if let Some(l) = d.look.as_mut() {
-                        ui.label(tl!("Font:"));
-                        egui::ComboBox::from_id_salt("field-font").selected_text(l.font.label()).show_ui(ui, |ui| {
-                            for f in FieldFont::ALL {
-                                ui.selectable_value(&mut l.font, f, f.label());
+                        rows.row(tl!("Font:"), |ui, _| {
+                            egui::ComboBox::from_id_salt("field-font").selected_text(l.font.label()).show_ui(ui, |ui| {
+                                for f in FieldFont::ALL {
+                                    ui.selectable_value(&mut l.font, f, f.label());
+                                }
+                            });
+                        });
+                        rows.row(tl!("Text Color:"), |ui, _| {
+                            if let Some(c) = widgets::start_block(ui, |ui| crate::comments::swatch_grid(ui, Some(l.text))) {
+                                l.text = c;
                             }
                         });
-                        ui.end_row();
-                        ui.label(tl!("Text Color:"));
-                        if let Some(c) = crate::comments::swatch_grid(ui, Some(l.text)) {
-                            l.text = c;
-                        }
-                        ui.end_row();
                     }
                 });
                 if let Some(l) = d.look.as_mut() {
                     widgets::section_title(ui, tl!("Borders and Colors"));
-                    egui::Grid::new("field-borders").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    widgets::form_grid(ui, "field-borders", [12.0, 8.0], None, |rows| {
                         for (index, (label, slot)) in
                             [(tl!("Border Color:"), &mut l.border), (tl!("Fill Color:"), &mut l.fill)].into_iter().enumerate()
                         {
-                            ui.label(label);
-                            ui.push_id(("field-color", index), |ui| {
-                                ui.horizontal(|ui| {
-                                    let mut none = slot.is_none();
-                                    if ui.add(widgets::checkbox(&mut none, tl!("No color"))).changed() {
-                                        *slot = if none { None } else { Some([0.0; 3]) };
-                                    }
-                                    if let Some(c) = crate::comments::swatch_grid(ui, *slot) {
-                                        *slot = Some(c);
-                                    }
+                            rows.row(label, |ui, _| {
+                                ui.push_id(("field-color", index), |ui| {
+                                    rtl::horizontal(ui, |ui| {
+                                        let mut none = slot.is_none();
+                                        if ui.add(widgets::checkbox(&mut none, tl!("No color"))).changed() {
+                                            *slot = if none { None } else { Some([0.0; 3]) };
+                                        }
+                                        if let Some(c) = widgets::start_block(ui, |ui| crate::comments::swatch_grid(ui, *slot)) {
+                                            *slot = Some(c);
+                                        }
+                                    });
                                 });
                             });
-                            ui.end_row();
                         }
-                        ui.label(tl!("Line Thickness:"));
                         let thick = |w: f64| {
                             if w <= 1.0 {
                                 tl!("Thin")
@@ -1037,33 +1042,62 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                                 tl!("Thick")
                             }
                         };
-                        egui::ComboBox::from_id_salt("field-width").selected_text(thick(l.width)).show_ui(ui, |ui| {
-                            for (w, label) in [(1.0, tl!("Thin")), (2.0, tl!("Medium")), (3.0, tl!("Thick"))] {
-                                ui.selectable_value(&mut l.width, w, label);
-                            }
+                        rows.row(tl!("Line Thickness:"), |ui, _| {
+                            egui::ComboBox::from_id_salt("field-width").selected_text(thick(l.width)).show_ui(ui, |ui| {
+                                for (w, label) in [(1.0, tl!("Thin")), (2.0, tl!("Medium")), (3.0, tl!("Thick"))] {
+                                    ui.selectable_value(&mut l.width, w, label);
+                                }
+                            });
                         });
-                        ui.end_row();
-                        ui.label(tl!("Line Style:"));
-                        egui::ComboBox::from_id_salt("field-style").selected_text(tl!(l.style.label())).show_ui(ui, |ui| {
-                            for s in BorderStyle::ALL {
-                                ui.selectable_value(&mut l.style, s, tl!(s.label()));
-                            }
+                        rows.row(tl!("Line Style:"), |ui, _| {
+                            egui::ComboBox::from_id_salt("field-style").selected_text(tl!(l.style.label())).show_ui(ui, |ui| {
+                                for s in BorderStyle::ALL {
+                                    ui.selectable_value(&mut l.style, s, tl!(s.label()));
+                                }
+                            });
                         });
-                        ui.end_row();
                     });
                 }
             }
             FieldTab::Position => {
-                egui::Grid::new("field-position").num_columns(4).spacing([12.0, 10.0]).show(ui, |ui| {
-                    for (i, label) in [tl!("Left:"), tl!("Bottom:"), tl!("Width:"), tl!("Height:")].into_iter().enumerate() {
-                        ui.label(label);
-                        let range = if i < 2 { -14_400.0..=14_400.0 } else { 4.0..=14_400.0 };
-                        ui.add(egui::DragValue::new(&mut d.position[i]).range(range).speed(0.5).suffix(" pt"));
-                        if i % 2 == 1 {
-                            ui.end_row();
+                // Two columns of caption and value, side by side: Left and Width, Bottom and Height.
+                let pos = &mut d.position;
+                let columns = |ui: &mut egui::Ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    // A mirrored form fills the width it is given: each column gets half.
+                    let half = rtl::mirrored().then(|| ((ui.available_width() - 12.0) / 2.0).max(0.0));
+                    let captions = [tl!("Left:"), tl!("Bottom:"), tl!("Width:"), tl!("Height:")];
+                    for column in 0..2_usize {
+                        let mut column_form = |ui: &mut egui::Ui| {
+                            widgets::form_grid(ui, ("field-position", column), [12.0, 10.0], None, |rows| {
+                                for i in [column, column + 2] {
+                                    rows.row(captions.get(i).copied().unwrap_or_default(), |ui, _| {
+                                        let range = if i < 2 { -14_400.0..=14_400.0 } else { 4.0..=14_400.0 };
+                                        if let Some(value) = pos.get_mut(i) {
+                                            ui.add(egui::DragValue::new(value).range(range).speed(0.5).suffix(" pt"));
+                                        }
+                                    });
+                                }
+                            });
+                        };
+                        match half {
+                            Some(width) => {
+                                ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    ui.set_width(width);
+                                    column_form(ui);
+                                });
+                            }
+                            None => column_form(ui),
                         }
                     }
-                });
+                };
+                // Both columns start at the top of the row, like the rows of one grid.
+                let layout = if rtl::mirrored() && ui.available_width().is_finite() {
+                    rtl::start_layout(egui::Align::Min)
+                } else {
+                    egui::Layout::left_to_right(egui::Align::Min)
+                };
+                ui.with_layout(layout, columns);
                 ui.label(egui::RichText::new(tl!("Points from the page's bottom-left corner.")).small().color(t.text_faint));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1098,12 +1132,11 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                 }
                 FormFieldKind::Text => {
                     use pdfcraft_engine::field_flags as ff;
-                    egui::Grid::new("text-options").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                        alignment(ui, &mut d.quadding);
-                        ui.end_row();
-                        let l = ui.label(tl!("Default Value:"));
-                        ui.add(crate::widgets::line(&mut d.default).desired_width(260.0)).labelled_by(l.id);
-                        ui.end_row();
+                    widgets::form_grid(ui, "text-options", [12.0, 8.0], None, |rows| {
+                        rows.row(tl!("Alignment:"), |ui, _| alignment_combo(ui, &mut d.quadding));
+                        rows.row(tl!("Default Value:"), |ui, l| {
+                            ui.add(crate::widgets::line(&mut d.default).desired_width(260.0)).labelled_by(l.id);
+                        });
                     });
                     ui.add_space(6.0);
                     ui.add(widgets::checkbox(&mut d.multiline, tl!("Multi-line")));
@@ -1318,51 +1351,47 @@ fn format_tab(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Tokens) {
             ui.label(egui::RichText::new(tl!("The value is shown as typed.")).color(t.text_muted));
         }
         Format::Number { decimals, sep, neg, currency, prepend } => {
-            egui::Grid::new("fmt-number").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label(tl!("Decimal places:"));
-                ui.add(egui::DragValue::new(decimals).range(0..=10));
-                ui.end_row();
-                ui.label(tl!("Separator style:"));
-                egui::ComboBox::from_id_salt("fmt-sep").selected_text(SEPARATORS[(*sep).min(4) as usize]).show_ui(ui, |ui| {
-                    for (i, s) in SEPARATORS.iter().enumerate() {
-                        ui.selectable_value(sep, i as u8, *s);
-                    }
+            widgets::form_grid(ui, "fmt-number", [12.0, 8.0], None, |rows| {
+                rows.row(tl!("Decimal places:"), |ui, _| _ = ui.add(egui::DragValue::new(decimals).range(0..=10)));
+                rows.row(tl!("Separator style:"), |ui, _| {
+                    egui::ComboBox::from_id_salt("fmt-sep").selected_text(SEPARATORS[(*sep).min(4) as usize]).show_ui(ui, |ui| {
+                        for (i, s) in SEPARATORS.iter().enumerate() {
+                            ui.selectable_value(sep, i as u8, *s);
+                        }
+                    });
                 });
-                ui.end_row();
-                ui.label(tl!("Currency symbol:"));
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("fmt-cur")
-                        .selected_text(if currency.is_empty() { tl!("None") } else { currency.as_str() })
-                        .width(70.0)
-                        .show_ui(ui, |ui| {
-                            for c in ["", "$", "€", "£", "¥", "CHF "] {
-                                ui.selectable_value(currency, c.to_string(), if c.is_empty() { tl!("None") } else { c });
-                            }
-                        });
-                    ui.add(widgets::checkbox(prepend, tl!("Before the number")));
+                rows.row(tl!("Currency symbol:"), |ui, _| {
+                    rtl::horizontal(ui, |ui| {
+                        egui::ComboBox::from_id_salt("fmt-cur")
+                            .selected_text(if currency.is_empty() { tl!("None") } else { currency.as_str() })
+                            .width(70.0)
+                            .show_ui(ui, |ui| {
+                                for c in ["", "$", "€", "£", "¥", "CHF "] {
+                                    ui.selectable_value(currency, c.to_string(), if c.is_empty() { tl!("None") } else { c });
+                                }
+                            });
+                        ui.add(widgets::checkbox(prepend, tl!("Before the number")));
+                    });
                 });
-                ui.end_row();
-                ui.label(tl!("Negative number style:"));
-                egui::ComboBox::from_id_salt("fmt-neg").selected_text(NEGATIVES[(*neg).min(3) as usize]).show_ui(ui, |ui| {
-                    for (i, s) in NEGATIVES.iter().enumerate() {
-                        ui.selectable_value(neg, i as u8, *s);
-                    }
+                rows.row(tl!("Negative number style:"), |ui, _| {
+                    egui::ComboBox::from_id_salt("fmt-neg").selected_text(NEGATIVES[(*neg).min(3) as usize]).show_ui(ui, |ui| {
+                        for (i, s) in NEGATIVES.iter().enumerate() {
+                            ui.selectable_value(neg, i as u8, *s);
+                        }
+                    });
                 });
-                ui.end_row();
             });
         }
         Format::Percent { decimals, sep } => {
-            egui::Grid::new("fmt-pct").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label(tl!("Decimal places:"));
-                ui.add(egui::DragValue::new(decimals).range(0..=10));
-                ui.end_row();
-                ui.label(tl!("Separator style:"));
-                egui::ComboBox::from_id_salt("fmt-psep").selected_text(SEPARATORS[(*sep).min(4) as usize]).show_ui(ui, |ui| {
-                    for (i, s) in SEPARATORS.iter().enumerate() {
-                        ui.selectable_value(sep, i as u8, *s);
-                    }
+            widgets::form_grid(ui, "fmt-pct", [12.0, 8.0], None, |rows| {
+                rows.row(tl!("Decimal places:"), |ui, _| _ = ui.add(egui::DragValue::new(decimals).range(0..=10)));
+                rows.row(tl!("Separator style:"), |ui, _| {
+                    egui::ComboBox::from_id_salt("fmt-psep").selected_text(SEPARATORS[(*sep).min(4) as usize]).show_ui(ui, |ui| {
+                        for (i, s) in SEPARATORS.iter().enumerate() {
+                            ui.selectable_value(sep, i as u8, *s);
+                        }
+                    });
                 });
-                ui.end_row();
             });
         }
         Format::Date(p) | Format::Time(p) => {
@@ -1451,21 +1480,21 @@ fn actions_tab(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Tokens) 
     use pdfcraft_engine::FieldTrigger as T;
     ui.label(egui::RichText::new(tl!("Add an Action")).font(theme::semibold(13.0)));
     let a = &mut d.new_action;
-    egui::Grid::new("field-actions-add").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-        ui.label(tl!("Select Trigger:"));
-        egui::ComboBox::from_id_salt("action-trigger").selected_text(tl!(a.trigger.label())).width(220.0).show_ui(ui, |ui| {
-            for tr in T::ALL {
-                ui.selectable_value(&mut a.trigger, tr, tl!(tr.label()));
-            }
+    widgets::form_grid(ui, "field-actions-add", [12.0, 8.0], None, |rows| {
+        rows.row(tl!("Select Trigger:"), |ui, _| {
+            egui::ComboBox::from_id_salt("action-trigger").selected_text(tl!(a.trigger.label())).width(220.0).show_ui(ui, |ui| {
+                for tr in T::ALL {
+                    ui.selectable_value(&mut a.trigger, tr, tl!(tr.label()));
+                }
+            });
         });
-        ui.end_row();
-        ui.label(tl!("Select Action:"));
-        egui::ComboBox::from_id_salt("action-kind").selected_text(tl!(ACTION_KINDS[a.kind])).width(220.0).show_ui(ui, |ui| {
-            for (i, k) in ACTION_KINDS.iter().enumerate() {
-                ui.selectable_value(&mut a.kind, i, tl!(k));
-            }
+        rows.row(tl!("Select Action:"), |ui, _| {
+            egui::ComboBox::from_id_salt("action-kind").selected_text(tl!(ACTION_KINDS[a.kind])).width(220.0).show_ui(ui, |ui| {
+                for (i, k) in ACTION_KINDS.iter().enumerate() {
+                    ui.selectable_value(&mut a.kind, i, tl!(k));
+                }
+            });
         });
-        ui.end_row();
         let hint = match a.kind {
             0 => "JavaScript",
             1 => "https://…",
@@ -1475,13 +1504,13 @@ fn actions_tab(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Tokens) 
             5 | 6 => tl!("Field names (comma-separated)"),
             _ => tl!("URL to submit to"),
         };
-        ui.label(if a.kind == 0 { tl!("Script:") } else { tl!("Value:") });
-        if a.kind == 0 {
-            ui.add(crate::widgets::block(&mut a.text).code_editor().desired_rows(3).desired_width(340.0).hint_text(hint).id_salt("action-text"));
-        } else {
-            ui.add(crate::widgets::line(&mut a.text).desired_width(340.0).hint_text(hint).id_salt("action-text"));
-        }
-        ui.end_row();
+        rows.row(if a.kind == 0 { tl!("Script:") } else { tl!("Value:") }, |ui, _| {
+            if a.kind == 0 {
+                ui.add(crate::widgets::block(&mut a.text).code_editor().desired_rows(3).desired_width(340.0).hint_text(hint).id_salt("action-text"));
+            } else {
+                ui.add(crate::widgets::line(&mut a.text).desired_width(340.0).hint_text(hint).id_salt("action-text"));
+            }
+        });
     });
     let mut error = None;
     if ui.button(tl!("Add")).clicked() {

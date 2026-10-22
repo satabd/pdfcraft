@@ -3,7 +3,7 @@
 
 use pdfcraft_engine::{BorderStyle, CheckStyle, DocId, Edit, FieldFont, FieldLookPatch, FieldProps, FormFieldKind, field_flags};
 
-use crate::{prepare, theme, widgets};
+use crate::{prepare, rtl, theme, widgets};
 
 /// One property shown by the dialog. `apply` is explicit: merely opening the dialog, or
 /// visiting a tab, must never turn mixed values into the first field's value.
@@ -265,7 +265,7 @@ fn color(ui: &mut egui::Ui, value: &mut Option<[f64; 3]>) {
 /// Check a property to apply its value to every selected field. No unchecked value is used.
 pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool, bool) {
     ui.set_width(600.0);
-    ui.label(egui::RichText::new(tl!("Shared Field Properties")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Shared Field Properties"));
     ui.label(crate::i18n::fmt(tl!("{n} fields selected"), &[("n", &d.names.len().to_string())]));
     widgets::small_text(
         ui,
@@ -273,7 +273,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
         t.text_muted,
     );
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    rtl::horizontal(ui, |ui| {
         for (tab, label) in [(Tab::General, "General"), (Tab::Appearance, "Appearance"), (Tab::Options, "Options")] {
             if tab == Tab::Options && !(d.text_fields || d.choice_fields || d.check_fields) {
                 continue;

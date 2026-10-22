@@ -1610,11 +1610,11 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool
 pub(crate) fn attachment_items(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo, a: &Annotation) {
     let source = pdfcraft_render::AttachmentSource::Annotation { page: a.page, index: a.index };
     let Some(file) = info.attachments.iter().find(|f| f.source == source) else { return };
-    if ui.button(tl!("Save attachment…")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Save attachment…"), None).clicked() {
         view.comments.attachment_request = Some((a.page, a.index, false));
         ui.close();
     }
-    if file.name.to_lowercase().ends_with(".pdf") && ui.button(tl!("Open in a new tab")).clicked() {
+    if file.name.to_lowercase().ends_with(".pdf") && crate::widgets::menu_entry(ui, true, tl!("Open in a new tab"), None).clicked() {
         view.comments.attachment_request = Some((a.page, a.index, true));
         ui.close();
     }
@@ -1629,7 +1629,7 @@ pub(crate) fn context_menu(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo
         Some(a) => {
             let (page, index) = (a.page, a.index);
             attachment_items(ui, view, info, a);
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Edit text…"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!("Edit text…"), None).clicked() {
                 view.comments.composer = Some(Composer {
                     page,
                     at: [a.rect[2] as f64, a.rect[3] as f64],
@@ -1639,22 +1639,22 @@ pub(crate) fn context_menu(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo
                 });
                 ui.close();
             }
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!("Reply"), None).clicked() {
                 view.comments.reveal = true;
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
             ui.add_enabled_ui(allowed, |ui| {
-                ui.menu_button(tl!("Set status"), |ui| {
+                crate::widgets::sub_menu(ui, tl!("Set status"), |ui| {
                     for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
-                        if ui.button(tl!(s.name())).clicked() {
+                        if crate::widgets::menu_entry(ui, true, tl!(s.name()), None).clicked() {
                             action =
                                 Some(CanvasAction::Edit(Box::new(Edit::SetAnnotationStatus { page, index, state: s, author: prefs.author.clone() })));
                             ui.close();
                         }
                     }
                 });
-                ui.menu_button(tl!("Colour"), |ui| {
+                crate::widgets::sub_menu(ui, tl!("Colour"), |ui| {
                     if let Some(c) = swatch_grid(ui, a.color.map(|c| c.map(f64::from))) {
                         action = Some(CanvasAction::Edit(Box::new(Edit::StyleAnnotation {
                             page,
@@ -1670,37 +1670,37 @@ pub(crate) fn context_menu(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo
             });
             let thread: Vec<&pdfcraft_render::Annotation> = info.annotations.iter().filter(|r| a.name.is_some() && r.in_reply_to == a.name).collect();
             let marked = crate::comments_panel::is_marked(&thread);
-            if ui.add_enabled(allowed, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }), None).clicked() {
                 action = Some(CanvasAction::Edit(Box::new(Edit::MarkAnnotation { page, index, marked: !marked, author: prefs.author.clone() })));
                 ui.close();
             }
-            if ui.button(tl!("Copy text")).clicked() {
+            if crate::widgets::menu_entry(ui, true, tl!("Copy text"), None).clicked() {
                 ui.ctx().copy_text(a.contents.clone().unwrap_or_default());
                 ui.close();
             }
             ui.separator();
-            if ui.add_enabled(allowed && !a.locked, egui::Button::new(tl!("Delete"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed && !a.locked, tl!("Delete"), None).clicked() {
                 view.comments.selected = None;
                 action = Some(CanvasAction::Edit(Box::new(Edit::DeleteAnnotation { page, index })));
                 ui.close();
             }
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Properties…"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!("Properties…"), None).clicked() {
                 action = Some(CanvasAction::Properties(page, index));
                 ui.close();
             }
-            if ui.add_enabled(tool_for(a).is_some(), egui::Button::new(tl!("Make Current Properties Default"))).clicked() {
+            if crate::widgets::menu_entry(ui, tool_for(a).is_some(), tl!("Make Current Properties Default"), None).clicked() {
                 view.comments.default_request = Some((page, index));
                 ui.close();
             }
         }
         None => {
             if let Some((page, at)) = view.comments.context_at
-                && ui.add_enabled(allowed, egui::Button::new(tl!("Add a sticky note here"))).clicked()
+                && crate::widgets::menu_entry(ui, allowed, tl!("Add a sticky note here"), None).clicked()
             {
                 view.comments.composer = Some(Composer { page, at, kind: ComposerKind::Note, text: String::new(), focus: true });
                 ui.close();
             }
-            if ui.button(tl!("Comments panel")).clicked() {
+            if crate::widgets::menu_entry(ui, true, tl!("Comments panel"), None).clicked() {
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
@@ -1883,7 +1883,7 @@ pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &m
     if tool.has_fill() {
         let resp = fill_button(ui, style.fill);
         egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
-            ui.label(egui::RichText::new(tl!("Fill colour")).font(theme::semibold(12.0)));
+            crate::widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Fill colour")).font(theme::semibold(12.0))));
             if let Some(f) = fill_picker(ui, style.fill) {
                 prefs.set_fill(tool, f);
                 ui.close();
@@ -1894,7 +1894,7 @@ pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &m
     egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_min_width(180.0);
         let mut percent = (style.opacity * 100.0).round();
-        ui.label(egui::RichText::new(tl!("Opacity")).font(theme::semibold(12.0)));
+        crate::widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Opacity")).font(theme::semibold(12.0))));
         if ui.add(egui::Slider::new(&mut percent, 10.0..=100.0).step_by(5.0).suffix(" %")).changed() {
             prefs.set_opacity(tool, percent / 100.0);
         }
@@ -1904,7 +1904,7 @@ pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &m
         egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(180.0);
             let mut w = style.width;
-            ui.label(egui::RichText::new(tl!("Line thickness")).font(theme::semibold(12.0)));
+            crate::widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Line thickness")).font(theme::semibold(12.0))));
             if ui.add(egui::Slider::new(&mut w, tool.min_width()..=12.0).step_by(0.5).suffix(" pt")).changed() {
                 prefs.set_width(tool, w);
             }

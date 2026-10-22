@@ -185,16 +185,16 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 let id = app.views[i].id;
                                 let reveal = cfg!(not(target_arch = "wasm32")) && doc.path.is_some();
                                 response.context_menu(|ui| {
-                                    if ui.button(tl!("Close Tab")).clicked() {
+                                    if widgets::menu_entry(ui, true, tl!("Close Tab"), None).clicked() {
                                         action = Some(crate::tab_context::Action::Close(id));
                                         ui.close();
                                     }
-                                    if ui.add_enabled(!app.closed_tabs.is_empty(), egui::Button::new(tl!("Reopen Closed Tab"))).clicked() {
+                                    if widgets::menu_entry(ui, !app.closed_tabs.is_empty(), tl!("Reopen Closed Tab"), None).clicked() {
                                         action = Some(crate::tab_context::Action::Reopen);
                                         ui.close();
                                     }
                                     let label = if cfg!(target_os = "macos") { tl!("Reveal in Finder") } else { tl!("Reveal in File Explorer") };
-                                    if ui.add_enabled(reveal, egui::Button::new(label)).clicked() {
+                                    if widgets::menu_entry(ui, reveal, label, None).clicked() {
                                         action = Some(crate::tab_context::Action::Reveal(id));
                                         ui.close();
                                     }
@@ -348,13 +348,13 @@ fn theme_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         (ThemePreference::Light, "view.theme.light", "Light gray"),
         (ThemePreference::Dark, "view.theme.dark", "Dark gray"),
     ] {
-        if ui.add(widgets::radio(app.theme_preference == preference, tl!(label))).clicked() {
+        if widgets::menu_choice(ui, |ui| ui.add(widgets::radio(app.theme_preference == preference, tl!(label)))).clicked() {
             app.execute(command);
             ui.close();
         }
     }
     ui.separator();
-    if ui.button(tl!("Appearance settings…")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Appearance settings…"), None).clicked() {
         app.dialog = Some(Dialog::Preferences);
         ui.close();
     }
@@ -362,7 +362,7 @@ fn theme_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 
 /// The right-click menu on the title bar's theme button.
 fn appearance_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
-    if ui.button(tl!("Appearance settings…")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Appearance settings…"), None).clicked() {
         app.dialog = Some(Dialog::Preferences);
         ui.close();
     }
@@ -560,7 +560,7 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         }
                     });
                     ui.add_space(8.0);
-                    if widgets::search_box(ui, tl!("Find tools and commands"), 260.0).clicked() {
+                    if widgets::search_box(ui, &tl_logical!("Find tools and commands"), 260.0).clicked() {
                         app.palette_open = true;
                     }
                 });
@@ -595,7 +595,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         let ctx = ui.ctx().clone();
                         let key = |s| crate::commands::shortcut_label(&ctx, s);
                         use crate::commands::{ACTUAL_SIZE, FIT_WIDTH, NEXT_VIEW, PAGE_LEVEL, PREV_VIEW, ROTATE_CCW, ROTATE_CW, ZOOM_IN, ZOOM_OUT};
-                        ui.label(egui::RichText::new(tl!("Zoom")).color(t.text_faint).small());
+                        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Zoom")).color(t.text_faint).small()));
                         if widgets::menu_item(ui, tl!("Actual size"), &key(ACTUAL_SIZE)).clicked() {
                             v.set_zoom(1.0);
                         }
@@ -627,7 +627,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             v.rotate_view(false);
                         }
                         ui.separator();
-                        ui.label(egui::RichText::new(tl!("Page navigation")).color(t.text_faint).small());
+                        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Page navigation")).color(t.text_faint).small()));
                         if widgets::menu_entry(ui, !v.back.is_empty(), tl!("Previous view"), Some(&key(PREV_VIEW))).clicked() {
                             v.view_history(false);
                         }
@@ -657,7 +657,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 (RightPanel::Search, tl!("Search")),
                                 (RightPanel::Compare, tl!("Compare")),
                             ] {
-                                if ui.add(widgets::radio(app.right == Some(p), tl!(label))).clicked() {
+                                if widgets::menu_choice(ui, |ui| ui.add(widgets::radio(app.right == Some(p), tl!(label)))).clicked() {
                                     app.choose_right_panel(Some(p));
                                 }
                             }
@@ -839,21 +839,23 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 /// Returns the command a click asks for, for the caller to run.
 fn page_display_menu(ui: &mut egui::Ui, view: &DocView) -> Option<&'static str> {
     let t = Tokens::get(ui.ctx());
-    ui.label(egui::RichText::new(tl!("Page display")).color(t.text_faint).small());
+    widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Page display")).color(t.text_faint).small()));
     let mut picked = None;
     for l in PageLayout::ORDER {
-        if ui.add(widgets::radio(view.layout == l, tl!(l.label()))).clicked() {
+        if widgets::menu_choice(ui, |ui| ui.add(widgets::radio(view.layout == l, tl!(l.label())))).clicked() {
             picked = Some(l.command());
         }
     }
     ui.separator();
     // Continuous scrolling is an independent checkbox over the base layout, as in Acrobat (#752).
     let mut continuous = view.continuous();
-    if ui.add(widgets::checkbox(&mut continuous, tl!("Continuous scrolling"))).changed() {
+    if widgets::menu_choice(ui, |ui| ui.add(widgets::checkbox(&mut continuous, tl!("Continuous scrolling")))).changed() {
         picked = Some("view.continuous");
     }
     let mut cover = view.cover;
-    if ui.add_enabled(view.cover_applies(), widgets::checkbox(&mut cover, tl!("Show cover page in two-page view"))).changed() {
+    if widgets::menu_choice(ui, |ui| ui.add_enabled(view.cover_applies(), widgets::checkbox(&mut cover, tl!("Show cover page in two-page view"))))
+        .changed()
+    {
         picked = Some("view.layout.cover");
     }
     if picked.is_some() {
@@ -867,27 +869,27 @@ fn page_display_menu(ui: &mut egui::Ui, view: &DocView) -> Option<&'static str> 
 fn rail_view_menu(ui: &mut egui::Ui, view: &mut DocView) -> Option<&'static str> {
     let mut picked = None;
     for (id, label) in [("view.fit_width_scrolling", "Fit to width scrolling"), ("view.fit_one_page", "Fit one full page")] {
-        if ui.button(tl!(label)).clicked() {
+        if widgets::menu_entry(ui, true, tl!(label), None).clicked() {
             picked = Some(id);
         }
     }
     ui.separator();
-    if ui.button(tl!("Actual size")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Actual size"), None).clicked() {
         view.set_zoom(1.0);
         ui.close();
     }
-    if ui.button(tl!("Zoom to page level")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Zoom to page level"), None).clicked() {
         view.set_fit(Fit::Page);
         ui.close();
     }
-    if ui.button(tl!("Fit visible")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Fit visible"), None).clicked() {
         picked = Some("view.fit_visible");
     }
     ui.separator();
     picked = page_display_menu(ui, view).or(picked);
     ui.separator();
     for (id, label) in [("view.read_mode", "Read mode"), ("view.full_screen", "Full screen mode")] {
-        if ui.button(tl!(label)).clicked() {
+        if widgets::menu_entry(ui, true, tl!(label), None).clicked() {
             picked = Some(id);
         }
     }

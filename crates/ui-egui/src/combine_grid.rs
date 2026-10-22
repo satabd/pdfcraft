@@ -1051,9 +1051,7 @@ impl Card {
         let at = resp.rect.left_bottom();
         let locked = f.lock.is_some();
         resp.context_menu(|ui| {
-            let item = |ui: &mut egui::Ui, icon: &str, label: &str| {
-                ui.add(egui::Button::image_and_text(icons::image(icon, 15.0, ui.visuals().text_color()), label)).clicked()
-            };
+            let item = |ui: &mut egui::Ui, icon: &str, label: &str| crate::widgets::menu_icon_entry(ui, true, icon, label).clicked();
             for (icon, label, act) in buttons.iter().rev() {
                 // (Remove names its file, as the trash button does.)
                 if item(ui, icon, label) {

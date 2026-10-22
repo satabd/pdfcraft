@@ -6,8 +6,8 @@ use egui::{Align, Layout};
 use pdfcraft_engine::{CommentProps, Edit, LineEnding, NoteIcon};
 
 use crate::comments::swatch_grid;
-use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, widgets};
+use crate::theme::Tokens;
+use crate::{PdfCraftApp, rtl, widgets};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropsTab {
@@ -186,9 +186,9 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     });
     let Some(d) = app.comment_props.as_mut() else { return (false, true) };
     let kind = tl!(crate::comments_panel::subtype_label(&d.edited.subtype)).to_string();
-    ui.label(egui::RichText::new(crate::i18n::fmt(tl!("{kind} Properties"), &[("kind", &kind)])).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, crate::i18n::fmt(tl!("{kind} Properties"), &[("kind", &kind)]));
     ui.add_space(6.0);
-    ui.horizontal_wrapped(|ui| {
+    rtl::horizontal_wrapped(ui, |ui| {
         for (tab, label) in
             [(PropsTab::Appearance, tl!("Appearance")), (PropsTab::General, tl!("General")), (PropsTab::ReviewHistory, tl!("Review History"))]
         {
@@ -206,75 +206,71 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
                 ui.label(egui::RichText::new(tl!("This comment's appearance can't be changed yet.")).color(t.text_muted));
             }
             ui.add_enabled_ui(e.restylable, |ui| {
-                egui::Grid::new("comment-props").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
+                widgets::form_grid(ui, "comment-props", [12.0, 10.0], None, |rows| {
                     if let Some(icon) = e.icon.as_mut() {
-                        ui.label(tl!("Icon"));
-                        egui::ComboBox::from_id_salt("note-icon").selected_text(icon.name()).show_ui(ui, |ui| {
-                            for i in ICONS {
-                                ui.selectable_value(icon, i, i.name());
+                        rows.row(tl!("Icon"), |ui, _| {
+                            egui::ComboBox::from_id_salt("note-icon").selected_text(icon.name()).show_ui(ui, |ui| {
+                                for i in ICONS {
+                                    ui.selectable_value(icon, i, i.name());
+                                }
+                            });
+                        });
+                    }
+                    rows.row(tl!("Colour"), |ui, _| {
+                        if let Some(c) = widgets::start_block(ui, |ui| swatch_grid(ui, e.color)) {
+                            e.color = Some(c);
+                        }
+                    });
+                    if e.fillable {
+                        rows.row(tl!("Fill colour"), |ui, _| {
+                            if let Some(f) = widgets::start_block(ui, |ui| crate::comments::fill_picker(ui, e.fill)) {
+                                e.fill = f;
                             }
                         });
-                        ui.end_row();
-                    }
-                    ui.label(tl!("Colour"));
-                    if let Some(c) = swatch_grid(ui, e.color) {
-                        e.color = Some(c);
-                    }
-                    ui.end_row();
-                    if e.fillable {
-                        ui.label(tl!("Fill colour"));
-                        if let Some(f) = crate::comments::fill_picker(ui, e.fill) {
-                            e.fill = f;
-                        }
-                        ui.end_row();
                     }
                     if let Some(size) = e.font_size.as_mut() {
-                        ui.label(tl!("Font size"));
-                        ui.add(egui::DragValue::new(size).range(1.0..=400.0).speed(0.5).suffix(" pt"));
-                        ui.end_row();
+                        rows.row(tl!("Font size"), |ui, _| _ = ui.add(egui::DragValue::new(size).range(1.0..=400.0).speed(0.5).suffix(" pt")));
                     }
-                    ui.label(tl!("Opacity"));
-                    let mut pct = e.opacity * 100.0;
-                    if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() {
-                        e.opacity = pct / 100.0;
-                    }
-                    ui.end_row();
+                    rows.row(tl!("Opacity"), |ui, _| {
+                        let mut pct = e.opacity * 100.0;
+                        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() {
+                            e.opacity = pct / 100.0;
+                        }
+                    });
                     let min_width = if e.font_size.is_some() { 0.0 } else { 0.5 };
                     if let Some(w) = e.width.as_mut() {
-                        ui.label(tl!("Thickness"));
-                        ui.add(egui::Slider::new(w, min_width..=12.0).step_by(0.5).suffix(" pt"));
-                        ui.end_row();
+                        rows.row(tl!("Thickness"), |ui, _| _ = ui.add(egui::Slider::new(w, min_width..=12.0).step_by(0.5).suffix(" pt")));
                     }
                     if let Some(ends) = e.endings.as_mut() {
-                        ui.label(tl!("Line ending"));
-                        ui.horizontal(|ui| {
-                            for (i, ending) in ends.iter_mut().enumerate() {
-                                egui::ComboBox::from_id_salt(("line-ending", i)).selected_text(ending_label(*ending)).width(188.0).show_ui(
-                                    ui,
-                                    |ui| {
-                                        for style in LineEnding::ALL {
-                                            ui.selectable_value(ending, style, ending_label(style));
-                                        }
-                                    },
-                                );
-                            }
+                        rows.row(tl!("Line ending"), |ui, _| {
+                            rtl::horizontal(ui, |ui| {
+                                for (i, ending) in ends.iter_mut().enumerate() {
+                                    egui::ComboBox::from_id_salt(("line-ending", i)).selected_text(ending_label(*ending)).width(188.0).show_ui(
+                                        ui,
+                                        |ui| {
+                                            for style in LineEnding::ALL {
+                                                ui.selectable_value(ending, style, ending_label(style));
+                                            }
+                                        },
+                                    );
+                                }
+                            });
                         });
-                        ui.end_row();
                     }
                 });
             });
         }
         PropsTab::General => {
-            egui::Grid::new("comment-general").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                let l = ui.label(tl!("Author"));
-                ui.add(crate::widgets::line(&mut e.author).desired_width(280.0)).labelled_by(l.id);
-                ui.end_row();
-                let l = ui.label(tl!("Subject"));
-                ui.add(crate::widgets::line(&mut e.subject).desired_width(280.0)).labelled_by(l.id);
-                ui.end_row();
-                ui.label(tl!("Modified"));
-                ui.label(e.modified.as_deref().map(pdfcraft_render::pretty_date).unwrap_or_else(|| "—".into()));
-                ui.end_row();
+            widgets::form_grid(ui, "comment-general", [12.0, 10.0], None, |rows| {
+                rows.row(tl!("Author"), |ui, l| {
+                    ui.add(crate::widgets::line(&mut e.author).desired_width(280.0)).labelled_by(l.id);
+                });
+                rows.row(tl!("Subject"), |ui, l| {
+                    ui.add(crate::widgets::line(&mut e.subject).desired_width(280.0)).labelled_by(l.id);
+                });
+                rows.row(tl!("Modified"), |ui, _| {
+                    ui.label(e.modified.as_deref().map(pdfcraft_render::pretty_date).unwrap_or_else(|| "—".into()));
+                });
             });
         }
         PropsTab::ReviewHistory => {

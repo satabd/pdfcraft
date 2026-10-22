@@ -128,16 +128,15 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp) -> bool {
     ui.separator();
     match &draft.result {
         Some(Ok(report)) => {
-            egui::Grid::new("word-count-totals").show(ui, |ui| {
+            let spacing = ui.spacing().item_spacing;
+            widgets::form_grid(ui, "word-count-totals", spacing, None, |rows| {
                 for (label, value) in [
                     (tl!("Words"), report.total.words),
                     (tl!("Characters"), report.total.characters),
                     (tl!("Characters without spaces"), report.total.characters_without_spaces),
                     (tl!("Pages counted"), report.pages.len()),
                 ] {
-                    ui.label(label);
-                    ui.strong(value.to_string());
-                    ui.end_row();
+                    rows.row(label, |ui, _| _ = ui.strong(value.to_string()));
                 }
             });
             if report.pages_without_text > 0 {

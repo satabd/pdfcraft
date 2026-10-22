@@ -42,13 +42,13 @@ pub type ExportStatus = Arc<Mutex<Option<(usize, usize, Option<String>)>>>;
 pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: ExportKind) -> (bool, bool) {
     let count = app.active_ids().and_then(|(_, id)| app.session.get(id)).map(|d| d.info.pages.len()).unwrap_or(0);
     let d = &mut app.export_draft;
-    ui.label(
-        egui::RichText::new(match kind {
+    widgets::dialog_title(
+        ui,
+        match kind {
             ExportKind::Image => tl!("Export to Image"),
             ExportKind::Text => tl!("Export to Text"),
             ExportKind::AllImages => tl!("Export All Images"),
-        })
-        .font(theme::semibold(18.0)),
+        },
     );
     ui.add_space(8.0);
     if kind == ExportKind::Image {

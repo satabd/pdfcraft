@@ -646,7 +646,7 @@ pub(crate) fn dialog(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bo
 }
 
 fn title(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(tl!(text)).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!(text));
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(8.0);
@@ -790,33 +790,31 @@ fn configure(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     ui.add_space(8.0);
     let n = &mut d.new_id;
     if n.create {
-        egui::Grid::new("new-id").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        widgets::form_grid(ui, "new-id", [12.0, 8.0], None, |rows| {
             for (label, value) in [
                 (tl!("Name"), &mut n.name),
                 (tl!("Organizational Unit"), &mut n.unit),
                 (tl!("Organization Name"), &mut n.organization),
                 (tl!("Email Address"), &mut n.email),
             ] {
-                let l = ui.label(label);
-                ui.add(crate::widgets::line(value).desired_width(260.0)).labelled_by(l.id);
-                ui.end_row();
+                rows.row(label, |ui, l| _ = ui.add(crate::widgets::line(value).desired_width(260.0)).labelled_by(l.id));
             }
-            let l = ui.label(tl!("Country/Region"));
-            ui.add(crate::widgets::line(&mut n.country).hint_text("US").char_limit(2).desired_width(60.0)).labelled_by(l.id);
-            ui.end_row();
-            ui.label(tl!("Key Algorithm"));
-            egui::ComboBox::from_id_salt("key-alg").selected_text(KEY_ALGORITHMS[n.key].0).show_ui(ui, |ui| {
-                for (i, (label, _)) in KEY_ALGORITHMS.iter().enumerate() {
-                    ui.selectable_value(&mut n.key, i, *label);
-                }
+            rows.row(tl!("Country/Region"), |ui, l| {
+                ui.add(crate::widgets::line(&mut n.country).hint_text("US").char_limit(2).desired_width(60.0)).labelled_by(l.id);
             });
-            ui.end_row();
-            let l = ui.label(tl!("Password"));
-            ui.add(crate::widgets::line(&mut n.password).password(true).desired_width(200.0)).labelled_by(l.id);
-            ui.end_row();
-            let l = ui.label(tl!("Confirm Password"));
-            ui.add(crate::widgets::line(&mut n.confirm).password(true).desired_width(200.0)).labelled_by(l.id);
-            ui.end_row();
+            rows.row(tl!("Key Algorithm"), |ui, _| {
+                egui::ComboBox::from_id_salt("key-alg").selected_text(KEY_ALGORITHMS[n.key].0).show_ui(ui, |ui| {
+                    for (i, (label, _)) in KEY_ALGORITHMS.iter().enumerate() {
+                        ui.selectable_value(&mut n.key, i, *label);
+                    }
+                });
+            });
+            rows.row(tl!("Password"), |ui, l| {
+                ui.add(crate::widgets::line(&mut n.password).password(true).desired_width(200.0)).labelled_by(l.id);
+            });
+            rows.row(tl!("Confirm Password"), |ui, l| {
+                ui.add(crate::widgets::line(&mut n.confirm).password(true).desired_width(200.0)).labelled_by(l.id);
+            });
         });
         widgets::small_text(
             ui,
@@ -824,19 +822,19 @@ fn configure(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
             t.text_muted,
         );
     } else {
-        egui::Grid::new("id-file").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            let l = ui.label(tl!("File (.p12, .pfx)"));
-            ui.horizontal(|ui| {
-                ui.add(crate::widgets::line(&mut n.file).desired_width(220.0)).labelled_by(l.id);
-                #[cfg(not(target_arch = "wasm32"))]
-                if ui.button(tl!("Browse…")).clicked() {
-                    browse = true;
-                }
+        widgets::form_grid(ui, "id-file", [12.0, 8.0], None, |rows| {
+            rows.row(tl!("File (.p12, .pfx)"), |ui, l| {
+                rtl::horizontal(ui, |ui| {
+                    ui.add(crate::widgets::line(&mut n.file).desired_width(220.0)).labelled_by(l.id);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.button(tl!("Browse…")).clicked() {
+                        browse = true;
+                    }
+                });
             });
-            ui.end_row();
-            let l = ui.label(tl!("Password"));
-            ui.add(crate::widgets::line(&mut n.file_password).password(true).desired_width(200.0)).labelled_by(l.id);
-            ui.end_row();
+            rows.row(tl!("Password"), |ui, l| {
+                ui.add(crate::widgets::line(&mut n.file_password).password(true).desired_width(200.0)).labelled_by(l.id);
+            });
         });
     }
     ui.add_space(6.0);
@@ -1044,45 +1042,46 @@ fn sign_as(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     } else {
         ui.label(egui::RichText::new(tl!("The signature will be invisible.")).color(t.text_muted));
     }
-    egui::Grid::new("sign-as").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+    widgets::form_grid(ui, "sign-as", [12.0, 8.0], None, |rows| {
         if d.certify.is_some() {
-            ui.label(tl!("Permitted actions after certifying"));
-            let mut p = d.certify.unwrap_or(2);
-            let label = |p: u8| match p {
-                1 => tl!("No changes allowed"),
-                3 => tl!("Annotations, form fill-in, and digital signatures"),
-                _ => tl!("Form fill-in and digital signatures"),
-            };
-            egui::ComboBox::from_id_salt("certify-p").selected_text(label(p)).width(300.0).show_ui(ui, |ui| {
-                for v in [1u8, 2, 3] {
-                    ui.selectable_value(&mut p, v, label(v));
+            rows.row(tl!("Permitted actions after certifying"), |ui, _| {
+                let mut p = d.certify.unwrap_or(2);
+                let label = |p: u8| match p {
+                    1 => tl!("No changes allowed"),
+                    3 => tl!("Annotations, form fill-in, and digital signatures"),
+                    _ => tl!("Form fill-in and digital signatures"),
+                };
+                egui::ComboBox::from_id_salt("certify-p").selected_text(label(p)).width(300.0).show_ui(ui, |ui| {
+                    for v in [1u8, 2, 3] {
+                        ui.selectable_value(&mut p, v, label(v));
+                    }
+                });
+                d.certify = Some(p);
+            });
+        }
+        rows.row(tl!("Reason"), |ui, l| {
+            ui.add(crate::widgets::line(&mut d.reason).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
+        });
+        rows.row(tl!("Location"), |ui, l| {
+            ui.add(crate::widgets::line(&mut d.location).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
+        });
+        if in_os_key_store {
+            rows.row("", |ui, _| {
+                let note = if entry.path.starts_with("windows:") {
+                    tl_logical!("The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.")
+                } else {
+                    tl_logical!("The key is in the macOS Keychain, which may ask to allow PdfCraft to use it.")
+                };
+                widgets::small_text(ui, &note, t.text_muted);
+            });
+        } else {
+            rows.row(tl!("Digital ID password"), |ui, l| {
+                let r = ui.add(crate::widgets::line(&mut d.password).password(true).desired_width(200.0)).labelled_by(l.id);
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    go = true;
                 }
             });
-            d.certify = Some(p);
-            ui.end_row();
         }
-        let l = ui.label(tl!("Reason"));
-        ui.add(crate::widgets::line(&mut d.reason).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
-        ui.end_row();
-        let l = ui.label(tl!("Location"));
-        ui.add(crate::widgets::line(&mut d.location).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
-        ui.end_row();
-        if in_os_key_store {
-            ui.label("");
-            let note = if entry.path.starts_with("windows:") {
-                tl_logical!("The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.")
-            } else {
-                tl_logical!("The key is in the macOS Keychain, which may ask to allow PdfCraft to use it.")
-            };
-            widgets::small_text(ui, &note, t.text_muted);
-        } else {
-            let l = ui.label(tl!("Digital ID password"));
-            let r = ui.add(crate::widgets::line(&mut d.password).password(true).desired_width(200.0)).labelled_by(l.id);
-            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                go = true;
-            }
-        }
-        ui.end_row();
     });
     ui.add_space(6.0);
     error(ui, &d.error);
@@ -1419,14 +1418,18 @@ pub(crate) fn cert_viewer(ui: &mut egui::Ui, v: &mut CertViewer, trusted: &[Cert
             });
             ui.add_space(8.0);
             let grid = |ui: &mut egui::Ui, rows: Vec<(&str, String)>| {
-                egui::Grid::new(("cert-rows", v.tab as u8)).num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
+                widgets::form_grid(ui, ("cert-rows", v.tab as u8), [12.0, 5.0], None, |form| {
                     for (k, val) in rows {
-                        ui.label(egui::RichText::new(tl_ctx!("certificate", k)).color(t.text_muted));
-                        // Names in a certificate may be right to left; wrapped_label leaves the
-                        // Arabic interface's own words ("Yes", "Any") alone.
-                        let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
-                        widgets::wrapped_label(ui, &val, font, colour);
-                        ui.end_row();
+                        form.row_styled(
+                            tl_ctx!("certificate", k),
+                            |caption| caption.color(t.text_muted),
+                            |ui, _| {
+                                // Names in a certificate may be right to left; wrapped_label leaves the
+                                // Arabic interface's own words ("Yes", "Any") alone.
+                                let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                                widgets::wrapped_label(ui, &val, font, colour);
+                            },
+                        );
                     }
                 });
             };

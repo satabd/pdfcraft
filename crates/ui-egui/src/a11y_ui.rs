@@ -77,7 +77,7 @@ pub(crate) fn options_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens)
     let o = &mut app.a11y_options;
     o.to = o.to.clamp(1, pages);
     o.from = o.from.clamp(1, o.to);
-    ui.label(egui::RichText::new(tl!("Accessibility Checker Options")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Accessibility Checker Options"));
     ui.add_space(8.0);
     let group = |ui: &mut egui::Ui, title: &str, body: &mut dyn FnMut(&mut egui::Ui)| {
         ui.label(egui::RichText::new(tl!(title)).font(theme::semibold(13.0)));
@@ -286,28 +286,28 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &mut A11yState, doc: D
             }
             row.context_menu(|ui| {
                 ui.set_min_width(170.0);
-                if ui.add_enabled(fixable(r.rule) && r.status == Status::Failed, egui::Button::new(tl!("Fix"))).clicked() {
+                if widgets::menu_entry(ui, fixable(r.rule) && r.status == Status::Failed, tl!("Fix"), None).clicked() {
                     action = Some(PanelAction::Fix(r.rule));
                     ui.close();
                 }
-                if ui.add_enabled(r.status != Status::Skipped, egui::Button::new(tl!("Skip Rule"))).clicked() {
+                if widgets::menu_entry(ui, r.status != Status::Skipped, tl!("Skip Rule"), None).clicked() {
                     action = Some(PanelAction::Skip(r.rule));
                     ui.close();
                 }
-                if ui.button(tl!("Explain")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Explain"), None).clicked() {
                     state.explain = if state.explain == Some(r.rule) { None } else { Some(r.rule) };
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(tl!("Check Again")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Check Again"), None).clicked() {
                     action = Some(PanelAction::CheckAgain);
                     ui.close();
                 }
-                if ui.button(tl!("Show Report")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Show Report"), None).clicked() {
                     action = Some(PanelAction::ShowReport);
                     ui.close();
                 }
-                if ui.button(tl!("Options…")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Options…"), None).clicked() {
                     action = Some(PanelAction::Options);
                     ui.close();
                 }
@@ -568,7 +568,7 @@ pub(crate) fn alt_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> 
     let ctx = ui.ctx().clone();
     let doc = app.alt_draft.doc.and_then(|id| app.session.get(id));
     let d = &mut app.alt_draft;
-    ui.label(egui::RichText::new(tl!("Set Alternate Text")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Set Alternate Text"));
     ui.add_space(8.0);
     let n = d.figures.len();
     if n == 0 {

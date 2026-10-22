@@ -13,7 +13,7 @@ use pdfcraft_engine::{DocId, Edit};
 use pdfcraft_render::{DestView, DocInfo, LayerOp, LinkTarget, PRINT_TAG, PageText, RenderPool, RenderRequest, RequestKind, Tile, device_pixels};
 
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, QuickTool, RightPanel, comments, icons, widgets};
+use crate::{PdfCraftApp, QuickTool, RightPanel, comments, icons, rtl, widgets};
 
 /// Logical pixels per PDF point at 100% (96 dpi, like browsers).
 pub const PT: f32 = 96.0 / 72.0;
@@ -3628,12 +3628,12 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     let others = view.prepare.also.clone();
                     let anchor = (name.clone(), wi);
                     let mut pick = |ui: &mut egui::Ui, op: A, label: &str| {
-                        if ui.add_enabled(can_modify, egui::Button::new(tl!(label))).clicked() {
+                        if widgets::menu_entry(ui, can_modify, tl!(label), None).clicked() {
                             view.pending_edit = crate::prepare::arrange(&form, &anchor, &others, op);
                             ui.close();
                         }
                     };
-                    ui.menu_button(tl!("Align"), |ui| {
+                    widgets::sub_menu(ui, tl!("Align"), |ui| {
                         pick(ui, A::AlignLeft, "Left");
                         pick(ui, A::AlignRight, "Right");
                         pick(ui, A::AlignTop, "Top");
@@ -3641,46 +3641,46 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                         pick(ui, A::AlignCenterV, "Center vertically");
                         pick(ui, A::AlignCenterH, "Center horizontally");
                     });
-                    ui.menu_button(tl!("Distribute"), |ui| {
+                    widgets::sub_menu(ui, tl!("Distribute"), |ui| {
                         pick(ui, A::DistributeH, "Horizontally");
                         pick(ui, A::DistributeV, "Vertically");
                     });
-                    ui.menu_button(tl!("Set Fields to Same Size"), |ui| {
+                    widgets::sub_menu(ui, tl!("Set Fields to Same Size"), |ui| {
                         pick(ui, A::SameHeight, "Height");
                         pick(ui, A::SameWidth, "Width");
                         pick(ui, A::SameSize, "Both");
                     });
                     ui.separator();
                 }
-                if ui.button(tl!("Properties…")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Properties…"), None).clicked() {
                     field_menu = Some(FieldMenu::Properties);
                     ui.close();
                 }
-                if ui.add_enabled(can_modify, egui::Button::new(tl!("Duplicate…"))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!("Duplicate…"), None).clicked() {
                     field_menu = Some(FieldMenu::Duplicate(name.clone()));
                     ui.close();
                 }
                 ui.separator();
                 let delete = if view.prepare.also.is_empty() { "Delete" } else { "Delete selected fields" };
-                if ui.add_enabled(can_modify, egui::Button::new(tl!(delete))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!(delete), None).clicked() {
                     view.pending_edit = crate::prepare::delete_selected(view);
                     ui.close();
                 }
                 return;
             }
             if let Some((page, index)) = view.links.context {
-                if ui.button(tl!("Properties…")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Properties…"), None).clicked() {
                     view.links.open_existing = Some((page, index));
                     ui.close();
                 }
-                if ui.add_enabled(can_modify, egui::Button::new(tl!("Delete"))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!("Delete"), None).clicked() {
                     view.pending_edit = Some(Edit::DeleteLink { page, index });
                     view.links.selected = None;
                     view.links.context = None;
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(can_modify, egui::Button::new(tl!("Remove all links"))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!("Remove all links"), None).clicked() {
                     view.pending_edit = Some(Edit::RemoveLinks { pages: None });
                     view.links.selected = None;
                     view.links.context = None;
@@ -3691,7 +3691,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             if view.comments.selected.is_none() {
                 let selected = view.selected_text().is_some_and(|t| !t.is_empty());
                 let key = crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY);
-                if ui.add_enabled(can_copy && selected, egui::Button::new(tl!("Copy")).shortcut_text(key)).clicked() {
+                if widgets::menu_entry(ui, can_copy && selected, tl!("Copy"), Some(&key)).clicked() {
                     copy_selected = true;
                     ui.close();
                 }
@@ -3714,11 +3714,11 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     }
                 };
                 if let Some(image) = hit {
-                    if ui.button(tl!("Copy Image")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Copy Image"), None).clicked() {
                         copy_image = Some(comments::CanvasAction::CopyImage(page, image));
                         ui.close();
                     }
-                    if ui.button(tl!("Copy Image in Original Format")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Copy Image in Original Format"), None).clicked() {
                         copy_image = Some(comments::CanvasAction::CopyImageFile(page, image));
                         ui.close();
                     }
@@ -4378,8 +4378,10 @@ fn find_bar(view: &mut DocView, pages: usize, area: Rect, ui: &mut egui::Ui, t: 
                         }
                         let opts = icons::button(ui, "settings-2", 26.0, find.case_sensitive || find.whole_words, tl!("Find options"));
                         egui::Popup::menu(&opts).show(|ui| {
-                            let a = ui.add(widgets::checkbox(&mut find.whole_words, tl!("Whole words only"))).changed();
-                            let b = ui.add(widgets::checkbox(&mut find.case_sensitive, tl!("Case-sensitive"))).changed();
+                            let a =
+                                widgets::menu_choice(ui, |ui| ui.add(widgets::checkbox(&mut find.whole_words, tl!("Whole words only")))).changed();
+                            let b =
+                                widgets::menu_choice(ui, |ui| ui.add(widgets::checkbox(&mut find.case_sensitive, tl!("Case-sensitive")))).changed();
                             if a || b {
                                 // Search again with the new options.
                                 find.case_query.clear();
@@ -4400,6 +4402,19 @@ fn find_bar(view: &mut DocView, pages: usize, area: Rect, ui: &mut egui::Ui, t: 
     }
     if let Some(forward) = step {
         view.find_step(forward);
+    }
+}
+
+/// The contents of one row of a tool flyout (180 by 28 points): the icon at the start edge, the
+/// label after it and, on the tool in use, a check mark at the end edge.
+fn flyout_row_contents(ui: &egui::Ui, body: Rect, icon: &str, label: &crate::i18n::Logical<'_>, on: bool, t: &Tokens) {
+    icons::paint(ui, rtl::start_rect(body, 8.0, 6.0, vec2(16.0, 16.0)), icon, 16.0, t.text);
+    let reserve = if on { 28.0 } else { 8.0 };
+    let max_width = (body.width() - 34.0 - reserve).max(0.0);
+    crate::widgets::paint_start(ui, rtl::start_center(body, 34.0), label, theme::regular(13.0), t.text, max_width);
+    if on {
+        let x = if rtl::mirrored() { body.left() + 10.0 } else { body.right() - 24.0 };
+        icons::paint(ui, Rect::from_min_size(egui::pos2(x, body.top() + 7.0), vec2(14.0, 14.0)), "check", 14.0, t.accent);
     }
 }
 
@@ -4688,25 +4703,7 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                                     let press = theme::Press::track(ui, &click);
                                     press.wash(ui, row, 4, on);
                                     let body = row.translate(press.offset());
-                                    icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 6.0), vec2(16.0, 16.0)), tool.icon(), 16.0, t.text);
-                                    let reserve = if on { 28.0 } else { 8.0 };
-                                    crate::widgets::paint_left(
-                                        ui,
-                                        body.left_center() + vec2(34.0, 0.0),
-                                        tl!(tool.label()),
-                                        theme::regular(13.0),
-                                        t.text,
-                                        (row.width() - 34.0 - reserve).max(0.0),
-                                    );
-                                    if on {
-                                        icons::paint(
-                                            ui,
-                                            Rect::from_min_size(body.right_top() + vec2(-24.0, 7.0), vec2(14.0, 14.0)),
-                                            "check",
-                                            14.0,
-                                            t.accent,
-                                        );
-                                    }
+                                    flyout_row_contents(ui, body, tool.icon(), &tl_logical!(tool.label()), on, &t);
                                     let click = theme::hand(click);
                                     let info = tl!(tool.label()).to_string();
                                     click.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, info.clone()));
@@ -4767,25 +4764,7 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                                 let press = theme::Press::track(ui, &click);
                                 press.wash(ui, row, 4, on);
                                 let body = row.translate(press.offset());
-                                icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 6.0), vec2(16.0, 16.0)), tool.icon(), 16.0, t.text);
-                                let reserve = if on { 28.0 } else { 8.0 };
-                                crate::widgets::paint_left(
-                                    ui,
-                                    body.left_center() + vec2(34.0, 0.0),
-                                    tl!(tool.label()),
-                                    theme::regular(13.0),
-                                    t.text,
-                                    (row.width() - 34.0 - reserve).max(0.0),
-                                );
-                                if on {
-                                    icons::paint(
-                                        ui,
-                                        Rect::from_min_size(body.right_top() + vec2(-24.0, 7.0), vec2(14.0, 14.0)),
-                                        "check",
-                                        14.0,
-                                        t.accent,
-                                    );
-                                }
+                                flyout_row_contents(ui, body, tool.icon(), &tl_logical!(tool.label()), on, &t);
                                 let click = theme::hand(click);
                                 let info = tl!(tool.label()).to_string();
                                 click.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, info.clone()));
@@ -5151,24 +5130,24 @@ fn organize_grid(view: &mut DocView, info: &DocInfo, editable: bool, dirty: bool
                         view.selected = [i].into();
                         view.go_to_page(i);
                     }
-                    if ui.button(tl!("Extract pages")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Extract pages"), None).clicked() {
                         view.pending_action = Some(ViewAction::Extract);
                         ui.close();
                     }
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
+                    if widgets::menu_entry(ui, editable, tl!("Replace pages…"), None).clicked() {
                         view.pending_action = Some(ViewAction::ReplacePages);
                         ui.close();
                     }
                     ui.separator();
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Cut"))).clicked() {
+                    if widgets::menu_entry(ui, editable, tl!("Cut"), None).clicked() {
                         view.pending_action = Some(ViewAction::CopyPages { cut: true });
                         ui.close();
                     }
-                    if ui.button(tl!("Copy")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Copy"), None).clicked() {
                         view.pending_action = Some(ViewAction::CopyPages { cut: false });
                         ui.close();
                     }
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Paste after"))).clicked() {
+                    if widgets::menu_entry(ui, editable, tl!("Paste after"), None).clicked() {
                         view.pending_action = Some(ViewAction::PastePages);
                         ui.close();
                     }

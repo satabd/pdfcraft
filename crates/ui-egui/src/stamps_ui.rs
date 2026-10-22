@@ -6,8 +6,8 @@ use std::sync::Arc;
 use egui::{Align, Layout};
 use serde::{Deserialize, Serialize};
 
-use crate::theme::{self, Tokens};
-use crate::{Dialog, PdfCraftApp, QuickTool, widgets};
+use crate::theme::Tokens;
+use crate::{Dialog, PdfCraftApp, QuickTool, rtl, widgets};
 
 /// Stamp files larger than this aren't kept in the library (it lives in the app's settings).
 pub const MAX_STAMP_BYTES: usize = 4 << 20;
@@ -58,28 +58,28 @@ pub(crate) fn create_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) 
         c
     };
     let d = &mut app.stamp_draft;
-    ui.label(egui::RichText::new(tl!("Create Custom Stamp")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Create Custom Stamp"));
     ui.add_space(8.0);
     ui.label(egui::RichText::new(crate::i18n::fmt(tl!("From {file}"), &[("file", &crate::bidi::visual(&d.file))])).color(t.text_muted));
     ui.add_space(8.0);
-    egui::Grid::new("stamp-create").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-        let l = ui.label(tl!("Category:"));
-        ui.horizontal(|ui| {
-            ui.add(crate::widgets::line(&mut d.category).desired_width(200.0).hint_text(tl!("e.g. My stamps"))).labelled_by(l.id);
-            if !categories.is_empty() {
-                egui::ComboBox::from_id_salt("stamp-categories").selected_text("").width(24.0).show_ui(ui, |ui| {
-                    for c in &categories {
-                        if ui.selectable_label(d.category == *c, c).clicked() {
-                            d.category = c.clone();
+    widgets::form_grid(ui, "stamp-create", [10.0, 8.0], None, |rows| {
+        rows.row(tl!("Category:"), |ui, l| {
+            rtl::horizontal(ui, |ui| {
+                ui.add(crate::widgets::line(&mut d.category).desired_width(200.0).hint_text(tl!("e.g. My stamps"))).labelled_by(l.id);
+                if !categories.is_empty() {
+                    egui::ComboBox::from_id_salt("stamp-categories").selected_text("").width(24.0).show_ui(ui, |ui| {
+                        for c in &categories {
+                            if ui.selectable_label(d.category == *c, c).clicked() {
+                                d.category = c.clone();
+                            }
                         }
-                    }
-                });
-            }
+                    });
+                }
+            });
         });
-        ui.end_row();
-        let l = ui.label(tl!("Name:"));
-        ui.add(crate::widgets::line(&mut d.name).desired_width(200.0)).labelled_by(l.id);
-        ui.end_row();
+        rows.row(tl!("Name:"), |ui, l| {
+            ui.add(crate::widgets::line(&mut d.name).desired_width(200.0)).labelled_by(l.id);
+        });
     });
     ui.add_space(12.0);
     let ok = !d.category.trim().is_empty() && !d.name.trim().is_empty();
@@ -111,7 +111,7 @@ pub(crate) fn palette_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Toke
                 app.quick_tool = QuickTool::CustomStamp(i);
             }
             resp.context_menu(|ui| {
-                if ui.button(tl!("Delete stamp")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Delete stamp"), None).clicked() {
                     remove = Some(i);
                     ui.close();
                 }

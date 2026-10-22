@@ -737,12 +737,12 @@ pub(crate) fn page(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             let response = ui.add_enabled_ui(!open_docs.is_empty(), |ui| widgets::icon_pill(ui, "file-plus", tl!("Add open documents"), false)).inner;
             widgets::disabled_hover_text(response.clone(), &tl_logical!("No documents are open"));
             egui::Popup::menu(&response).show(|ui| {
-                if open_docs.len() > 1 && ui.button(tl!("All open documents")).clicked() {
+                if open_docs.len() > 1 && widgets::menu_entry(ui, true, tl!("All open documents"), None).clicked() {
                     app.add_open_documents(&open_docs.iter().map(|(i, _)| *i).collect::<Vec<_>>());
                     ui.close();
                 }
                 for (i, name) in &open_docs {
-                    if ui.button(crate::bidi::visual(name).as_ref()).clicked() {
+                    if widgets::menu_entry(ui, true, crate::bidi::visual(name).as_ref(), None).clicked() {
                         app.add_open_documents(&[*i]);
                         ui.close();
                     }
@@ -1250,9 +1250,7 @@ fn add_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     }
     egui::Popup::menu(&more).show(|ui| {
         ui.set_min_width(220.0);
-        let item = |ui: &mut egui::Ui, icon: &str, label: &str| {
-            ui.add(egui::Button::image_and_text(icons::image(icon, 15.0, ui.visuals().text_color()), label))
-        };
+        let item = |ui: &mut egui::Ui, icon: &str, label: &str| widgets::menu_icon_entry(ui, true, icon, label);
         if item(ui, "file-plus", tl!("Add files…")).clicked() {
             app.combine_dialog();
             ui.close();
@@ -1385,7 +1383,7 @@ fn heading(ui: &mut egui::Ui, t: &Tokens, key: SortKey, sort: Option<(SortKey, b
     let response = response.on_hover_cursor(if being_dragged { egui::CursorIcon::Grabbing } else { egui::CursorIcon::PointingHand });
     let response = widgets::hover_text(response, &tl_logical!("Click to sort, drag to move the column. Drag its edge to resize it."));
     response.context_menu(|ui| {
-        if ui.button(tl!("Reset columns")).clicked() {
+        if widgets::menu_entry(ui, true, tl!("Reset columns"), None).clicked() {
             event = Some(HeadingEvent::Reset);
             ui.close();
         }
@@ -1566,10 +1564,7 @@ fn table_body(
                     if f.lock.is_some() {
                         let at = response.rect.left_bottom();
                         response.context_menu(|ui| {
-                            if ui
-                                .add(egui::Button::image_and_text(icons::image("lock-open", 15.0, ui.visuals().text_color()), tl!("Unlock…")))
-                                .clicked()
-                            {
+                            if widgets::menu_icon_entry(ui, true, "lock-open", tl!("Unlock…")).clicked() {
                                 events.action = Some(RowAction::Unlock(Some(i), at));
                                 ui.close();
                             }

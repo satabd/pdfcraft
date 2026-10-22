@@ -155,7 +155,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
         MarkKind::Watermark => crate::i18n::fmt(tl!("{verb} Watermark"), &[("verb", verb)]),
         MarkKind::Background => crate::i18n::fmt(tl!("{verb} Background"), &[("verb", verb)]),
     };
-    ui.label(egui::RichText::new(title).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, title);
     ui.add_space(8.0);
     match kind {
         MarkKind::HeaderFooter => {

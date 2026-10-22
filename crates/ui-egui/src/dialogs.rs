@@ -96,9 +96,9 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 return;
             }
             Dialog::Properties(tab) => {
-                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Document Properties")).font(theme::semibold(18.0))));
+                widgets::dialog_title(ui, tl!("Document Properties"));
                 ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
+                rtl::horizontal_wrapped(ui, |ui| {
                     for (tb, label) in [
                         (PropsTab::Description, tl!("Description")),
                         (PropsTab::InitialView, tl!("Initial View")),
@@ -447,7 +447,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 });
             }
             Dialog::Split => {
-                ui.label(egui::RichText::new(tl!("Split document")).font(theme::semibold(18.0)));
+                widgets::dialog_title(ui, tl!("Split document"));
                 ui.add_space(8.0);
                 let Some((vi, id)) = app.active_ids() else { return };
                 let n = app.session.get(id).map(|d| d.info.pages.len()).unwrap_or(0);
@@ -520,7 +520,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     close = true;
                     return;
                 };
-                ui.label(egui::RichText::new(tl!("Replace Pages")).font(theme::semibold(18.0)));
+                widgets::dialog_title(ui, tl!("Replace Pages"));
                 ui.add_space(8.0);
                 d.to = d.to.clamp(1, count);
                 d.from = d.from.clamp(1, d.to);
@@ -621,7 +621,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
             }
             Dialog::Extract => {
                 let count = app.active_ids().map_or(0, |(i, _)| app.views[i].target_pages().len());
-                ui.label(egui::RichText::new(tl!("Extract pages")).font(theme::semibold(18.0)));
+                widgets::dialog_title(ui, tl!("Extract pages"));
                 ui.add_space(8.0);
                 let text = if count == 1 {
                     tl!("1 page selected.").to_string()
@@ -654,7 +654,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 use pdfcraft_engine::{PageOrientation as O, PageParity as P};
                 let n = app.active_ids().and_then(|(_, id)| app.session.get(id)).map_or(1, |d| d.info.pages.len());
                 let d = &mut app.rotate_draft;
-                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Rotate Pages")).font(theme::semibold(18.0))));
+                widgets::dialog_title(ui, tl!("Rotate Pages"));
                 ui.add_space(8.0);
                 widgets::form_grid(ui, "rotate-pages", [12.0, 8.0], None, |rows| {
                     rows.row(tl!("Direction:"), |ui, _| {
@@ -729,7 +729,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     close = true;
                     return;
                 };
-                ui.label(egui::RichText::new(tl!("Duplicate Field")).font(theme::semibold(18.0)));
+                widgets::dialog_title(ui, tl!("Duplicate Field"));
                 ui.add_space(8.0);
                 ui.label(crate::i18n::fmt(tl!("Duplicate \"{name}\" onto:"), &[("name", &crate::bidi::visual_auto(&d.name))]));
                 widgets::radio_value(ui, &mut d.all, true, tl!("All pages"));
@@ -796,7 +796,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 return;
             }
             Dialog::SummarizeComments => {
-                ui.label(egui::RichText::new(tl!("Summarize Options")).font(theme::semibold(18.0)));
+                widgets::dialog_title(ui, tl!("Summarize Options"));
                 ui.add_space(8.0);
                 ui.label(tl!("Choose a layout:"));
                 let _ = ui.add(widgets::radio(true, tl!("Comments only")));
@@ -823,7 +823,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
             }
             Dialog::Revert => {
                 let name = app.active_ids().and_then(|(_, id)| app.session.get(id)).map(|d| d.name.clone()).unwrap_or_default();
-                ui.label(egui::RichText::new(tl!("Revert")).font(theme::semibold(18.0)));
+                widgets::dialog_title(ui, tl!("Revert"));
                 ui.add_space(8.0);
                 widgets::body_text(
                     ui,
@@ -849,7 +849,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let name = app.pending_overwrite.as_ref().and_then(|p| app.session.get(p.id)).map(|d| d.name.clone()).unwrap_or_default();
                 #[cfg(target_arch = "wasm32")]
                 let name = String::new();
-                ui.label(egui::RichText::new(tl!("Save over the changed file?")).font(theme::semibold(18.0)));
+                widgets::dialog_title(ui, tl!("Save over the changed file?"));
                 ui.add_space(8.0);
                 widgets::body_text(
                     ui,
@@ -1050,7 +1050,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
             }
             Dialog::NumberPages => {
                 use pdfcraft_engine::LabelStyle as L;
-                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Number pages")).font(theme::semibold(18.0))));
+                widgets::dialog_title(ui, tl!("Number pages"));
                 ui.add_space(8.0);
                 let Some((_, id)) = app.active_ids() else { return };
                 let n = app.session.get(id).map(|d| d.info.pages.len()).unwrap_or(1).max(1);
@@ -1132,7 +1132,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 });
             }
             Dialog::Shortcuts => {
-                rtl::page(ui, |ui| ui.label(egui::RichText::new(tl!("Keyboard shortcuts")).font(theme::semibold(18.0))));
+                widgets::dialog_title(ui, tl!("Keyboard shortcuts"));
                 ui.add_space(8.0);
                 use crate::commands::{
                     ACTUAL_SIZE, COPY, FIND_NEXT, FIND_PREV, FIT_WIDTH, PAGE_LEVEL, PAGE_NEXT, PAGE_PREV, ROTATE_CCW, ROTATE_CW, SELECT_ALL, ZOOM_IN,
@@ -1186,7 +1186,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 // Tabs About · Contributors · Models (craftrules standards/contributors.md).
                 let tab_id = egui::Id::new("about_tab");
                 let mut tab = ui.data_mut(|d| d.get_temp::<u8>(tab_id)).unwrap_or(0);
-                ui.horizontal_wrapped(|ui| {
+                rtl::horizontal_wrapped(ui, |ui| {
                     for (i, label) in ["About", "Contributors", "Models"].into_iter().enumerate() {
                         let i = i as u8;
                         if widgets::mode_tab(ui, tl!(label), tab == i).clicked() {
