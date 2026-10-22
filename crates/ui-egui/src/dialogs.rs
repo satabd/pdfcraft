@@ -1008,7 +1008,9 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
             Dialog::Preferences => {
                 // The settings outgrow a short window: scroll them rather than run off the screen.
                 let max = (ui.ctx().content_rect().height() - 120.0).max(200.0);
-                close = egui::ScrollArea::vertical().max_height(max).show(ui, |ui| crate::js_ui::preferences_body(ui, app, &t)).inner;
+                close =
+                    crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(max), |ui| crate::js_ui::preferences_body(ui, app, &t))
+                        .inner;
                 return;
             }
             Dialog::RecognizeText => {

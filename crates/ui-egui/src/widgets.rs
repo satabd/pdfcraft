@@ -7,8 +7,11 @@ use crate::{PdfCraftApp, icons, rtl};
 
 mod bidi_edit;
 mod form;
+mod scrollbar;
+mod submenu;
 pub use bidi_edit::BidiEdit;
 pub use form::{FormRows, form_grid, start_block};
+pub use scrollbar::scroll_area;
 
 /// Horizontal and vertical inset of a single-line field.
 const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
@@ -365,21 +368,10 @@ pub fn menu_choice<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
 }
 
 /// A submenu button inside a menu (a top-level menu button elsewhere). Mirrored, its label is
-/// flush right with the arrow at the left; the submenu itself still opens to the right of the
-/// button, or to the left where there is no room (egui fixes its side).
+/// flush right with the arrow at the left, and the submenu opens to the left of the button
+/// ([`rtl::submenu_align`]); either way it opens on the other side where there is no room.
 pub fn sub_menu<R>(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<Option<R>> {
-    use egui::containers::menu::{SubMenuButton, is_in_menu};
-    if !(rtl::mirrored() && is_in_menu(ui)) {
-        return ui.menu_button(label, add_contents);
-    }
-    let mut atoms = egui::Atoms::new(label);
-    atoms.push_left(egui::Atom::grow());
-    atoms.push_left("\u{23F4}");
-    let (resp, inner) = SubMenuButton::from_button(egui::Button::new(atoms)).ui(ui, add_contents);
-    let name = format!("{label} {}", SubMenuButton::RIGHT_ARROW);
-    let enabled = ui.is_enabled();
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &name));
-    egui::InnerResponse::new(inner.map(|i| i.inner), resp)
+    if egui::containers::menu::is_in_menu(ui) { submenu::sub_menu_button(ui, label, add_contents) } else { ui.menu_button(label, add_contents) }
 }
 
 /// Corner radius of a checkbox's box. With the widgets' radius (`Tokens::radius`, 6) egui's 14 px

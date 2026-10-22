@@ -18,9 +18,12 @@
 //! ([`crate::widgets::dialog_title`], [`horizontal_wrapped`]), and a label that does not fit its row
 //! is cut in logical order, so its "…" lands at the left of Arabic ([`crate::widgets::paint_start`]).
 //!
+//! A submenu opens beside its entry on the side its arrow points to: the left when mirrored
+//! ([`submenu_align`], [`crate::widgets::sub_menu`]).
+//!
 //! What stays physical: the window controls, scrollbars, the document canvas and its overlays,
-//! the side a submenu opens on, the order of the document tabs, and the explicit "Tools panel
-//! side" preference. What is not mirrored yet: the data tables that stay `egui::Grid`s (the header
+//! the order of the document tabs, and the explicit "Tools panel side" preference. What is not
+//! mirrored yet: the data tables that stay `egui::Grid`s (the header
 //! and footer boxes, the bulk field properties, the contributor and model tables, the calendar and
 //! the swatch grid itself), the dock's own tab bars, and the painted lists of the Combine page.
 
@@ -203,6 +206,13 @@ pub fn menu_align() -> egui::RectAlign {
     if mirrored() { egui::RectAlign::BOTTOM_END } else { egui::RectAlign::BOTTOM_START }
 }
 
+/// Where the popup of a submenu opens relative to its entry: beside it, level with its top, on the
+/// side the entry's arrow points to (the right in English, the left when mirrored). Where it would
+/// leave the window egui tries the other side.
+pub fn submenu_align() -> egui::RectAlign {
+    if mirrored() { egui::RectAlign::LEFT_START } else { egui::RectAlign::RIGHT_START }
+}
+
 /// `parts` joined by `sep` in the interface's reading order, for one line painted as it is: the
 /// first part at the start edge. In English that is `parts.join(sep)`. Mirrored, the line runs
 /// right to left and its parts are in display order already ([`crate::bidi::display_rtl`]), so
@@ -230,25 +240,28 @@ pub fn caption_value(caption: &str, value: &str) -> String {
     }
 }
 
+/// Draws in Arabic for a test's lifetime (the language is per thread), then restores it.
+#[cfg(test)]
+pub(crate) struct Arabic;
+
+#[cfg(test)]
+impl Arabic {
+    pub(crate) fn on() -> Self {
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").expect("ar registered"));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for Arabic {
+    fn drop(&mut self) {
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::{Lang, set_current};
-
-    /// Draws in Arabic for the test's lifetime (the language is per thread), then restores it.
-    struct Arabic;
-    impl Arabic {
-        fn on() -> Self {
-            set_current(Lang::from_code("ar").expect("ar registered"));
-            Self
-        }
-    }
-    impl Drop for Arabic {
-        fn drop(&mut self) {
-            set_current(Lang::EN);
-        }
-    }
-
     const ROW: Rect = Rect { min: pos2(100.0, 40.0), max: pos2(400.0, 74.0) };
 
     #[test]
@@ -268,6 +281,7 @@ mod tests {
         assert_eq!(flip(Align2::RIGHT_TOP), Align2::RIGHT_TOP);
         assert_eq!(margin(14, 10, 12, 8), Margin { left: 14, right: 10, top: 12, bottom: 8 });
         assert_eq!(menu_align(), egui::RectAlign::BOTTOM_START);
+        assert_eq!(submenu_align(), egui::RectAlign::RIGHT_START);
     }
 
     #[test]
@@ -289,6 +303,7 @@ mod tests {
         assert_eq!(flip(Align2::CENTER_CENTER), Align2::CENTER_CENTER);
         assert_eq!(margin(14, 10, 12, 8), Margin { left: 10, right: 14, top: 12, bottom: 8 });
         assert_eq!(menu_align(), egui::RectAlign::BOTTOM_END);
+        assert_eq!(submenu_align(), egui::RectAlign::LEFT_START);
     }
 
     #[test]

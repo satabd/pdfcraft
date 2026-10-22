@@ -668,3 +668,103 @@ fn a_menu_section_label_is_flush_with_the_entries_below_it() {
         assert_on_screen(&h, &format!("{language} view menu"));
     }
 }
+
+/// The rectangle of the text `text` painted this frame.
+fn painted_rect(h: &Harness<'static, PdfCraftApp>, language: &str, text: &str) -> egui::Rect {
+    let shown = painted_text(h);
+    shown.iter().find(|(t, _)| t == text).unwrap_or_else(|| panic!("{language}: {text:?} is painted: {shown:?}")).1
+}
+
+/// A submenu opens beside its entry, on the side the entry's arrow points to: the left of it in
+/// Arabic (the menu is at the right edge and the entries read from the right), the right of it in
+/// English. A submenu of a submenu continues the same way. egui's own submenu always asked for
+/// the right, and only moved to the left where the window had no room.
+#[test]
+fn a_submenu_opens_on_the_side_its_arrow_points_to() {
+    for language in ["ar", "en"] {
+        let tr = |english: &str| if language == "ar" { ar(english).to_owned() } else { english.to_owned() };
+        let mut h = harness(language, |app| {
+            app.recent.push(pdfcraft_ui_egui::RecentFile { name: "recent.pdf".into(), path: "/nonexistent/recent.pdf".into(), pages: 1, size: 0 });
+        });
+        h.get_by_role_and_label(Role::Button, &tr("Menu")).click();
+        h.run_steps(4);
+        let beside = |inner: egui::Rect, entry: egui::Rect, what: &str| {
+            if language == "ar" {
+                assert!(inner.right() <= entry.left(), "ar: the {what} submenu ({inner:?}) is left of its entry {entry:?}");
+            } else {
+                assert!(inner.left() >= entry.right(), "en: the {what} submenu ({inner:?}) is right of its entry {entry:?}");
+            }
+        };
+
+        // File, opened by a click: its first entry is beside the File entry, not under it.
+        let file_name = format!("{} \u{23F5}", tr("File"));
+        let file = h.get_by_role_and_label(Role::Button, &file_name).rect();
+        h.get_by_role_and_label(Role::Button, &file_name).click();
+        h.run_steps(6);
+        beside(painted_rect(&h, language, &tr("Open…")), file, "File");
+        assert_on_screen(&h, &format!("{language} file submenu"));
+
+        // Open Recent inside it, opened by hovering: the recent file is beside that entry.
+        let recent_name = format!("{} \u{23F5}", tr("Open Recent"));
+        let recent = h.get_by_role_and_label(Role::Button, &recent_name);
+        let recent_rect = recent.rect();
+        recent.hover();
+        h.run_steps(8);
+        beside(painted_rect(&h, language, "recent.pdf"), recent_rect, "Open Recent");
+        assert_on_screen(&h, &format!("{language} open recent submenu"));
+    }
+}
+
+/// A one-page document with `count` bookmarks called "Chapter 1" to "Chapter {count}".
+fn many_bookmarks_fixture(count: usize) -> Vec<u8> {
+    let mut pdf = format!(
+        "%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 400] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R >> endobj
+4 0 obj << /Type /Outlines /First 5 0 R /Last {} 0 R /Count {count} >> endobj
+",
+        4 + count
+    );
+    for i in 1..=count {
+        let (prev, next) = (
+            if i > 1 { format!("/Prev {} 0 R", 4 + i - 1) } else { String::new() },
+            if i < count { format!("/Next {} 0 R", 4 + i + 1) } else { String::new() },
+        );
+        pdf.push_str(&format!("{} 0 obj << /Title (Chapter {i}) /Parent 4 0 R /Dest [3 0 R /Fit] {prev} {next} >> endobj\n", 4 + i));
+    }
+    pdf.push_str("trailer << /Root 1 0 R >>\n%%EOF");
+    pdf.into_bytes()
+}
+
+/// The scrollbar of a list that outgrows its pane is at the start edge of the pane: the left in
+/// Arabic (egui puts its own at the right, so the panel draws a bar of its own), the right in
+/// English, where it is egui's.
+#[test]
+fn the_scrollbar_of_a_long_list_is_at_the_start_edge_of_its_pane() {
+    for language in ["ar", "en"] {
+        let mut h = Harness::builder().with_size(egui::vec2(WIDTH, 600.0)).build_eframe(move |_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", language).unwrap();
+            app.open_bytes("long.pdf", None, many_bookmarks_fixture(80)).expect("opens");
+            app.set_option("left", "closed").unwrap();
+            app.set_option("panel", "bookmarks").unwrap();
+            app
+        });
+        h.run_steps(8);
+        let row = painted_rect(&h, language, "Chapter 1").center().x;
+        let bars: Vec<egui::Rect> = h.query_all_by_role(Role::ScrollBar).map(|n| n.rect()).filter(|r| r.height() > 100.0).collect();
+        // The document view has a bar of its own, at the physical right edge of the view in either
+        // language. The pane (x 48 to 378 in Arabic, the right 330 points in English) has a bar
+        // on its start side only.
+        let in_pane = |r: &&egui::Rect| if language == "ar" { r.center().x < 400.0 } else { r.center().x > 1030.0 };
+        let in_pane: Vec<egui::Rect> = bars.iter().filter(in_pane).copied().collect();
+        if language == "ar" {
+            assert!(in_pane.iter().any(|r| r.center().x < row), "ar: a bar left of the rows (centre {row}): {bars:?}");
+            assert!(in_pane.iter().all(|r| r.center().x < row), "ar: and none at their right: {bars:?}");
+        } else {
+            assert!(in_pane.iter().any(|r| r.center().x > row), "en: a bar right of the rows (centre {row}): {bars:?}");
+        }
+        assert_on_screen(&h, &format!("{language} long list"));
+    }
+}

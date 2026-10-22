@@ -307,7 +307,7 @@ update the numbers.
   (`widgets::BidiEdit` over `bidi::ScreenMap`: the `widgets::line` fields, the palette, the bookmark search, Find and the
   on-page form editor): caret, click, drag selection, Left/Right, Backspace/Delete, copy, undo and input methods
   work on what is drawn and what is stored stays in typing order.
-- **Missing:** the rest of the right-to-left layout (the side a submenu opens on, scrollbars, the dock's
+- **Missing:** the rest of the right-to-left layout (the scrollbars of the document view, Home and the dialog lists, the dock's
   tab bars, the data tables that stay `egui::Grid`s, the Comments, Signatures and Compare panel bodies, the
   order of document tabs, the canvas), bidirectional text in the Add text and Edit text boxes (multi-line fields wrap and edit in display order since 2026-10-22); catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).

@@ -571,7 +571,7 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 /// Keep menus usable when their contents are taller than the window.
 pub(crate) fn scroll_menu(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let height = (ui.ctx().content_rect().height() - 24.0).max(40.0);
-    egui::ScrollArea::vertical().max_height(height).auto_shrink([true, true]).show(ui, add);
+    widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(height).auto_shrink([true, true]), add);
 }
 
 fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {

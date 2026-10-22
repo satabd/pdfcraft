@@ -65,7 +65,7 @@ fn all_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     if close {
         app.left_open = false;
     }
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    widgets::scroll_area(ui, egui::ScrollArea::vertical().auto_shrink([false, false]), |ui| {
         let shown = if app.all_tools_expanded { TOOL_GROUPS.len() } else { COLLAPSED_TOOLS.min(TOOL_GROUPS.len()) };
         for g in &TOOL_GROUPS[..shown] {
             if tool_row(ui, t, g).clicked() {
@@ -215,7 +215,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
     let footer = g.id == "redact";
     let marks = if footer { app.active_ids().and_then(|(_, id)| app.session.get(id)).map_or(0, |d| d.redaction_marks()) } else { 0 };
     let list_h = if footer { (ui.available_height() - 52.0).max(80.0) } else { ui.available_height() };
-    egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(list_h).show(ui, |ui| {
+    widgets::scroll_area(ui, egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(list_h), |ui| {
         for s in g.sections {
             widgets::section_title(ui, tl!(s.title));
             for item in s.items {
@@ -313,7 +313,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
 fn stamp_palette(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     use pdfcraft_engine::{StampGroup, StampKind};
     ui.label(egui::RichText::new(tl!("Choose a stamp, then click on the page to place it.")).small().color(t.text_faint));
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    widgets::scroll_area(ui, egui::ScrollArea::vertical().auto_shrink([false, false]), |ui| {
         for (group, title) in [
             (StampGroup::Dynamic, tl!("Dynamic")),
             (StampGroup::SignHere, tl!("Sign Here")),
@@ -662,7 +662,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         ancestor.pop();
                     }
                 }
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match panel {
+                widgets::scroll_area(ui, egui::ScrollArea::vertical().auto_shrink([false, false]), |ui| match panel {
                     RightPanel::Comments => {
                         if let Some(e) = crate::comments_panel::show(ui, &t, info, view, prefs, comment_allowed, &mut nav) {
                             panel_edit = Some(e);
