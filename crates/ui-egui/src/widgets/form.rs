@@ -74,10 +74,25 @@ pub fn form_grid<R>(
     min_col_width: Option<f32>,
     add_rows: impl FnOnce(&mut FormRows<'_>) -> R,
 ) -> R {
+    form_grid_of(ui, id, spacing, min_col_width, 2, add_rows)
+}
+
+/// [`form_grid`] whose `egui::Grid` is told it has `columns` columns, for a form whose rows have a
+/// third cell ([`FormRows::row_with_note`]). `egui::Grid` sizes the last column from the room that
+/// is left, so the count it is given is part of how a left-to-right form is laid out. Mirrored, a
+/// form has the two columns of its captions and fields.
+pub fn form_grid_of<R>(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    spacing: impl Into<Vec2>,
+    min_col_width: Option<f32>,
+    columns: usize,
+    add_rows: impl FnOnce(&mut FormRows<'_>) -> R,
+) -> R {
     let spacing = spacing.into();
     let min_col_width = min_col_width.filter(|width| width.is_finite());
     if !(rtl::mirrored() && ui.available_width().is_finite()) {
-        let mut grid = egui::Grid::new(id).num_columns(2).spacing(spacing);
+        let mut grid = egui::Grid::new(id).num_columns(columns).spacing(spacing);
         if let Some(width) = min_col_width {
             grid = grid.min_col_width(width);
         }
@@ -188,6 +203,29 @@ impl FormRows<'_> {
         m.widest_caption = m.widest_caption.max(finite_or(caption_used.width(), 0.0));
         m.remember_row(used);
         ui.allocate_rect(Rect::from_min_max(pos2(m.left, top), pos2(m.right, top + used)), Sense::hover());
+    }
+
+    /// A row whose caption is whatever `add_caption` adds, then the field, then a note about the
+    /// field (`add_note`: a "Mixed" tag). In the `egui::Grid` the note is the cell of a third
+    /// column; the mirrored form has two columns, so the note goes in the field's cell, after the
+    /// field in reading order (at its left).
+    pub fn row_with_note(
+        &mut self,
+        add_caption: impl FnOnce(&mut Ui) -> Response,
+        add_field: impl FnOnce(&mut Ui, &Response),
+        add_note: impl FnOnce(&mut Ui),
+    ) {
+        if self.mirrored.is_some() {
+            self.row_with(add_caption, |ui, caption| {
+                add_field(ui, caption);
+                add_note(ui);
+            });
+            return;
+        }
+        let caption = add_caption(self.ui);
+        add_field(self.ui, &caption);
+        add_note(self.ui);
+        self.ui.end_row();
     }
 
     /// A row of one cell across the form, against its start edge: a section title, a row of
@@ -326,6 +364,71 @@ mod tests {
             out.textures_delta.clear();
         }
         placed
+    }
+
+    /// The caption, field and note of two rows, in the last of a few frames: through a three-column
+    /// `egui::Grid` (`grid`) or [`form_grid_of`] with [`FormRows::row_with_note`].
+    fn run_notes(grid: bool) -> Vec<[Rect; 3]> {
+        let ctx = egui::Context::default();
+        let mut placed = Vec::new();
+        for _ in 0..4 {
+            placed.clear();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(WIDTH, 300.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if grid {
+                        egui::Grid::new("notes").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+                            for (caption, note) in [("Name", "Mixed"), ("Pages", "")] {
+                                let cells = [ui.label(caption).rect, ui.button("All").rect, ui.label(note).rect];
+                                placed.push(cells);
+                                ui.end_row();
+                            }
+                        });
+                    } else {
+                        form_grid_of(ui, "notes", [12.0, 8.0], None, 3, |rows| {
+                            for (caption, note) in [("Name", "Mixed"), ("Pages", "")] {
+                                let cells = [Rect::NOTHING; 3].map(std::cell::Cell::new);
+                                rows.row_with_note(
+                                    |ui| {
+                                        let label = ui.label(caption);
+                                        cells[0].set(label.rect);
+                                        label
+                                    },
+                                    |ui, _| cells[1].set(ui.button("All").rect),
+                                    |ui| cells[2].set(ui.label(note).rect),
+                                );
+                                let cells = cells.map(|cell| cell.get());
+                                placed.push(cells);
+                            }
+                        });
+                    }
+                });
+            });
+            out.textures_delta.clear();
+        }
+        placed
+    }
+
+    #[test]
+    fn english_notes_are_the_cells_of_a_third_grid_column() {
+        let (grid, form) = (run_notes(true), run_notes(false));
+        assert_eq!(grid.len(), 2);
+        assert_eq!(format!("{grid:?}"), format!("{form:?}"));
+        for [caption, field, note] in &form {
+            assert!(caption.right() <= field.left() && field.right() <= note.left(), "{caption:?} {field:?} {note:?}");
+        }
+    }
+
+    #[test]
+    fn a_note_is_left_of_its_field_in_arabic() {
+        let _arabic = ArabicUi::on();
+        let form = run_notes(false);
+        assert_eq!(form.len(), 2);
+        for [caption, field, note] in &form {
+            assert!(field.right() <= caption.left(), "the field {field:?} is left of its caption {caption:?}");
+            assert!(note.right() <= field.left() + 0.5, "and its note {note:?} is left of the field {field:?}");
+            assert!(caption.right() <= WIDTH && note.left() >= 0.0, "inside the form: {caption:?} {note:?}");
+        }
     }
 
     #[test]

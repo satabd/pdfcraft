@@ -2362,7 +2362,10 @@ fn page_scroll<R>(
     id: egui::Id,
     draw: impl FnOnce(&mut egui::Ui, egui::Rect) -> R,
 ) -> egui::scroll_area::ScrollAreaOutput<R> {
-    ui.scope_builder(egui::UiBuilder::new().id(id), |ui| scroll.show_viewport(ui, draw)).inner
+    // Both ways: the vertical bar is at the start edge of a mirrored interface (the left), and the
+    // bottom bar is drawn with it, since the one setting that hides egui's bar hides both.
+    ui.scope_builder(egui::UiBuilder::new().id(id), |ui| crate::widgets::scroll_area_with(ui, scroll, true, |area, ui| area.show_viewport(ui, draw)))
+        .inner
 }
 
 pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {

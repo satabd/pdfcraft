@@ -9,6 +9,7 @@ use craft_ui::docking::{Action, Placement, Zone};
 use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use pdfcraft_engine::{Edit, NewField, Session};
 use pdfcraft_ui_egui::PdfCraftApp;
 use pdfcraft_ui_egui::docking::{Panel, Workspace};
 use pdfcraft_ui_egui::i18n::{self, Lang};
@@ -754,10 +755,10 @@ fn the_scrollbar_of_a_long_list_is_at_the_start_edge_of_its_pane() {
         h.run_steps(8);
         let row = painted_rect(&h, language, "Chapter 1").center().x;
         let bars: Vec<egui::Rect> = h.query_all_by_role(Role::ScrollBar).map(|n| n.rect()).filter(|r| r.height() > 100.0).collect();
-        // The document view has a bar of its own, at the physical right edge of the view in either
-        // language. The pane (x 48 to 378 in Arabic, the right 330 points in English) has a bar
-        // on its start side only.
-        let in_pane = |r: &&egui::Rect| if language == "ar" { r.center().x < 400.0 } else { r.center().x > 1030.0 };
+        // The document view has a bar of its own, at its start edge (the left in Arabic, just right
+        // of the pane, which is x 48 to 378 there; the right in English, where the pane is the right
+        // 330 points). The pane has a bar on its start side only.
+        let in_pane = |r: &&egui::Rect| if language == "ar" { r.center().x < 378.0 } else { r.center().x > 1030.0 };
         let in_pane: Vec<egui::Rect> = bars.iter().filter(in_pane).copied().collect();
         if language == "ar" {
             assert!(in_pane.iter().any(|r| r.center().x < row), "ar: a bar left of the rows (centre {row}): {bars:?}");
@@ -766,5 +767,414 @@ fn the_scrollbar_of_a_long_list_is_at_the_start_edge_of_its_pane() {
             assert!(in_pane.iter().any(|r| r.center().x > row), "en: a bar right of the rows (centre {row}): {bars:?}");
         }
         assert_on_screen(&h, &format!("{language} long list"));
+    }
+}
+
+/// The vertical and the horizontal bar of the document view: the widest horizontal bar (the
+/// view's own) and the vertical bars whose centre lies within its width.
+fn document_bars(h: &Harness<'static, PdfCraftApp>) -> (Vec<egui::Rect>, egui::Rect) {
+    let bars: Vec<egui::Rect> = h.query_all_by_role(Role::ScrollBar).map(|n| n.rect()).collect();
+    let horizontal = bars
+        .iter()
+        .filter(|r| r.height() < 24.0 && r.width() > 300.0)
+        .max_by(|a, b| a.width().total_cmp(&b.width()))
+        .copied()
+        .unwrap_or_else(|| panic!("no horizontal bar for the document view among {bars:?}"));
+    let vertical = bars.iter().filter(|r| r.width() < 24.0 && r.height() > 300.0 && horizontal.x_range().contains(r.center().x)).copied().collect();
+    (vertical, horizontal)
+}
+
+/// The document view's vertical scrollbar is at the left edge of the view when the interface is
+/// mirrored (egui puts its own at the right, so the canvas draws the bar), and at the right edge
+/// in English, where it is egui's. The horizontal bar is at the bottom in both.
+#[test]
+fn the_document_views_scrollbar_is_at_the_start_edge() {
+    for language in ["ar", "en"] {
+        // Three times the size: the page is taller and wider than the view.
+        let h = harness(language, |app| {
+            app.set_option("left", "closed").unwrap();
+            app.set_option("zoom", "300").unwrap();
+        });
+        let (vertical, horizontal) = document_bars(&h);
+        assert_eq!(vertical.len(), 1, "{language}: one vertical bar for the view among {vertical:?} (horizontal {horizontal:?})");
+        let bar = vertical[0];
+        if language == "ar" {
+            assert!((bar.left() - horizontal.left()).abs() < 2.0, "ar: the bar {bar:?} is at the left edge of the view {horizontal:?}");
+        } else {
+            assert!((bar.right() - horizontal.right()).abs() < 2.0, "en: the bar {bar:?} is at the right edge of the view {horizontal:?}");
+        }
+        assert!(horizontal.top() > bar.center().y, "{language}: the horizontal bar {horizontal:?} runs along the bottom");
+    }
+}
+
+/// Scrolling the document view works from the bar at its left edge: dragging the handle down moves
+/// the page up, and the horizontal bar still scrolls sideways.
+#[test]
+fn the_mirrored_document_view_scrolls_from_its_bars() {
+    let mut h = harness("ar", |app| {
+        app.set_option("left", "closed").unwrap();
+        app.set_option("zoom", "300").unwrap();
+    });
+    // How far the page has moved up and to the left from where it started.
+    let start = h.state().views[0].page_screen_rect(0).expect("page 1 on screen").min;
+    let moved = |h: &Harness<'static, PdfCraftApp>| start - h.state().views[0].page_screen_rect(0).expect("page 1 on screen").min;
+    let (vertical, horizontal) = document_bars(&h);
+    let bar = vertical[0];
+    let from = egui::pos2(bar.center().x, bar.top() + 12.0);
+    let to = from + egui::vec2(0.0, 80.0);
+    h.event(egui::Event::PointerMoved(from));
+    h.run_steps(2);
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run_steps(2);
+    for k in 1..=4 {
+        h.event(egui::Event::PointerMoved(from.lerp(to, k as f32 / 4.0)));
+        h.run_steps(2);
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    assert!(moved(&h).y > 50.0, "the left bar scrolled the page: {:?}", moved(&h));
+    // Sideways, along the bottom bar from its left end.
+    let from = egui::pos2(horizontal.left() + 12.0, horizontal.center().y);
+    let to = from + egui::vec2(60.0, 0.0);
+    h.event(egui::Event::PointerMoved(from));
+    h.run_steps(2);
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run_steps(2);
+    for k in 1..=4 {
+        h.event(egui::Event::PointerMoved(from.lerp(to, k as f32 / 4.0)));
+        h.run_steps(2);
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    assert!(moved(&h).x > 20.0, "the bottom bar scrolled the page sideways: {:?}", moved(&h));
+}
+
+/// The rect of the tab called `name` on the tab strip.
+fn tab_rect(h: &Harness<'static, PdfCraftApp>, name: &str) -> egui::Rect {
+    h.get_by_role_and_label(Role::Tab, name).rect()
+}
+
+/// Three documents: `rtl.pdf` (the one every harness opens) first, then `middle.pdf` and `last.pdf`.
+fn three_documents(language: &'static str) -> Harness<'static, PdfCraftApp> {
+    harness(language, |app| {
+        for name in ["middle.pdf", "last.pdf"] {
+            app.open_bytes(name, None, fixture()).unwrap();
+        }
+    })
+}
+
+fn drag_tab(h: &mut Harness<'static, PdfCraftApp>, name: &str, to: egui::Pos2) {
+    let from = tab_rect(h, name).center();
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run_steps(1);
+    for k in 1..=6 {
+        h.event(egui::Event::PointerMoved(from.lerp(to, k as f32 / 6.0)));
+        h.run_steps(1);
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+}
+
+/// The first document is the rightmost tab when the interface is mirrored, the leftmost in
+/// English; the order of the documents is the same in both, and the Combine tab comes after the
+/// last document (at the far end of the strip).
+#[test]
+fn the_first_document_tab_is_at_the_start_edge() {
+    for language in ["ar", "en"] {
+        let mut h = three_documents(language);
+        let ids: Vec<_> = h.state().views.iter().map(|view| view.id).collect();
+        let (first, middle, last) = (tab_rect(&h, "rtl.pdf"), tab_rect(&h, "middle.pdf"), tab_rect(&h, "last.pdf"));
+        if language == "ar" {
+            assert!(first.left() > middle.right() && middle.left() > last.right(), "ar: first {first:?}, middle {middle:?}, last {last:?}");
+            assert!(first.center().x < button_x(&h, ar("Home")), "ar: the tabs follow Home, to its left");
+        } else {
+            assert!(first.right() < middle.left() && middle.right() < last.left(), "en: first {first:?}, middle {middle:?}, last {last:?}");
+        }
+        h.state_mut().execute("page.combine");
+        h.run_steps(3);
+        let (last, combine) = (tab_rect(&h, "last.pdf"), tab_rect(&h, i18n::tr(Lang::from_code(language).unwrap(), "Combine files")));
+        assert_eq!(combine.center().x < last.center().x, language == "ar", "{language}: Combine after the last document: {combine:?} / {last:?}");
+        assert_eq!(h.state().views.iter().map(|view| view.id).collect::<Vec<_>>(), ids, "{language}: the documents keep their order");
+    }
+}
+
+/// Dragging a tab in the mirrored strip drops it where the pointer lets go, reading from the
+/// right: the first document dragged to the left end becomes the last.
+#[test]
+fn a_dragged_tab_drops_where_the_mirrored_strip_reads() {
+    let mut h = three_documents("ar");
+    let ids: Vec<_> = h.state().views.iter().map(|view| view.id).collect();
+    // rtl.pdf (rightmost) past the last one at the left: the end of the order.
+    let to = tab_rect(&h, "last.pdf").left_center() - egui::vec2(12.0, 0.0);
+    drag_tab(&mut h, "rtl.pdf", to);
+    assert_eq!(h.state().views.iter().map(|view| view.id).collect::<Vec<_>>(), [ids[1], ids[2], ids[0]]);
+    let (first, middle, last) = (tab_rect(&h, "rtl.pdf"), tab_rect(&h, "middle.pdf"), tab_rect(&h, "last.pdf"));
+    assert!(
+        middle.left() > last.right() && last.left() > first.right(),
+        "the strip draws the new order from the right: {middle:?} {last:?} {first:?}"
+    );
+    // last.pdf, now in the middle, past the right end: the front.
+    let to = tab_rect(&h, "middle.pdf").right_center() + egui::vec2(12.0, 0.0);
+    drag_tab(&mut h, "last.pdf", to);
+    assert_eq!(h.state().views.iter().map(|view| view.id).collect::<Vec<_>>(), [ids[2], ids[1], ids[0]]);
+    assert!(tab_rect(&h, "last.pdf").left() > tab_rect(&h, "middle.pdf").right());
+    // A tab dropped where it was stays.
+    let middle = tab_rect(&h, "middle.pdf");
+    drag_tab(&mut h, "middle.pdf", middle.center() - egui::vec2(10.0, 0.0));
+    assert_eq!(h.state().views.iter().map(|view| view.id).collect::<Vec<_>>(), [ids[2], ids[1], ids[0]]);
+}
+
+fn enabled(h: &Harness<'static, PdfCraftApp>, label: &str) -> Option<bool> {
+    h.query_by_label(label)?;
+    Some(h.query_by(|n| n.label().as_deref() == Some(label) && n.is_disabled()).is_none())
+}
+
+/// Tabs that outgrow the strip scroll with arrows, as in English: the arrows keep their physical
+/// sides, the strip starts at its right end (the first document), and the newest tab, at the left
+/// end, is brought into view when it opens.
+#[test]
+fn a_mirrored_strip_that_overflows_scrolls_with_its_arrows() {
+    fn name(i: usize) -> String {
+        format!("Statement {i} for the office records, scanned.pdf")
+    }
+    let mut h = harness("ar", |app| {
+        for i in 0..7 {
+            app.open_bytes(&name(i), None, fixture()).unwrap();
+        }
+    });
+    h.run_steps(6);
+    let (left, right) = (ar("Scroll tabs left"), ar("Scroll tabs right"));
+    let open = button_x(&h, ar("Open"));
+    let (left_x, right_x) = (button_x(&h, left), button_x(&h, right));
+    assert!(left_x < open && open < right_x - 20.0 || open < left_x, "the arrows are beside the tabs: {left_x} {open} {right_x}");
+    assert!(left_x < right_x, "the left arrow is at the left of the tabs, the right one at their right");
+    // The newest document (the last, at the left end) is active and in sight, so only the right
+    // arrow can go further: more tabs lie to the right.
+    assert_eq!((enabled(&h, left), enabled(&h, right)), (Some(false), Some(true)));
+    let strip = (left_x, right_x);
+    let newest = tab_rect(&h, &name(6));
+    assert!(newest.center().x > strip.0 && newest.center().x < strip.1, "the newest tab {newest:?} is in sight between the arrows {strip:?}");
+    let before = tab_rect(&h, &name(0));
+    h.get_by_label(right).click();
+    h.run_steps(4);
+    assert!(tab_rect(&h, &name(0)).left() < before.left(), "the right arrow scrolls the strip towards the first documents");
+    assert_eq!(enabled(&h, left), Some(true), "and then there is more to the left");
+    // Back at the left end.
+    for _ in 0..8 {
+        if enabled(&h, left) == Some(true) {
+            h.get_by_label(left).click();
+            h.run_steps(4);
+        }
+    }
+    assert_eq!(enabled(&h, left), Some(false));
+}
+
+/// The mirrored strip stays at its right end, where the first documents are, when the window gets
+/// narrower: its first tab stays beside the right arrow instead of sliding out of the strip.
+#[test]
+fn a_mirrored_strip_keeps_its_first_tabs_in_sight_when_the_window_narrows() {
+    let mut h = harness("ar", |app| {
+        for i in 0..7 {
+            app.open_bytes(&format!("Statement {i} for the office records, scanned.pdf"), None, fixture()).unwrap();
+        }
+        // The first document is active, at the right end of the strip.
+        app.active = Some(0);
+    });
+    h.run_steps(6);
+    let beside_the_arrow = |h: &Harness<'static, PdfCraftApp>| {
+        let (first, arrow) = (tab_rect(h, "rtl.pdf"), h.get_by_role_and_label(Role::Button, ar("Scroll tabs right")).rect());
+        (arrow.left() - first.right() < 12.0 && first.right() <= arrow.left() + 0.5, first, arrow)
+    };
+    let (beside, first, arrow) = beside_the_arrow(&h);
+    assert!(beside, "the first tab {first:?} is beside the right arrow {arrow:?}");
+    h.set_size(egui::vec2(WIDTH - 150.0, 900.0));
+    h.run_steps(8);
+    let (beside, first, arrow) = beside_the_arrow(&h);
+    assert!(beside, "after narrowing: the first tab {first:?} is beside the right arrow {arrow:?}");
+}
+
+/// A document with `fields` on its first page.
+fn form_with(fields: &[(&str, [f64; 4], NewField)]) -> Vec<u8> {
+    let mut s = Session::new();
+    let bytes = s.create_blank(300.0, 400.0, 1).unwrap();
+    let id = s.open("form.pdf", None, bytes, None).unwrap();
+    for (name, rect, kind) in fields {
+        s.apply(id, Edit::AddField { name: Some((*name).into()), page: 0, rect: *rect, kind: kind.clone() }).unwrap();
+    }
+    s.save_bytes(id).unwrap().as_ref().clone()
+}
+
+/// The shared field properties are a form: the checkbox that names a property is at the right of
+/// its editor, and the "Mixed" tag at the left of the editor; English keeps the three columns.
+#[test]
+fn the_shared_field_properties_run_from_the_start_edge() {
+    for language in ["ar", "en"] {
+        let mut h = Harness::builder().with_size(egui::vec2(WIDTH, 900.0)).build_eframe(move |_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", language).unwrap();
+            app.open_bytes(
+                "form.pdf",
+                None,
+                form_with(&[
+                    ("alpha", [40.0, 290.0, 230.0, 314.0], NewField::Text { multiline: false }),
+                    ("beta", [40.0, 240.0, 230.0, 264.0], NewField::Text { multiline: false }),
+                ]),
+            )
+            .unwrap();
+            app.execute("form.prepare");
+            app
+        });
+        h.run_steps(4);
+        // Two fields with different tooltips: Tooltip is mixed.
+        for (name, tip) in [("alpha", "Help for alpha"), ("beta", "Help for beta")] {
+            let s = h.state_mut();
+            let id = s.views[0].id;
+            s.session
+                .apply(
+                    id,
+                    Edit::SetFieldProps {
+                        name: name.into(),
+                        props: Box::new(pdfcraft_engine::FieldProps { tooltip: Some(tip.into()), ..Default::default() }),
+                    },
+                )
+                .unwrap();
+        }
+        let p = &mut h.state_mut().views[0].prepare;
+        p.selected = Some(("alpha".into(), 0));
+        p.also = vec![("beta".into(), 0)];
+        h.state_mut().execute("form.field.properties");
+        h.run_steps(6);
+        let tooltip = h.get_by_role_and_label(Role::CheckBox, i18n::tr(Lang::from_code(language).unwrap(), "Tooltip:")).rect();
+        let editor = h
+            .query_all_by_role(Role::TextInput)
+            .map(|n| n.rect())
+            .find(|r| (r.center().y - tooltip.center().y).abs() < 20.0 && r.width() > 50.0)
+            .unwrap_or_else(|| {
+                let inputs: Vec<_> = h.query_all_by_role(Role::TextInput).map(|n| n.rect()).collect();
+                panic!("{language}: no editor on the Tooltip row {tooltip:?} among {inputs:?}")
+            });
+        let mixed = h.get_by_label(i18n::tr(Lang::from_code(language).unwrap(), "Mixed")).rect();
+        if language == "ar" {
+            assert!(tooltip.center().x > editor.center().x, "ar: the checkbox {tooltip:?} is at the right of its editor {editor:?}");
+            assert!(mixed.center().x < editor.center().x, "ar: the Mixed tag {mixed:?} is at the left of the editor {editor:?}");
+        } else {
+            assert!(tooltip.center().x < editor.center().x && editor.center().x < mixed.center().x, "en: {tooltip:?} {editor:?} {mixed:?}");
+        }
+        assert_on_screen(&h, &format!("{language} shared field properties"));
+    }
+}
+
+/// The calendar of a date field runs from the start edge: Sunday is the rightmost column and the
+/// arrow at the left goes to the next month when mirrored; English is as it was.
+#[test]
+fn the_calendar_runs_from_the_start_edge() {
+    for language in ["ar", "en"] {
+        let mut h = Harness::builder().with_size(egui::vec2(WIDTH, 900.0)).build_eframe(move |_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", language).unwrap();
+            app.open_bytes("form.pdf", None, form_with(&[("due", [50.0, 40.0, 200.0, 60.0], NewField::Date)])).unwrap();
+            app.set_option("left", "closed").unwrap();
+            app.set_option("zoom", "150").unwrap();
+            app
+        });
+        for _ in 0..40 {
+            h.run_steps(2);
+            if !h.state().render_pending() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let point = {
+            let s = h.state();
+            let doc = s.session.get(s.views[0].id).unwrap();
+            let f = doc.form.iter().find(|f| f.name == "due").unwrap();
+            pdfcraft_ui_egui::forms_ui::field_screen_rect(&s.views[0], &doc.info, f, 0).expect("on screen").center()
+        };
+        h.hover_at(point);
+        h.run_steps(1);
+        h.drag_at(point);
+        h.run_steps(1);
+        h.drop_at(point);
+        h.run_steps(3);
+        let lang = Lang::from_code(language).unwrap();
+        let weekday = |english: &str| h.get_by_label(i18n::tr_ctx(lang, "calendar weekday", english)).rect().center().x;
+        let (sunday, saturday) = (weekday("Su"), weekday("Sa"));
+        assert_eq!(sunday > saturday, language == "ar", "{language}: Sunday {sunday}, Saturday {saturday}");
+        // The whole week reads from the start edge.
+        let days = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(weekday);
+        assert!(days.windows(2).all(|pair| (pair[0] < pair[1]) == (language == "en")), "{language}: the week runs {days:?}");
+        let (y, m, _) = h.state().session.today();
+        // The arrow at the left of the month name goes to the earlier month in English and to the
+        // later one when mirrored.
+        let title = |month: u32, year: i64| {
+            const MONTHS: [&str; 12] =
+                ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            let name = MONTHS.get((month - 1) as usize).copied().unwrap_or("January");
+            i18n::fmt(i18n::tr(lang, "{month} {y}"), &[("month", i18n::tr(lang, name)), ("y", &year.to_string())])
+        };
+        h.get_by_label(&title(m, y));
+        let (later, earlier) = (if m == 12 { (1, y + 1) } else { (m + 1, y) }, if m == 1 { (12, y - 1) } else { (m - 1, y) });
+        let (later, earlier) = (title(later.0, later.1), title(earlier.0, earlier.1));
+        let (left_goes, right_goes) = if language == "ar" { (&later, &earlier) } else { (&earlier, &later) };
+        h.get_by_label("‹").click();
+        h.run_steps(3);
+        h.get_by_label(left_goes);
+        h.get_by_label("›").click();
+        h.run_steps(3);
+        h.get_by_label(&title(m, y));
+        h.get_by_label("›").click();
+        h.run_steps(3);
+        h.get_by_label(right_goes);
+    }
+}
+
+/// The About window open at its `tab` ("Contributors" or "Models").
+fn about_tab(language: &'static str, tab: &str) -> Harness<'static, PdfCraftApp> {
+    let mut h = harness(language, |app| app.set_option("dialog", "about").unwrap());
+    h.run_steps(4);
+    let lang = Lang::from_code(language).unwrap();
+    h.get_by_label(i18n::tr(lang, tab)).click();
+    h.run_steps(4);
+    h
+}
+
+/// The model table's first column, the company, is at the right when mirrored; English is as it was.
+#[test]
+fn the_model_table_runs_from_the_start_edge() {
+    for language in ["ar", "en"] {
+        let h = about_tab(language, "Models");
+        let lang = Lang::from_code(language).unwrap();
+        let x = |english: &str| h.get_by_role_and_label(Role::Label, i18n::tr(lang, english)).rect().center().x;
+        let (company, model, version, lines) = (x("Company"), x("Model"), x("Version"), x("Lines +/−"));
+        let in_order = company < model && model < version && version < lines;
+        let reversed = company > model && model > version && version > lines;
+        assert_eq!((in_order, reversed), (language == "en", language == "ar"), "{language}: {company} {model} {version} {lines}");
+        assert_on_screen(&h, &format!("{language} models"));
+    }
+}
+
+/// The same for the contributor table: its name column is at the right, a click on a header still
+/// sorts, and the names are right-aligned in their column.
+#[test]
+fn the_contributor_table_runs_from_the_start_edge() {
+    for language in ["ar", "en"] {
+        let mut h = about_tab(language, "Contributors");
+        let lang = Lang::from_code(language).unwrap();
+        h.get_by_label(i18n::tr(lang, "Table")).click();
+        h.run_steps(4);
+        let button = |h: &Harness<'static, PdfCraftApp>, english: &str| h.get_by_role_and_label(Role::Button, i18n::tr(lang, english)).rect();
+        let (name, prs, commits) = (button(&h, "Name"), button(&h, "PRs"), button(&h, "Commits"));
+        let in_order = name.center().x < prs.center().x && prs.center().x < commits.center().x;
+        let reversed = name.center().x > prs.center().x && prs.center().x > commits.center().x;
+        assert_eq!((in_order, reversed), (language == "en", language == "ar"), "{language}: {name:?} {prs:?} {commits:?}");
+        // The first contributor's link is in the name column.
+        let link = h.query_all_by_role(Role::Link).next().expect("a contributor link").rect();
+        assert_eq!(link.center().x > prs.center().x, language == "ar", "{language}: link {link:?} against the PRs column {prs:?}");
+        // Sorting by a header still works from the mirrored header, and flips its arrow.
+        h.get_by_role_and_label(Role::Button, i18n::tr(lang, "Name")).click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, &format!("{} ▲", i18n::tr(lang, "Name")));
+        assert_on_screen(&h, &format!("{language} contributors"));
     }
 }

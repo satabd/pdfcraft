@@ -10,35 +10,147 @@
 //! track fading in with the pointer as egui's do, and dragging the handle (or pressing in the track,
 //! which centres the handle there) sets the area's stored offset.
 //!
-//! English never goes through any of this: [`scroll_area`] is `ScrollArea::show` there. Only for
-//! vertical areas; a horizontal bar stays where egui puts it.
+//! English never goes through any of this: [`scroll_area`] is `ScrollArea::show` there. A vertical
+//! area gets the start-edge bar only; a horizontal bar stays where egui puts it. An area that
+//! scrolls both ways (the document view, [`scroll_area_with`]) cannot keep egui's bottom bar once
+//! egui's bars are hidden (the visibility is one setting for both axes), so there the horizontal
+//! bar is drawn by the same code, at the bottom edge where egui has it.
 
 use egui::scroll_area::{ScrollAreaOutput, State};
-use egui::{Id, Rangef, Rect, ScrollArea, Sense, Ui, WidgetInfo, WidgetType, lerp, pos2, remap, remap_clamp};
+use egui::{Id, Pos2, Rangef, Rect, ScrollArea, Sense, Ui, Vec2, WidgetInfo, WidgetType, lerp, pos2, remap, remap_clamp};
 
 use crate::rtl;
 
 /// Show `area` in `ui`, with its vertical scrollbar at the start edge: the right in English (egui's
 /// own bar, untouched), the left when the interface is mirrored.
 pub fn scroll_area<R>(ui: &mut Ui, area: ScrollArea, add_contents: impl FnOnce(&mut Ui) -> R) -> ScrollAreaOutput<R> {
+    scroll_area_with(ui, area, false, |area, ui| area.show(ui, add_contents))
+}
+
+/// [`scroll_area`] for an area that `show` shows in its own way (`show_viewport`, say), and that
+/// scrolls sideways too when `sideways` is true. English runs `show(area, ui)` as it is. Mirrored,
+/// egui's bars are hidden and the vertical bar is drawn at the left edge; for an area that
+/// scrolls sideways the bottom bar is drawn as well, since hiding egui's bars hides both. The
+/// area's scrolling (wheel, keys, dragging its content, the offsets set on it) is egui's own.
+pub fn scroll_area_with<R>(
+    ui: &mut Ui,
+    area: ScrollArea,
+    sideways: bool,
+    show: impl FnOnce(ScrollArea, &mut Ui) -> ScrollAreaOutput<R>,
+) -> ScrollAreaOutput<R> {
     if !rtl::mirrored() {
-        return area.show(ui, add_contents);
+        return show(area, ui);
     }
-    let output = area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, add_contents);
-    paint_start_bar(ui, &output);
+    let output = show(area.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden), ui);
+    paint_bar(ui, &output, Axis::Y);
+    if sideways {
+        paint_bar(ui, &output, Axis::X);
+    }
     output
 }
 
-/// The id of the start-edge bar of the scroll area `area_id`.
-fn bar_id(area_id: Id) -> Id {
-    area_id.with("start_scroll_bar")
+/// The direction a bar scrolls its area in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Axis {
+    /// A horizontal bar, along the bottom edge of the viewport.
+    X,
+    /// A vertical bar, along the left edge of the viewport (the start edge when mirrored).
+    Y,
+}
+
+impl Axis {
+    /// The component of `v` along this axis.
+    fn of(self, v: Vec2) -> f32 {
+        match self {
+            Self::X => v.x,
+            Self::Y => v.y,
+        }
+    }
+
+    /// The coordinate of `p` along this axis.
+    fn at(self, p: Pos2) -> f32 {
+        match self {
+            Self::X => p.x,
+            Self::Y => p.y,
+        }
+    }
+
+    /// The extent of `rect` along this axis: where a bar's track runs.
+    fn track(self, rect: Rect) -> Rangef {
+        match self {
+            Self::X => rect.x_range(),
+            Self::Y => rect.y_range(),
+        }
+    }
+
+    /// The extent of `rect` across this axis: how thick a bar in it is.
+    fn thickness(self, rect: Rect) -> f32 {
+        match self {
+            Self::X => rect.height(),
+            Self::Y => rect.width(),
+        }
+    }
+
+    /// Set the component of `v` along this axis.
+    fn set(self, v: &mut Vec2, value: f32) {
+        match self {
+            Self::X => v.x = value,
+            Self::Y => v.y = value,
+        }
+    }
+
+    /// The strip of the viewport `view` that senses the pointer for this axis's bar, `width` thick:
+    /// against the left edge or the bottom edge, nudged inwards if an enclosing scroll area has
+    /// scrolled that edge out of view (`clip` is the clip rectangle of the enclosing `ui`).
+    fn strip(self, view: Rect, clip: Rect, width: f32) -> Rect {
+        match self {
+            Self::Y => {
+                let left = view.left().max(clip.left()).min(view.right());
+                Rect::from_min_max(pos2(left, view.top()), pos2((left + width).min(view.right()), view.bottom()))
+            }
+            Self::X => {
+                let bottom = view.bottom().min(clip.bottom()).max(view.top());
+                Rect::from_min_max(pos2(view.left(), (bottom - width).max(view.top())), pos2(view.right(), bottom))
+            }
+        }
+    }
+
+    /// The bar drawn in `strip` when it is `thickness` thick: it grows from the edge inwards.
+    fn bar(self, strip: Rect, thickness: f32) -> Rect {
+        match self {
+            Self::Y => Rect::from_min_max(strip.min, pos2(strip.min.x + thickness, strip.max.y)),
+            Self::X => Rect::from_min_max(pos2(strip.min.x, strip.max.y - thickness), strip.max),
+        }
+    }
+
+    /// The handle within `bar`, spanning `span` along the track.
+    fn handle(self, bar: Rect, span: Rangef) -> Rect {
+        match self {
+            Self::Y => Rect::from_min_max(pos2(bar.min.x, span.min), pos2(bar.max.x, span.max)),
+            Self::X => Rect::from_min_max(pos2(span.min, bar.min.y), pos2(span.max, bar.max.y)),
+        }
+    }
+}
+
+/// The id of the mirrored bar of the scroll area `area_id` along `axis`.
+fn bar_id(area_id: Id, axis: Axis) -> Id {
+    match axis {
+        Axis::Y => area_id.with("start_scroll_bar"),
+        Axis::X => area_id.with("bottom_scroll_bar"),
+    }
 }
 
 /// Where the start-edge bar of the scroll area `area_id` was last laid out (the strip that senses
 /// the pointer, at its full width), or `None` where the area shows egui's own bar or needs none.
 #[cfg(test)]
 pub(crate) fn start_bar_rect(ctx: &egui::Context, area_id: Id) -> Option<Rect> {
-    ctx.read_response(bar_id(area_id)).map(|r| r.rect)
+    ctx.read_response(bar_id(area_id, Axis::Y)).map(|r| r.rect)
+}
+
+/// The same for the bottom bar of an area that scrolls sideways.
+#[cfg(test)]
+pub(crate) fn bottom_bar_rect(ctx: &egui::Context, area_id: Id) -> Option<Rect> {
+    ctx.read_response(bar_id(area_id, Axis::X)).map(|r| r.rect)
 }
 
 /// The vertical extent of the handle of a bar whose track spans `track`, for a viewport `view` tall
@@ -65,65 +177,67 @@ fn offset_for_handle_top(top: f32, track: Rangef, len: f32, max_offset: f32) -> 
     remap(top, track.min..=(track.max - len), 0.0..=max_offset).clamp(0.0, max_offset.max(0.0))
 }
 
-/// Paint the bar of `output`'s area at the left edge of its viewport, and let the pointer drag it.
-fn paint_start_bar<R>(ui: &mut Ui, output: &ScrollAreaOutput<R>) {
+/// Paint the bar of `output`'s area along `axis` (at the left or the bottom edge of its viewport),
+/// and let the pointer drag it.
+fn paint_bar<R>(ui: &mut Ui, output: &ScrollAreaOutput<R>, axis: Axis) {
     let (view, content) = (output.inner_rect, output.content_size);
+    let (view_len, content_len) = (axis.of(view.size()), axis.of(content));
     let style = ui.spacing().scroll;
-    // The strip egui would sense, mirrored: its full width at the left edge of the viewport, nudged
-    // right if an enclosing scroll area has scrolled that edge out of view.
-    let left = view.left().max(ui.clip_rect().left()).min(view.right());
-    let strip = Rect::from_min_max(pos2(left, view.top()), pos2((left + style.bar_width).min(view.right()), view.bottom()));
-    let track = Rangef::new(view.top(), view.bottom());
-    if handle_span(track, content.y, view.height(), output.state.offset.y, style.handle_min_length).is_none() || !ui.is_rect_visible(strip) {
+    // The strip egui would sense, at the other edge: its full width along the viewport's edge.
+    let strip = axis.strip(view, ui.clip_rect(), style.bar_width);
+    let track = axis.track(view);
+    let offset_now = axis.of(output.state.offset);
+    if handle_span(track, content_len, view_len, offset_now, style.handle_min_length).is_none() || !ui.is_rect_visible(strip) {
         return;
     }
 
-    let id = bar_id(output.id);
+    let id = bar_id(output.id, axis);
     let enabled = ui.is_enabled();
     let response = ui.interact(strip, id, if enabled { Sense::click_and_drag() } else { Sense::hover() });
     response.widget_info(|| WidgetInfo::new(WidgetType::ScrollBar));
 
-    let mut offset = output.state.offset.y;
-    let max_offset = content.y - view.height();
+    let mut offset = offset_now;
+    let max_offset = content_len - view_len;
     let min_len = style.handle_min_length;
     let grab_id = id.with("grab");
     if let Some(pointer) = response.interact_pointer_pos() {
-        if let Some(handle) = handle_span(track, content.y, view.height(), offset, min_len) {
+        if let Some(handle) = handle_span(track, content_len, view_len, offset, min_len) {
             let len = handle.max - handle.min;
+            let along = axis.at(pointer);
             // Where on the handle the pointer holds it: where it first pressed, or its middle when
             // it pressed in the track (the handle jumps to centre on the pointer).
             let grab = ui.data_mut(|d| {
                 *d.get_temp_mut_or_insert_with(grab_id, || {
-                    if handle.contains(pointer.y) {
-                        pointer.y - handle.min
+                    if handle.contains(along) {
+                        along - handle.min
                     } else {
-                        let top = (pointer.y - len / 2.0).clamp(track.min, (track.max - len).max(track.min));
-                        pointer.y - top
+                        let top = (along - len / 2.0).clamp(track.min, (track.max - len).max(track.min));
+                        along - top
                     }
                 })
             });
-            offset = offset_for_handle_top(pointer.y - grab, track, len, max_offset);
+            offset = offset_for_handle_top(along - grab, track, len, max_offset);
         }
     } else {
         ui.data_mut(|d| d.remove::<f32>(grab_id));
     }
-    let offset = if offset.is_finite() { offset.clamp(0.0, max_offset) } else { output.state.offset.y };
-    if (offset - output.state.offset.y).abs() > f32::EPSILON {
+    let offset = if offset.is_finite() { offset.clamp(0.0, max_offset) } else { offset_now };
+    if (offset - offset_now).abs() > f32::EPSILON {
         // Stored for the next frame, as egui's own bar does it (a scroll area reads its offset
         // from its stored state when it starts).
         let mut state: State = State::load(ui.ctx(), output.id).unwrap_or(output.state);
-        state.offset.y = offset;
+        axis.set(&mut state.offset, offset);
         state.store(ui.ctx(), output.id);
         ui.request_repaint();
     }
 
     // Paint with the new offset: no frame behind the pointer.
-    let Some(handle) = handle_span(track, content.y, view.height(), offset, min_len) else { return };
+    let Some(handle) = handle_span(track, content_len, view_len, offset, min_len) else { return };
     let hovering_bar = response.hovered() || response.dragged();
     let grown = ui.ctx().animate_bool_responsive(id.with("hover"), hovering_bar);
-    let width = lerp(style.floating_width..=style.bar_width, grown).min(strip.width());
-    let bar = Rect::from_min_max(strip.min, pos2(strip.min.x + width, strip.max.y));
-    let handle_rect = Rect::from_min_max(pos2(bar.min.x, handle.min), pos2(bar.max.x, handle.max));
+    let thickness = lerp(style.floating_width..=style.bar_width, grown).min(axis.thickness(strip));
+    let bar = axis.bar(strip, thickness);
+    let handle_rect = axis.handle(bar, handle);
 
     let over_area = ui.rect_contains_pointer(view) && ui.ctx().dragged_id().is_none();
     let over_handle = response.hovered() && ui.input(|i| i.pointer.latest_pos().is_some_and(|p| handle_rect.contains(p)));
@@ -342,5 +456,127 @@ mod tests {
         }
         assert!(start_bar_rect(&ctx, id).is_none());
         assert_eq!(offset, 0.0, "only the bar at the right edge scrolls in English");
+    }
+
+    /// One frame of an area that scrolls both ways (`VIEW` square, `CONTENT` square inside), shown with
+    /// `show_viewport` as the document view does: the area's id, its viewport and its stored offset.
+    fn frame_both(ctx: &Context, time: f64, events: Vec<Event>) -> (Id, Rect, Vec2) {
+        let mut shown = None;
+        let input =
+            RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))), time: Some(time), events, ..RawInput::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let area = ScrollArea::both().id_salt("both").max_width(VIEW).max_height(VIEW).auto_shrink([false, false]);
+                let out = scroll_area_with(ui, area, true, |area, ui| {
+                    area.show_viewport(ui, |ui, _viewport| {
+                        ui.allocate_space(vec2(CONTENT, CONTENT));
+                    })
+                });
+                shown = Some((out.id, out.inner_rect));
+            });
+        });
+        out.textures_delta.clear();
+        let (id, view) = shown.expect("the area is shown");
+        (id, view, State::load(ctx, id).map_or(Vec2::ZERO, |s| s.offset))
+    }
+
+    fn settled_both() -> (Context, Id, Rect, f64) {
+        let ctx = Context::default();
+        let mut shown = None;
+        let mut time = 0.0;
+        for _ in 0..4 {
+            time += 0.1;
+            shown = Some(frame_both(&ctx, time, vec![]));
+        }
+        let (id, view, _) = shown.expect("ran");
+        (ctx, id, view, time)
+    }
+
+    #[test]
+    fn english_keeps_both_of_eguis_bars_on_an_area_that_scrolls_both_ways() {
+        let (ctx, id, view, _) = settled_both();
+        assert!(start_bar_rect(&ctx, id).is_none() && bottom_bar_rect(&ctx, id).is_none(), "no bar of ours in English");
+        let right = ctx.read_response(id.with(1)).expect("egui's vertical bar").rect;
+        let bottom = ctx.read_response(id.with(0)).expect("egui's horizontal bar").rect;
+        assert!((right.right() - view.right()).abs() < 0.5, "{right:?} in {view:?}");
+        assert!((bottom.bottom() - view.bottom()).abs() < 0.5, "{bottom:?} in {view:?}");
+    }
+
+    #[test]
+    fn mirrored_an_area_that_scrolls_both_ways_has_a_left_bar_and_a_bottom_bar() {
+        let _arabic = Arabic::on();
+        let (ctx, id, view, _) = settled_both();
+        let left = start_bar_rect(&ctx, id).expect("a vertical bar");
+        let bottom = bottom_bar_rect(&ctx, id).expect("a horizontal bar");
+        assert!((left.left() - view.left()).abs() < 0.5 && left.right() < view.center().x, "the vertical bar {left:?} is at the left of {view:?}");
+        assert_eq!((left.top(), left.bottom()), (view.top(), view.bottom()));
+        assert!(
+            (bottom.bottom() - view.bottom()).abs() < 0.5 && bottom.top() > view.center().y,
+            "the horizontal bar {bottom:?} is at the bottom of {view:?}"
+        );
+        assert_eq!((bottom.left(), bottom.right()), (view.left(), view.right()));
+        assert!(ctx.read_response(id.with(0)).is_none() && ctx.read_response(id.with(1)).is_none(), "egui's own bars are hidden");
+    }
+
+    #[test]
+    fn mirrored_dragging_either_handle_scrolls_its_own_axis() {
+        let _arabic = Arabic::on();
+        let (ctx, id, view, mut time) = settled_both();
+        let left = start_bar_rect(&ctx, id).expect("a vertical bar");
+        let bottom = bottom_bar_rect(&ctx, id).expect("a horizontal bar");
+        // Down the left bar: 60 of the 160 points a 40-point handle travels is 300 of 800.
+        let start = Pos2::new(left.center().x, view.top() + 10.0);
+        let mut offset = Vec2::ZERO;
+        for events in [
+            vec![Event::PointerMoved(start)],
+            vec![press(start, true)],
+            vec![Event::PointerMoved(Pos2::new(start.x, start.y + 60.0))],
+            vec![press(Pos2::new(start.x, start.y + 60.0), false)],
+            vec![],
+        ] {
+            time += 0.1;
+            offset = frame_both(&ctx, time, events).2;
+        }
+        assert!((offset.y - 300.0).abs() < 1.0 && offset.x.abs() < 0.5, "scrolled to {offset:?}, not (0, 300)");
+        // Along the bottom bar, from its left end.
+        let start = Pos2::new(view.left() + 10.0, bottom.center().y);
+        for events in [
+            vec![Event::PointerMoved(start)],
+            vec![press(start, true)],
+            vec![Event::PointerMoved(Pos2::new(start.x + 80.0, start.y))],
+            vec![press(Pos2::new(start.x + 80.0, start.y), false)],
+            vec![],
+        ] {
+            time += 0.1;
+            offset = frame_both(&ctx, time, events).2;
+        }
+        assert!((offset.x - 400.0).abs() < 1.0 && (offset.y - 300.0).abs() < 1.0, "scrolled to {offset:?}, not (400, 300)");
+    }
+
+    #[test]
+    fn the_strips_sit_against_their_edges_and_stay_inside_the_viewport() {
+        let view = Rect::from_min_max(pos2(10.0, 20.0), pos2(210.0, 220.0));
+        let clip = Rect::from_min_max(pos2(0.0, 0.0), pos2(500.0, 500.0));
+        assert_eq!(Axis::Y.strip(view, clip, 8.0), Rect::from_min_max(pos2(10.0, 20.0), pos2(18.0, 220.0)));
+        assert_eq!(Axis::X.strip(view, clip, 8.0), Rect::from_min_max(pos2(10.0, 212.0), pos2(210.0, 220.0)));
+        // An enclosing area scrolled the left edge out of view: the strip moves in with the clip.
+        let clipped = Rect::from_min_max(pos2(50.0, 0.0), pos2(500.0, 100.0));
+        assert_eq!(Axis::Y.strip(view, clipped, 8.0).left(), 50.0);
+        assert_eq!(Axis::X.strip(view, clipped, 8.0).bottom(), 100.0);
+        // A clip beyond the viewport cannot push a strip out of it.
+        let far = Rect::from_min_max(pos2(900.0, 900.0), pos2(1000.0, 1000.0));
+        assert!(
+            view.contains_rect(Axis::Y.strip(view, far, 8.0))
+                && view.contains_rect(Axis::X.strip(view, Rect::from_min_max(pos2(0.0, -900.0), pos2(1.0, -800.0)), 8.0))
+        );
+        // A bar grows from its edge inwards, and the handle spans the track.
+        let strip = Axis::X.strip(view, clip, 8.0);
+        assert_eq!(Axis::X.bar(strip, 3.0), Rect::from_min_max(pos2(10.0, 217.0), pos2(210.0, 220.0)));
+        assert_eq!(Axis::Y.bar(Axis::Y.strip(view, clip, 8.0), 3.0), Rect::from_min_max(pos2(10.0, 20.0), pos2(13.0, 220.0)));
+        assert_eq!(Axis::X.handle(Axis::X.bar(strip, 3.0), Rangef::new(30.0, 70.0)), Rect::from_min_max(pos2(30.0, 217.0), pos2(70.0, 220.0)));
+        assert_eq!(
+            Axis::Y.handle(Axis::Y.bar(Axis::Y.strip(view, clip, 8.0), 3.0), Rangef::new(30.0, 70.0)),
+            Rect::from_min_max(pos2(10.0, 30.0), pos2(13.0, 70.0))
+        );
     }
 }

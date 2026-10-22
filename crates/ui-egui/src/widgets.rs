@@ -11,8 +11,8 @@ mod scrollbar;
 mod submenu;
 pub(crate) use bidi_edit::shift_glyph_vertices;
 pub use bidi_edit::{BidiEdit, LayoutCtx, RowAlign, RowSlot};
-pub use form::{FormRows, form_grid, start_block};
-pub use scrollbar::scroll_area;
+pub use form::{FormRows, form_grid, form_grid_of, start_block};
+pub use scrollbar::{scroll_area, scroll_area_with};
 
 /// Horizontal and vertical inset of a single-line field.
 const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);

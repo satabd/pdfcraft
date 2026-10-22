@@ -202,13 +202,24 @@ impl Draft {
     }
 }
 
-fn row<T>(ui: &mut egui::Ui, label: &str, c: &mut Change<T>, edit: impl FnOnce(&mut egui::Ui, &mut T)) {
-    ui.add(widgets::checkbox(&mut c.apply, tl!(label)));
-    // Colour swatches contain their own grid; give every property's editor a separate
-    // namespace so border and fill controls do not share widget identities.
-    ui.push_id(label, |ui| ui.add_enabled_ui(c.apply, |ui| edit(ui, &mut c.value)));
-    ui.label(if c.mixed { tl!("Mixed") } else { "" });
-    ui.end_row();
+/// One property: a checkbox that applies it (carrying its name), the editor, and the "Mixed" tag.
+fn row<T>(rows: &mut widgets::FormRows<'_>, label: &str, c: &mut Change<T>, edit: impl FnOnce(&mut egui::Ui, &mut T)) {
+    // The checkbox decides in this frame whether the editor is enabled.
+    let apply = std::cell::Cell::new(c.apply);
+    let (value, mixed) = (&mut c.value, c.mixed);
+    rows.row_with_note(
+        |ui| {
+            let mut on = apply.get();
+            let response = ui.add(widgets::checkbox(&mut on, tl!(label)));
+            apply.set(on);
+            response
+        },
+        // Colour swatches contain their own grid; give every property's editor a separate
+        // namespace so border and fill controls do not share widget identities.
+        |ui, _| _ = ui.push_id(label, |ui| ui.add_enabled_ui(apply.get(), |ui| edit(ui, value))),
+        |ui| _ = ui.label(if mixed { tl!("Mixed") } else { "" }),
+    );
+    c.apply = apply.get();
 }
 
 impl crate::PdfCraftApp {
@@ -241,8 +252,8 @@ impl crate::PdfCraftApp {
     }
 }
 
-fn bool_row(ui: &mut egui::Ui, label: &str, c: &mut Change<bool>) {
-    row(ui, label, c, |ui, value| {
+fn bool_row(rows: &mut widgets::FormRows<'_>, label: &str, c: &mut Change<bool>) {
+    row(rows, label, c, |ui, value| {
         egui::ComboBox::from_id_salt(label).selected_text(tl!(if *value { "Yes" } else { "No" })).show_ui(ui, |ui| {
             ui.selectable_value(value, true, tl!("Yes"));
             ui.selectable_value(value, false, tl!("No"));
@@ -251,14 +262,16 @@ fn bool_row(ui: &mut egui::Ui, label: &str, c: &mut Change<bool>) {
 }
 
 fn color(ui: &mut egui::Ui, value: &mut Option<[f64; 3]>) {
-    ui.horizontal(|ui| {
-        let mut none = value.is_none();
-        if ui.add(widgets::checkbox(&mut none, tl!("No color"))).changed() {
-            *value = if none { None } else { Some([0.0; 3]) };
-        }
-        if let Some(c) = crate::comments::swatch_grid(ui, *value) {
-            *value = Some(c);
-        }
+    widgets::start_block(ui, |ui| {
+        ui.horizontal(|ui| {
+            let mut none = value.is_none();
+            if ui.add(widgets::checkbox(&mut none, tl!("No color"))).changed() {
+                *value = if none { None } else { Some([0.0; 3]) };
+            }
+            if let Some(c) = crate::comments::swatch_grid(ui, *value) {
+                *value = Some(c);
+            }
+        });
     });
 }
 
@@ -285,7 +298,9 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
     });
     ui.separator();
     egui::ScrollArea::vertical().max_height(430.0).auto_shrink([false, true]).show(ui, |ui| {
-        egui::Grid::new("bulk-field-properties").num_columns(3).spacing([16.0, 10.0]).show(ui, |ui| match d.tab {
+        // A form of three cells (the checkbox with the property's name, its editor, the tag): in
+        // Arabic the checkbox is at the right, then the editor, then the tag at its left.
+        widgets::form_grid_of(ui, "bulk-field-properties", [16.0, 10.0], None, 3, |ui| match d.tab {
             Tab::General => {
                 row(ui, "Tooltip:", &mut d.tooltip, |ui, v| {
                     ui.add(egui::TextEdit::singleline(v).desired_width(280.0));
@@ -308,9 +323,11 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
                         });
                     });
                     row(ui, "Text Color:", &mut d.text, |ui, v| {
-                        if let Some(c) = crate::comments::swatch_grid(ui, Some(*v)) {
-                            *v = c;
-                        }
+                        widgets::start_block(ui, |ui| {
+                            if let Some(c) = crate::comments::swatch_grid(ui, Some(*v)) {
+                                *v = c;
+                            }
+                        });
                     });
                 }
                 row(ui, "Border Color:", &mut d.border, color);

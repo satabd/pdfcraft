@@ -130,8 +130,8 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let mut close = None;
                 // The pointer's x while a tab is dragged, for scrolling at the strip's edges.
                 let mut drag_x = None;
-                // The tabs keep their physical order (first tab leftmost) in a mirrored strip, laid
-                // out left to right inside the room they need, which sits against Home.
+                // A mirrored strip draws the tabs left to right too, last document first, inside the
+                // room they need, which sits against Home: the first document is the rightmost tab.
                 let tabs_builder = egui::UiBuilder::new().layout(Layout::left_to_right(Align::Center));
                 let tabs_builder = if rtl::mirrored() {
                     let wanted: f32 =
@@ -145,16 +145,53 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 ui.scope_builder(tabs_builder, |ui| {
                     ui.style_mut().always_scroll_the_only_direction = true;
                     let mut area = egui::ScrollArea::horizontal().id_salt("document_tabs").max_width(tabs_width).auto_shrink([true, true]);
+                    if rtl::mirrored() {
+                        // The strip starts at the right: its first tabs are in view until the reader scrolls on.
+                        area = area.stick_to_right(true);
+                    }
                     if let Some(x) = ui.data_mut(|d| d.remove_temp::<f32>(scroll_id.with("to"))) {
                         area = area.horizontal_scroll_offset(x);
                     }
                     let out = area.show(ui, |ui| {
                         ui.horizontal_centered(|ui| {
+                            // The Combine tab; its index can't clash with a document's.
+                            let combine_tab = |ui: &mut egui::Ui, app: &mut PdfCraftApp| {
+                                let mut close = None;
+                                let response = tab(
+                                    ui,
+                                    ui.id().with("combine-tab"),
+                                    &t,
+                                    "files",
+                                    tl!("Combine files"),
+                                    None,
+                                    false,
+                                    app.combine_showing(),
+                                    &mut close,
+                                    usize::MAX,
+                                    cap,
+                                    tab_h,
+                                    false,
+                                );
+                                if changed && app.combine_showing() {
+                                    response.scroll_to_me(Some(Align::Center));
+                                }
+                                if response.clicked() {
+                                    app.open_combine_tab();
+                                }
+                                if close.is_some() || response.middle_clicked() {
+                                    app.close_combine_tab();
+                                }
+                            };
                             // Each document tab's index and rect, and the one being dragged
                             // (with whether it was just released).
                             let mut slots = Vec::with_capacity(app.views.len());
                             let mut dragged = None;
-                            for i in 0..app.views.len() {
+                            // The Combine tab comes after the documents: at the right in English, at the
+                            // left of the strip's last document when mirrored.
+                            if rtl::mirrored() && app.combine_tab.open {
+                                combine_tab(ui, app);
+                            }
+                            for i in rtl::run_order(app.views.len()) {
                                 let Some(doc) = app.session.get(app.views[i].id) else { continue };
                                 let Some(name) = crate::canvas::tab_label(app, i) else { continue };
                                 let dirty = doc.dirty;
@@ -213,7 +250,9 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             if let Some((from, released)) = dragged
                                 && let Some(x) = ui.ctx().pointer_latest_pos().map(|p| p.x)
                             {
-                                let to = drop_index(&slots, from, x);
+                                // The slots were added in drawing order; the drop works in tab order.
+                                slots.sort_by_key(|(i, _)| *i);
+                                let to = drop_index(&slots, from, x, rtl::mirrored());
                                 if released {
                                     if close.is_none() && action.is_none() {
                                         app.move_tab(from, to);
@@ -221,7 +260,7 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 } else {
                                     drag_x = Some(x);
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                                    if let Some(marker) = drop_marker(&slots, from, to, ui.spacing().item_spacing.x) {
+                                    if let Some(marker) = drop_marker(&slots, from, to, ui.spacing().item_spacing.x, rtl::mirrored()) {
                                         let span = slots.first().map_or(ui.max_rect().y_range(), |(_, r)| r.y_range());
                                         // In front of the first tab the gap lies outside the scroll area's
                                         // clip rect (#2225): keep the whole line inside it.
@@ -239,33 +278,8 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             if let Some(action) = action {
                                 app.tab_action(action);
                             }
-                            if app.combine_tab.open {
-                                // After the document tabs; its index can't clash with theirs.
-                                let mut close = None;
-                                let response = tab(
-                                    ui,
-                                    ui.id().with("combine-tab"),
-                                    &t,
-                                    "files",
-                                    tl!("Combine files"),
-                                    None,
-                                    false,
-                                    app.combine_showing(),
-                                    &mut close,
-                                    usize::MAX,
-                                    cap,
-                                    tab_h,
-                                    false,
-                                );
-                                if changed && app.combine_showing() {
-                                    response.scroll_to_me(Some(Align::Center));
-                                }
-                                if response.clicked() {
-                                    app.open_combine_tab();
-                                }
-                                if close.is_some() || response.middle_clicked() {
-                                    app.close_combine_tab();
-                                }
+                            if !rtl::mirrored() && app.combine_tab.open {
+                                combine_tab(ui, app);
                             }
                         });
                     });
@@ -386,21 +400,24 @@ const TAB_DRAG_EDGE: f32 = 24.0;
 const TAB_DRAG_STEP: f32 = 8.0;
 
 /// Where the tab at `from` lands when dropped with the pointer at `x`: past every other tab
-/// whose centre is left of the pointer. `slots` are the tabs' indices and rects, in order.
-fn drop_index(slots: &[(usize, Rect)], from: usize, x: f32) -> usize {
-    slots.iter().filter(|(i, r)| *i != from && r.center().x < x).count()
+/// whose centre the pointer has crossed. `slots` are the tabs' indices and rects, in tab order.
+/// The tabs read from left to right, or from right to left when `reversed` (a mirrored strip, where
+/// the first tab is the rightmost and the pointer crosses a centre by going left of it).
+fn drop_index(slots: &[(usize, Rect)], from: usize, x: f32, reversed: bool) -> usize {
+    slots.iter().filter(|(i, r)| *i != from && if reversed { r.center().x > x } else { r.center().x < x }).count()
 }
 
 /// The x of the line marking where the tab at `from` drops at `to`: in the gap before the other
-/// tab it lands in front of, or after the last. `None` when it would stay where it is.
-fn drop_marker(slots: &[(usize, Rect)], from: usize, to: usize, gap: f32) -> Option<f32> {
+/// tab it lands in front of, or after the last (in the reading order of the strip: see
+/// [`drop_index`]). `None` when it would stay where it is.
+fn drop_marker(slots: &[(usize, Rect)], from: usize, to: usize, gap: f32, reversed: bool) -> Option<f32> {
     if slots.iter().position(|(i, _)| *i == from) == Some(to) {
         return None;
     }
     let mut others = slots.iter().filter(|(i, _)| *i != from).map(|(_, r)| r);
     match to.checked_sub(1) {
-        None => others.next().map(|r| r.left() - gap / 2.0),
-        Some(before) => others.nth(before).map(|r| r.right() + gap / 2.0),
+        None => others.next().map(|r| if reversed { r.right() + gap / 2.0 } else { r.left() - gap / 2.0 }),
+        Some(before) => others.nth(before).map(|r| if reversed { r.left() - gap / 2.0 } else { r.right() + gap / 2.0 }),
     }
 }
 
@@ -949,12 +966,12 @@ mod tab_widths {
         use super::drop_index;
         let slots = three_slots();
         // Centres at 50, 154 and 258.
-        assert_eq!(drop_index(&slots, 0, 10.0), 0, "still over itself");
-        assert_eq!(drop_index(&slots, 0, 160.0), 1, "past the middle tab's centre");
-        assert_eq!(drop_index(&slots, 0, 900.0), 2, "past the end");
-        assert_eq!(drop_index(&slots, 2, -50.0), 0, "before the start");
-        assert_eq!(drop_index(&slots, 2, 100.0), 1, "between the first and middle centres");
-        assert_eq!(drop_index(&[], 0, 100.0), 0);
+        assert_eq!(drop_index(&slots, 0, 10.0, false), 0, "still over itself");
+        assert_eq!(drop_index(&slots, 0, 160.0, false), 1, "past the middle tab's centre");
+        assert_eq!(drop_index(&slots, 0, 900.0, false), 2, "past the end");
+        assert_eq!(drop_index(&slots, 2, -50.0, false), 0, "before the start");
+        assert_eq!(drop_index(&slots, 2, 100.0, false), 1, "between the first and middle centres");
+        assert_eq!(drop_index(&[], 0, 100.0, false), 0);
     }
 
     /// The drop line sits in the gap the tab will land in, and not at all where it already is.
@@ -962,15 +979,52 @@ mod tab_widths {
     fn the_drop_line_marks_the_gap_and_hides_when_nothing_moves() {
         use super::drop_marker;
         let slots = three_slots();
-        assert_eq!(drop_marker(&slots, 0, 0, 4.0), None);
-        assert_eq!(drop_marker(&slots, 1, 1, 4.0), None);
+        assert_eq!(drop_marker(&slots, 0, 0, 4.0, false), None);
+        assert_eq!(drop_marker(&slots, 1, 1, 4.0, false), None);
         // The first tab dropped at the end: after the last tab.
-        assert_eq!(drop_marker(&slots, 0, 2, 4.0), Some(310.0));
+        assert_eq!(drop_marker(&slots, 0, 2, 4.0, false), Some(310.0));
         // The first tab dropped between the middle and the last: in the gap between them.
-        assert_eq!(drop_marker(&slots, 0, 1, 4.0), Some(206.0));
+        assert_eq!(drop_marker(&slots, 0, 1, 4.0, false), Some(206.0));
         // The last tab dropped at the start: before the first tab.
-        assert_eq!(drop_marker(&slots, 2, 0, 4.0), Some(-2.0));
-        assert_eq!(drop_marker(&[], 0, 1, 4.0), None);
+        assert_eq!(drop_marker(&slots, 2, 0, 4.0, false), Some(-2.0));
+        assert_eq!(drop_marker(&[], 0, 1, 4.0, false), None);
+    }
+
+    /// The same three tabs in a mirrored strip: the first is the rightmost, and the strip reads right
+    /// to left (`slots` stay in tab order, so index 0 is at the right).
+    fn three_mirrored_slots() -> Vec<(usize, egui::Rect)> {
+        (0..3).map(|i| (i, egui::Rect::from_min_size(egui::pos2((2 - i) as f32 * 104.0, 0.0), egui::vec2(100.0, 30.0)))).collect()
+    }
+
+    /// Mirrored, the pointer crosses a tab's centre by going left of it: the drop index counts the tabs
+    /// whose centre is right of the pointer (they come first).
+    #[test]
+    fn a_dragged_tab_drops_past_the_centres_it_crossed_going_left_when_mirrored() {
+        use super::drop_index;
+        let slots = three_mirrored_slots();
+        // Centres at 258 (tab 0), 154 (tab 1) and 50 (tab 2).
+        assert_eq!(drop_index(&slots, 0, 300.0, true), 0, "still over itself");
+        assert_eq!(drop_index(&slots, 0, 160.0, true), 0, "not yet left of the middle tab's centre");
+        assert_eq!(drop_index(&slots, 0, 100.0, true), 1, "left of the middle tab's centre");
+        assert_eq!(drop_index(&slots, 0, 10.0, true), 2, "past the end, at the left");
+        assert_eq!(drop_index(&slots, 2, 900.0, true), 0, "before the start, at the right");
+        assert_eq!(drop_index(&slots, 2, 200.0, true), 1, "between the first and middle centres");
+        assert_eq!(drop_index(&[], 0, 100.0, true), 0);
+    }
+
+    /// The line sits in the gap the tab will land in, on the other side of each neighbour.
+    #[test]
+    fn the_drop_line_marks_the_gap_when_mirrored() {
+        use super::drop_marker;
+        let slots = three_mirrored_slots();
+        assert_eq!(drop_marker(&slots, 0, 0, 4.0, true), None);
+        assert_eq!(drop_marker(&slots, 1, 1, 4.0, true), None);
+        // The first tab (rightmost) dropped at the end: left of the last tab, which is at x 0.
+        assert_eq!(drop_marker(&slots, 0, 2, 4.0, true), Some(-2.0));
+        // The first tab dropped between the middle and the last: in the gap between them.
+        assert_eq!(drop_marker(&slots, 0, 1, 4.0, true), Some(102.0));
+        // The last tab dropped at the start: right of the first tab, which ends at 308.
+        assert_eq!(drop_marker(&slots, 2, 0, 4.0, true), Some(310.0));
     }
 
     #[test]

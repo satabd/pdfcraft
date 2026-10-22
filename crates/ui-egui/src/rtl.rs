@@ -21,11 +21,16 @@
 //! A submenu opens beside its entry on the side its arrow points to: the left when mirrored
 //! ([`submenu_align`], [`crate::widgets::sub_menu`]).
 //!
-//! What stays physical: the window controls, scrollbars, the document canvas and its overlays,
-//! the order of the document tabs, and the explicit "Tools panel side" preference. What is not
-//! mirrored yet: the data tables that stay `egui::Grid`s (the header
-//! and footer boxes, the bulk field properties, the contributor and model tables, the calendar and
-//! the swatch grid itself), the dock's own tab bars, and the painted lists of the Combine page.
+//! The document tabs run from the start edge too ([`run_order`]: the first document is the
+//! rightmost tab), and so do the columns of the data tables that stay `egui::Grid`s (the space
+//! audit, the contributor and model tables, the calendar of a date field; the shared field
+//! properties are a form).
+//!
+//! What stays physical: the window controls, the horizontal scroll bars, the document canvas and
+//! its overlays (the page grid, the quick-action bar), and the explicit "Tools panel side"
+//! preference. What is not mirrored yet: the header and footer boxes (their left, centre and right
+//! are the page's) and the swatch grids (a palette), the dock's own tab bars, and the painted lists
+//! of the Combine page.
 
 use egui::{Align, Align2, InnerResponse, Layout, Margin, Pos2, Rect, Ui, UiBuilder, Vec2, pos2, vec2};
 
@@ -145,6 +150,14 @@ pub fn panel(id: impl Into<egui::Id>, side: Side) -> egui::Panel {
         (Side::Start, false) | (Side::End, true) => egui::Panel::left(id),
         (Side::Start, true) | (Side::End, false) => egui::Panel::right(id),
     }
+}
+
+/// The indices `0..count` in the order their items are added to a left-to-right row so that the
+/// first sits at the start edge: `0, 1, 2, ..` in English, `.., 2, 1, 0` when mirrored (the
+/// columns of a data table, the document tabs). A table or a strip built this way keeps its
+/// logical order everywhere else; only the placement is reversed.
+pub fn run_order(count: usize) -> Vec<usize> {
+    if mirrored() { (0..count).rev().collect() } else { (0..count).collect() }
 }
 
 /// The x of a thing `off` from the start edge of `rect`.
@@ -333,6 +346,16 @@ mod tests {
         }
         assert!(left_edge(false), "the start panel is on the left in English");
         assert!(!left_edge(true), "and on the right in Arabic");
+    }
+
+    #[test]
+    fn items_are_added_in_run_order() {
+        assert_eq!(run_order(4), [0, 1, 2, 3]);
+        assert!(run_order(0).is_empty());
+        let _arabic = Arabic::on();
+        assert_eq!(run_order(4), [3, 2, 1, 0], "the first item is added last, to sit at the right");
+        assert_eq!(run_order(1), [0]);
+        assert!(run_order(0).is_empty());
     }
 
     #[test]
