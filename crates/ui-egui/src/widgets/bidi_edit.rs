@@ -3018,8 +3018,12 @@ mod tests {
     /// text, cursor and look when there is nothing right to left.
     #[test]
     fn multi_line_text_without_right_to_left_script_is_a_plain_text_edit() {
+        // Without an Arabic face (a build without craft-fonts and no stand-in) there is nothing to compare.
+        if bidi::arabic_test_fonts().is_none() {
+            return;
+        }
         let run = |plain: bool| {
-            let mut field = Field::arabic().expect("the fonts are there");
+            let mut field = Field::arabic().expect("checked above");
             (field.multiline, field.plain, field.width) = (true, plain, 120.0);
             field.text = "report 2024 final version of the document".to_owned();
             let mut seen = Vec::new();
