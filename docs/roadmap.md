@@ -200,6 +200,7 @@ M2 (renderer), M7 (content editing), M10 (OCR and Office), M11 (Preflight and st
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | M6: Arabic in XFA text drawn shaped; exports mark right-to-left paragraphs. Estimates unchanged |
 | 2026-10-22 | minor | M14: the toast and canvas banners wrap in typing order under the Arabic interface (`notify` takes logical text, `widgets::logical_label`); lists joined in code follow the reading order (`rtl::join`, `rtl::caption_value`). Estimates unchanged |
 | 2026-10-22 | minor | M14: the Arabic interface mirrors its frame (panes, rail, mode bar, tab strip, rows, dialog footers); menus, dialog bodies and the canvas are not mirrored yet. Estimates unchanged |
 | 2026-10-22 | minor | M9: Arabic visible signatures drawn shaped. Estimates unchanged |
