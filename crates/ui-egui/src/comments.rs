@@ -1399,7 +1399,7 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
                 _ => tl!("Add a comment"),
             };
             let edit =
-                ui.add(egui::TextEdit::multiline(&mut c.text).hint_text(hint).desired_rows(3).desired_width(f32::INFINITY).id_salt("composer-text"));
+                ui.add(crate::widgets::block(&mut c.text).hint_text(hint).desired_rows(3).desired_width(f32::INFINITY).id_salt("composer-text"));
             if c.focus {
                 edit.request_focus();
                 c.focus = false;

@@ -1093,3 +1093,43 @@ fn auto_size_fields_shrink_and_wrap_typed_text_to_fit_their_box() {
     // An explicit size is kept, as in Acrobat: the text may then run past the box.
     assert_eq!(on_screen_fit(&h, "fixed", long).0, 10.0);
 }
+
+/// Tabbing into a multi-line field selects its text. When the text wraps, the editor draws a line
+/// break for each soft wrap, so "all of it" is more characters than the value has.
+#[test]
+fn tabbing_into_a_wrapped_arabic_multiline_field_selects_all_of_it() {
+    let mut h = harness();
+    h.state_mut().apply_edit(pdfcraft_engine::Edit::AddField {
+        page: 0,
+        rect: [50.0, 20.0, 200.0, 70.0],
+        kind: pdfcraft_engine::NewField::Text { multiline: true },
+        name: Some("notes".into()),
+    });
+    h.run_steps(4);
+    click_field(&mut h, "notes", 0);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.name.as_str()), Some("notes"));
+    let sentence = "هذا نص عربي طويل يكتب في حقل متعدد الأسطر ليلتف على أكثر من سطر واحد داخل الحقل";
+    for word in sentence.split_inclusive(' ') {
+        h.event(egui::Event::Text(word.into()));
+        h.run_steps(2);
+    }
+    // Tab commits the value (in typing order, with no line break from the wrap) and moves on;
+    // Shift+Tab comes back, and the field opens with everything selected.
+    h.key_press(egui::Key::Tab);
+    h.run_steps(4);
+    assert_eq!(value(&h, "notes"), [sentence]);
+    for _ in 0..8 {
+        if h.state().views[0].forms.focus.as_ref().map(|f| f.name.as_str()) == Some("notes") {
+            break;
+        }
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        h.run_steps(4);
+    }
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.name.as_str()), Some("notes"), "Shift+Tab came back");
+    h.run_steps(3);
+    let id = egui::Id::new(("form-field", h.state().views[0].id.0, "notes", 0usize));
+    let range = egui::TextEdit::load_state(&h.ctx, id).and_then(|s| s.cursor.char_range()).expect("a selection in the field");
+    let (from, to) = (range.as_sorted_char_range().start.0, range.as_sorted_char_range().end.0);
+    assert_eq!(from, 0, "{range:?}");
+    assert!(to > sentence.chars().count(), "the selection reaches the end of what is drawn, line breaks of the wrap included: {range:?}");
+}

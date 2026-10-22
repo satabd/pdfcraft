@@ -169,3 +169,80 @@ fn arabic_typed_into_the_command_palette_and_the_find_bar_is_kept_in_typing_orde
     // Right to left from the first letter: the caret is at the left end, after the last letter.
     assert_eq!(cursor(&h), 0);
 }
+
+/// Every galley painted in the last frame with its position, nested shapes included.
+fn painted_galleys(h: &Harness<'static, PdfCraftApp>) -> Vec<(Pos2, std::sync::Arc<egui::Galley>)> {
+    fn collect(shape: &egui::Shape, out: &mut Vec<(Pos2, std::sync::Arc<egui::Galley>)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((text.pos, std::sync::Arc::clone(&text.galley))),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &h.output().shapes {
+        collect(&clipped.shape, &mut out);
+    }
+    out
+}
+
+#[test]
+fn a_two_line_arabic_comment_typed_into_the_composer_is_stored_in_order_and_drawn_from_the_right() {
+    let mut h = harness();
+    h.state_mut().set_option("quick", "note").unwrap();
+    h.run_steps(2);
+    let p = at(&h, 250.0, 180.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    h.drag_at(p);
+    h.run_steps(1);
+    h.drop_at(p);
+    h.run_steps(3);
+    assert!(h.state().views[0].comments.composer.is_some(), "the composer opened");
+    let editor = || h.query_all_by(|n| n.placeholder() == Some("Add a comment")).next().expect("the composer's editor");
+    editor().click();
+    h.run_steps(2);
+
+    // A paragraph long enough for two rows of the composer, a line break, a short second paragraph.
+    let first = "هذا تعليق عربي طويل يكتب في مربع التعليق ليلتف على أكثر من سطر واحد في المربع";
+    let second = "السطر الثاني";
+    let mut typed = String::new();
+    for word in first.split_inclusive(' ') {
+        h.event(Event::Text(word.to_owned()));
+        h.run_steps(2);
+        typed.push_str(word);
+    }
+    h.key_press_modifiers(egui::Modifiers::SHIFT, Key::Enter);
+    h.run_steps(2);
+    typed.push('\n');
+    for word in second.split_inclusive(' ') {
+        h.event(Event::Text(word.to_owned()));
+        h.run_steps(2);
+        typed.push_str(word);
+    }
+    // Stored as typed: the soft wrap is no line break of the comment.
+    let stored = h.state().views[0].comments.composer.as_ref().expect("the composer is open").text.clone();
+    assert_eq!(stored, typed);
+    assert_eq!(stored.matches('\n').count(), 1);
+    let editor_node = h.query_all_by(|n| n.role() == egui::accesskit::Role::MultilineTextInput).next().expect("the editor");
+    assert_eq!(editor_node.value().as_deref(), Some(typed.as_str()), "announced as typed");
+    let field = editor_node.rect();
+
+    // Painted: the editor's text is one galley, a row for each line, every row against the right edge.
+    let galley = painted_galleys(&h)
+        .into_iter()
+        .filter(|(_, g)| g.job.text.contains('\n') && g.job.text.contains('\u{639}'))
+        .max_by_key(|(_, g)| g.rows.len())
+        .expect("the editor's text is painted");
+    let (pos, galley) = galley;
+    assert!(galley.rows.len() >= 3, "two rows for the first paragraph and one for the second: {}", galley.rows.len());
+    // Reading starts at the right: the first row's rightmost letter is the first word's first.
+    assert_eq!(galley.rows[0].glyphs.last().map(|g| g.chr), Some('\u{647}'), "row 0 is {:?}", galley.rows[0].text());
+    // Every row ends at the same edge (a left-aligned paragraph is ragged on the right), the right
+    // edge of the editor's text area.
+    let rights: Vec<f32> = galley.rows.iter().map(|placed| pos.x + placed.pos.x + placed.row.size.x).collect();
+    let (least, most) = rights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+    assert!(most - least < 2.0, "the rows end at {rights:?}");
+    let margin = 10.0;
+    assert!((most - (field.right() - margin)).abs() < 2.0, "the rows end at {most}, the field's text area at {}", field.right() - margin);
+}

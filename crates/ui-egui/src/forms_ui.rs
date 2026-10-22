@@ -546,7 +546,9 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
                     if std::mem::take(&mut fx.select_all)
                         && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id)
                     {
-                        let n = fx.text.chars().count();
+                        // To the end of what is drawn: a wrapped field draws a line break for the text's
+                        // own and for each soft wrap (at most one per character), so twice its length is past the end.
+                        let n = fx.text.chars().count().saturating_mul(2);
                         st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
                         st.store(ui.ctx(), r.id);
                     }

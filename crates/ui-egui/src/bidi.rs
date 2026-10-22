@@ -55,6 +55,16 @@ fn push_line(out: &mut String, text: &str, info: &BidiInfo<'_>, para: &Paragraph
 /// run), `at` the byte offset of the character in `text`, `rtl` whether its run reads right to
 /// left. Direction controls are not drawn and not emitted.
 fn for_each_shown(text: &str, info: &BidiInfo<'_>, para: &ParagraphInfo, line: Range<usize>, mut emit: impl FnMut(char, usize, bool)) {
+    // unicode-bidi cannot reorder a line whose levels are all the deepest there are (about sixty
+    // unclosed embeddings and a letter after them), and panics. Such a line is drawn as it is
+    // written, left to right.
+    let deepest = Level::max_implicit_depth();
+    if info.levels.get(line.clone()).is_none_or(|levels| levels.iter().all(|level| level.number() >= deepest)) {
+        for (at, c) in text.get(line.clone()).unwrap_or_default().char_indices().filter(|(_, c)| !is_bidi_control(*c)) {
+            emit(c, line.start.saturating_add(at), false);
+        }
+        return;
+    }
     let (levels, runs) = info.visual_runs(para, line);
     for run in runs {
         let rtl = levels.get(run.start).is_some_and(Level::is_rtl);
@@ -96,16 +106,19 @@ fn push_for_shaper(out: &mut String, shown: &str) {
 /// (screen order) to the text that is stored (logical order).
 ///
 /// Indices are character indices. `N`, the number of characters drawn, is at most `M`, the number
-/// in the text: direction controls are not drawn.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// in the text: direction controls are not drawn. A map of wrapped text ([`wrapped_screen_map`])
+/// also draws a *line break* between the lines a paragraph is wrapped into, which is no character
+/// of the text, so there `N` can exceed `M`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScreenMap {
     /// The text to hand to egui: exactly what [`visual`] returns. Its i-th character is the
     /// i-th one from the left in the galley egui builds from it.
     pub shaper: String,
-    /// The logical index of the character drawn at each screen position (`N` entries).
+    /// The logical index of the character drawn at each screen position (`N` entries); [`VIRTUAL`]
+    /// for the line break of a wrapped paragraph.
     pub shown: Vec<usize>,
     /// The character as drawn at each screen position (`N` entries): the text's own, brackets
-    /// mirrored in a right-to-left run.
+    /// mirrored in a right-to-left run; `'\n'` for a line break, the text's own or wrapped.
     pub drawn: Vec<char>,
     /// Whether the run holding each logical character reads right to left (`M` entries; false
     /// for the characters that are not drawn).
@@ -113,7 +126,13 @@ pub struct ScreenMap {
     /// The screen position of each logical character (`M` entries); `None` for a direction
     /// control, which is not drawn.
     pub to_screen: Vec<Option<usize>>,
+    /// Whether each line of a wrapped text (one per `'\n'` of [`Self::shaper`], and the line after
+    /// the last) belongs to a paragraph that reads right to left; empty for a single line.
+    pub row_rtl: Vec<bool>,
 }
+
+/// What [`ScreenMap::shown`] holds for a line break that is no character of the text.
+pub const VIRTUAL: usize = usize::MAX;
 
 /// The [`ScreenMap`] of `text`: [`visual`] with the position of every character kept. Text without
 /// right-to-left script maps to itself.
@@ -127,6 +146,7 @@ pub fn screen_map(text: &str) -> ScreenMap {
             drawn: text.chars().collect(),
             rtl: vec![false; count],
             to_screen: (0..count).map(Some).collect(),
+            row_rtl: Vec::new(),
         };
     }
     let mut map = ScreenMap {
@@ -135,6 +155,7 @@ pub fn screen_map(text: &str) -> ScreenMap {
         drawn: Vec::with_capacity(count),
         rtl: vec![false; count],
         to_screen: vec![None; count],
+        row_rtl: Vec::new(),
     };
     let info = BidiInfo::new(text, Some(Level::ltr()));
     for para in &info.paragraphs {
@@ -156,6 +177,167 @@ pub fn screen_map(text: &str) -> ScreenMap {
         push_for_shaper(&mut map.shaper, &drawn);
     }
     map
+}
+
+/// The [`ScreenMap`] of multi-line `text` wrapped for a field: every paragraph (the text between
+/// line separators) is broken into lines that `fits` accepts, and each line put in display order
+/// by the Unicode bidirectional algorithm (UAX #9) for the paragraph's direction, which is that of
+/// its first strong character (`neutral_rtl` for one without, such as an empty line or digits
+/// only, which would not say where it belongs).
+///
+/// The map's [`ScreenMap::shaper`] is the lines joined by `'\n'`, so egui lays one line on each of
+/// its rows. A line break the wrapping makes is [`VIRTUAL`]: it maps to no character of the text
+/// (`shown` holds [`VIRTUAL`] for it and no `to_screen` entry points at it). The separator at the
+/// end of a paragraph is drawn as a `'\n'` that is a character of the text. Everything else is
+/// drawn exactly once: unlike [`wrap`] this keeps the spaces at the ends of lines (a space typed
+/// at the end of the text must show), so the lines partition the paragraph, bar its direction
+/// controls (and the `\n` of a `\r\n`, which shares the break of the `\r`).
+///
+/// `fits` measures a line in logical order, without the spaces after its last word; a word wider
+/// than a line is broken between characters. It is called for the same text many times over; the
+/// caller bounds its cost.
+pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, mut fits: impl FnMut(&str) -> bool) -> ScreenMap {
+    let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    let count = offsets.len();
+    let mut map = ScreenMap {
+        shaper: String::with_capacity(text.len()),
+        shown: Vec::with_capacity(count),
+        drawn: Vec::with_capacity(count),
+        rtl: vec![false; count],
+        to_screen: vec![None; count],
+        row_rtl: Vec::new(),
+    };
+    let info = BidiInfo::new(text, None);
+    let mut inherited = neutral_rtl;
+    for para in &info.paragraphs {
+        let whole = text.get(para.range.clone()).unwrap_or_default();
+        let content_len = whole.trim_end_matches(is_paragraph_separator).len();
+        let content = para.range.start..para.range.start.saturating_add(content_len);
+        // unicode-bidi ends a paragraph at the `\r` of `\r\n`; the `\n` is no new paragraph.
+        let continues = whole == "\n" && text.get(..para.range.start).is_some_and(|before| before.ends_with('\r'));
+        let rtl_para = if para.level.is_rtl() {
+            true
+        } else {
+            match unicode_bidi::get_base_direction(whole) {
+                unicode_bidi::Direction::Ltr => false,
+                _ => inherited,
+            }
+        };
+        if continues {
+            // Drawn nowhere and no line of its own: the `\r` before it is the break.
+            continue;
+        }
+        inherited = rtl_para;
+        let rows = if content.is_empty() { vec![content.clone()] } else { break_rows(text, content.clone(), &mut fits) };
+        for (k, row) in rows.into_iter().enumerate() {
+            if k > 0 {
+                map.shown.push(VIRTUAL);
+                map.drawn.push('\n');
+                map.shaper.push('\n');
+            }
+            map.row_rtl.push(rtl_para);
+            if row.is_empty() {
+                continue;
+            }
+            let mut drawn = String::with_capacity(row.len());
+            for_each_shown(text, &info, para, row, |c, at, rtl| {
+                // `at` is the start of a character, so the search finds it; if not, the character is skipped.
+                let Ok(logical) = offsets.binary_search(&at) else { return };
+                drawn.push(c);
+                map.push_shown(logical, c, rtl);
+            });
+            push_for_shaper(&mut map.shaper, &drawn);
+        }
+        // The separators that end the paragraph (one, but whatever unicode-bidi calls a paragraph).
+        let tail_start = para.range.start.saturating_add(content_len);
+        for (at, _) in whole.get(content_len..).unwrap_or_default().char_indices() {
+            let Ok(logical) = offsets.binary_search(&tail_start.saturating_add(at)) else { continue };
+            map.shaper.push('\n');
+            map.push_shown(logical, '\n', false);
+        }
+    }
+    // The empty line egui adds after the text's last separator, which the caret can be on.
+    if text.chars().next_back().is_some_and(is_paragraph_separator) {
+        map.row_rtl.push(inherited);
+    }
+    map
+}
+
+impl ScreenMap {
+    /// Appends the logical character `logical`, drawn as `c`, at the next screen position.
+    fn push_shown(&mut self, logical: usize, c: char, rtl: bool) {
+        let screen = self.shown.len();
+        self.shown.push(logical);
+        self.drawn.push(c);
+        if let Some(slot) = self.rtl.get_mut(logical) {
+            *slot = rtl;
+        }
+        if let Some(slot) = self.to_screen.get_mut(logical) {
+            *slot = Some(screen);
+        }
+    }
+}
+
+/// The byte ranges of the lines `range` of `text` (one paragraph, not empty) is broken into: as
+/// many words as `fits` accepts per line, a word too wide for any line split between characters.
+/// The spaces after a word stay on its line, and those before the first word are on the first, so
+/// the lines cover `range` exactly. Always at least one line.
+fn break_rows(text: &str, range: Range<usize>, fits: &mut impl FnMut(&str) -> bool) -> Vec<Range<usize>> {
+    let words = words(text, range.clone());
+    if words.is_empty() {
+        return vec![range];
+    }
+    let mut rows = Vec::new();
+    let mut start = range.start;
+    let mut row_end = range.start;
+    let mut filled = false;
+    for (i, word) in words.iter().enumerate() {
+        // The word with the spaces after it.
+        let chunk_end = words.get(i.saturating_add(1)).map_or(range.end, |next| next.start);
+        if filled {
+            if fits(text.get(start..word.end).unwrap_or_default()) {
+                row_end = chunk_end;
+                continue;
+            }
+            rows.push(start..row_end);
+            start = word.start;
+        }
+        // The word starts a line.
+        loop {
+            if fits(text.get(start..word.end).unwrap_or_default()) {
+                row_end = chunk_end;
+                filled = true;
+                break;
+            }
+            let end = fitting_prefix(text, start..word.end, fits);
+            if end >= word.end {
+                row_end = chunk_end;
+                filled = true;
+                break;
+            }
+            rows.push(start..end);
+            start = end;
+        }
+    }
+    rows.push(start..row_end.max(start));
+    // A line of direction controls alone would draw nothing, and a caret there would be no place of
+    // the text: it joins the line after it (or before it, at the end).
+    let mut joined: Vec<Range<usize>> = Vec::with_capacity(rows.len());
+    let mut pending: Option<usize> = None;
+    for row in rows {
+        let from = pending.take().unwrap_or(row.start);
+        if text.get(row.clone()).is_some_and(|piece| piece.chars().all(is_bidi_control)) {
+            pending = Some(from);
+        } else {
+            joined.push(from..row.end);
+        }
+    }
+    match (pending, joined.last_mut()) {
+        (Some(_), Some(last)) => last.end = range.end,
+        (Some(from), None) => joined.push(from..range.end),
+        (None, _) => {}
+    }
+    joined
 }
 
 impl ScreenMap {
@@ -209,11 +391,13 @@ impl ScreenMap {
     /// `v` past the end counts as the end.
     pub fn logical_positions(&self, v: usize) -> Vec<usize> {
         let v = v.min(self.screen_len());
-        let left = v.checked_sub(1).and_then(|i| self.shown.get(i)).map(|&a| {
+        // A line break of wrapped text is no character: next to one only the other neighbour counts.
+        let real = |i: usize| self.shown.get(i).copied().filter(|l| *l != VIRTUAL);
+        let left = v.checked_sub(1).and_then(real).map(|a| {
             // The right edge of `a` is where it ends in a left-to-right run and begins in the other.
             if self.rtl.get(a).copied().unwrap_or(false) { a } else { a.saturating_add(1) }
         });
-        let right = self.shown.get(v).map(|&b| if self.rtl.get(b).copied().unwrap_or(false) { b.saturating_add(1) } else { b });
+        let right = real(v).map(|b| if self.rtl.get(b).copied().unwrap_or(false) { b.saturating_add(1) } else { b });
         let mut out = Vec::with_capacity(2);
         for l in [left, right].into_iter().flatten() {
             if !out.contains(&l) {
@@ -227,13 +411,20 @@ impl ScreenMap {
     }
 
     /// The logical indices, sorted, of the characters drawn at the screen positions `range`
-    /// (past the end ignored). A selection between two screen positions covers these.
+    /// (past the end ignored; a line break that is no character is none). A selection between two
+    /// screen positions covers these.
     pub fn logical_of_screen(&self, range: Range<usize>) -> Vec<usize> {
         let end = range.end.min(self.screen_len());
         let start = range.start.min(end);
-        let mut set: Vec<usize> = self.shown.get(start..end).unwrap_or_default().to_vec();
+        let mut set: Vec<usize> = self.shown.get(start..end).unwrap_or_default().iter().copied().filter(|l| *l != VIRTUAL).collect();
         set.sort_unstable();
         set
+    }
+
+    /// Whether line `row` of a wrapped text reads right to left (a single line, and a line past
+    /// the last, read left to right).
+    pub fn row_is_rtl(&self, row: usize) -> bool {
+        self.row_rtl.get(row).copied().unwrap_or(false)
     }
 }
 
@@ -1024,6 +1215,186 @@ mod tests {
         assert_eq!(wrapped.screen_positions(3), [0]);
         let plain = screen_map("\u{202B}\u{202C}");
         assert_eq!((plain.screen_len(), plain.logical_len()), (2, 2));
+    }
+
+    /// A measure that lets `n` characters on a line (without the spaces after the last word).
+    fn at_most(n: usize) -> impl FnMut(&str) -> bool {
+        move |line: &str| line.chars().count() <= n
+    }
+
+    #[test]
+    fn a_wrapped_arabic_paragraph_has_two_places_for_the_caret_at_the_break_and_reads_from_the_right() {
+        // "abj dhw" (alef ba jim, space, dal heh waw): two words of three letters.
+        let text = "\u{627}\u{628}\u{62C} \u{62F}\u{647}\u{648}";
+        let map = wrapped_screen_map(text, false, at_most(3));
+        // Row 0: the space (reading ends there, so it is at the left), then the word's letters
+        // from the last to the first; the break; row 1: the second word the same way.
+        assert_eq!(map.shown, [3, 2, 1, 0, VIRTUAL, 6, 5, 4]);
+        assert_eq!(map.drawn[4], '\n');
+        assert_eq!(map.row_rtl, [true, true]);
+        assert_eq!(map.to_screen, [Some(3), Some(2), Some(1), Some(0), Some(7), Some(6), Some(5)]);
+        assert_eq!((map.logical_len(), map.screen_len()), (7, 8), "the break is drawn and is no character");
+        assert_eq!(map.shaper.matches('\n').count(), 1);
+        // The place between the rows in reading order is the left end of row 0 and the right end of row 1.
+        assert_eq!(map.screen_positions(4), [0, 8]);
+        assert_eq!(map.logical_positions(0), [4]);
+        assert_eq!(map.logical_positions(8), [4]);
+        // The right end of row 0 is the start of the text; the left end of row 1 is the end of it.
+        assert_eq!(map.logical_positions(4), [0]);
+        assert_eq!(map.logical_positions(5), [7]);
+        assert_eq!(map.screen_positions(0), [4]);
+        assert_eq!(map.screen_positions(7), [5]);
+        // A selection across the break holds the characters on both sides and no more.
+        assert_eq!(map.logical_of_screen(2..7), [0, 1, 5, 6]);
+    }
+
+    #[test]
+    fn a_wrapped_latin_paragraph_keeps_its_spaces_and_has_two_screen_places_at_the_break() {
+        let map = wrapped_screen_map("ab cd ef", false, at_most(5));
+        assert_eq!(map.shaper, "ab cd \nef");
+        assert_eq!(map.shown, [0, 1, 2, 3, 4, 5, VIRTUAL, 6, 7]);
+        assert_eq!(map.row_rtl, [false, false]);
+        // Logical 6 is the end of the first row and the start of the second.
+        assert_eq!(map.screen_positions(6), [6, 7]);
+        assert_eq!(map.logical_positions(6), [6]);
+        assert_eq!(map.logical_positions(7), [6]);
+        // A word wider than a line breaks between its characters.
+        let long = wrapped_screen_map("abcdefgh", false, at_most(3));
+        assert_eq!(long.shaper, "abc\ndef\ngh");
+        assert_eq!(long.logical_len(), 8);
+        assert_eq!(long.logical_of_screen(0..long.screen_len()), (0..8).collect::<Vec<_>>());
+        // Spaces at the ends of the text and a space-only paragraph stay.
+        let spaces = wrapped_screen_map("  ab   ", false, at_most(9));
+        assert_eq!(spaces.shaper, "  ab   ");
+        assert_eq!(wrapped_screen_map("   ", false, at_most(1)).shaper, "   ");
+    }
+
+    #[test]
+    fn paragraphs_end_at_the_texts_own_line_breaks_and_follow_their_first_strong_letter() {
+        // The break is a character of the text and is drawn.
+        let map = wrapped_screen_map("ab\n\u{627}\u{628}\n", false, |_| true);
+        assert_eq!(map.shaper, "ab\n\u{627}\u{628}\n", "the letters of a right-to-left word go to the shaper in typing order");
+        assert_eq!(map.shown, [0, 1, 2, 4, 3, 5]);
+        // Left to right, right to left, and the empty line after the last break goes with the paragraph above it.
+        assert_eq!(map.row_rtl, [false, true, true]);
+        assert_eq!(map.screen_len(), 6);
+        // A paragraph without a strong letter takes the direction of the one before it, or the interface's.
+        assert_eq!(wrapped_screen_map("12\n\n\u{627}\n3", false, |_| true).row_rtl, [false, false, true, true]);
+        assert_eq!(wrapped_screen_map("12\n3", true, |_| true).row_rtl, [true, true]);
+        // `\r\n` is one break: the `\n` is drawn nowhere.
+        let crlf = wrapped_screen_map("a\r\nb", false, |_| true);
+        assert_eq!((crlf.shaper.as_str(), crlf.shown.as_slice(), crlf.row_rtl.as_slice()), ("a\nb", [0, 1, 3].as_slice(), [false, false].as_slice()));
+        assert_eq!(crlf.to_screen, [Some(0), Some(1), None, Some(2)]);
+        assert_eq!(wrapped_screen_map("a\r\n", false, |_| true).row_rtl.len(), 2);
+        // Nothing at all.
+        let empty = wrapped_screen_map("", false, |_| true);
+        assert_eq!((empty.shaper.as_str(), empty.screen_len(), empty.row_rtl.len()), ("", 0, 0));
+        assert_eq!((empty.screen_positions(0), empty.logical_positions(0)), (vec![0], vec![0]));
+    }
+
+    /// Texts with every kind of break, bidirectional control and run, as the field is typed into.
+    fn wrapped_corpus() -> Vec<String> {
+        let mut out = corpus();
+        out.extend(
+            [
+                "a\r\nb\rc\u{2029}d\u{85}e",
+                "\u{202B}\n\u{202C}",
+                "  \u{627}  ",
+                "\u{200F}\u{200E}\n\n",
+                "\u{64B}\n\u{64B}",
+                "ab\u{627}\u{628} cd\u{62A}\n\u{644}\u{627} x",
+                "\n",
+                "\r",
+                "\u{1C}\u{1D}",
+            ]
+            .map(str::to_owned),
+        );
+        out
+    }
+
+    #[test]
+    fn a_wrapped_map_draws_every_character_once_and_round_trips_the_caret() {
+        for text in wrapped_corpus() {
+            for width in [1, 2, 3, 5, 8, 1000] {
+                let map = wrapped_screen_map(&text, width % 2 == 0, at_most(width));
+                let (m, n) = (map.logical_len(), map.screen_len());
+                assert_eq!(m, text.chars().count());
+                assert_eq!((map.shaper.chars().count(), map.drawn.len()), (n, n), "{text:?} at {width}");
+                assert_eq!(map.shaper.matches('\n').count(), map.drawn.iter().filter(|c| **c == '\n').count(), "{text:?}");
+                // `shown` and `to_screen` are inverse to each other where there is a character.
+                for (screen, &logical) in map.shown.iter().enumerate() {
+                    if logical == VIRTUAL {
+                        assert_eq!(map.drawn[screen], '\n', "{text:?}");
+                    } else {
+                        assert_eq!(map.to_screen.get(logical), Some(&Some(screen)), "{text:?} at {width}");
+                    }
+                }
+                let real = map.shown.iter().filter(|l| **l != VIRTUAL).count();
+                assert_eq!(map.to_screen.iter().flatten().count(), real, "{text:?}");
+                // What is not drawn is a direction control or the `\n` of a `\r\n`.
+                for (logical, c) in text.chars().enumerate() {
+                    let drawn = map.to_screen.get(logical).copied().flatten().is_some();
+                    let after_cr = c == '\n' && text.chars().nth(logical.wrapping_sub(1)) == Some('\r');
+                    assert!(drawn || is_bidi_control(c) || after_cr, "{text:?} at {width} drops {c:?}");
+                }
+                // One row of the galley for each line: the breaks plus one, as many as the directions say.
+                let rows = if text.is_empty() { 0 } else { map.shaper.matches('\n').count() + 1 };
+                assert_eq!(map.row_rtl.len(), rows, "{text:?} at {width}: {:?}", map.row_rtl);
+                for v in 0..=n {
+                    let logical = map.logical_positions(v);
+                    assert!(!logical.is_empty() && logical.len() <= 2, "{text:?} {v}");
+                    for l in logical {
+                        assert!(l <= m, "{text:?} {v} -> {l}");
+                        assert!(
+                            map.screen_positions(l).contains(&v),
+                            "{text:?} at {width}: screen {v} -> logical {l} -> {:?}",
+                            map.screen_positions(l)
+                        );
+                    }
+                }
+                for l in 0..=m {
+                    let screen = map.screen_positions(l);
+                    assert!(!screen.is_empty() && screen.len() <= 2 && screen.iter().all(|&v| v <= n), "{text:?} {l} -> {screen:?}");
+                }
+                assert_eq!(map.logical_of_screen(0..usize::MAX).len(), real);
+            }
+        }
+    }
+
+    #[test]
+    fn embeddings_nested_to_the_limit_of_the_algorithm_do_not_panic() {
+        // Sixty-three unclosed right-to-left embeddings put the letters after them at the deepest
+        // level the algorithm has; a line made of nothing else then has no level to reorder from.
+        let deep = format!("{}ab cd ef", "\u{202B}".repeat(70));
+        let deeper = format!("{}{}ab cd ef", "\u{202B}\u{202A}".repeat(70), "\u{627}");
+        for text in [deep, deeper] {
+            let _ = visual(&text);
+            let _ = screen_map(&text);
+            for width in [1, 2, 3, 100] {
+                let map = wrapped_screen_map(&text, false, at_most(width));
+                assert_eq!(map.logical_len(), text.chars().count());
+                assert_eq!(map.logical_of_screen(0..usize::MAX).len(), text.chars().filter(|c| !is_bidi_control(*c)).count());
+            }
+            let _ = wrap(&text, at_most(2));
+        }
+    }
+
+    #[test]
+    fn wrapping_survives_hostile_measures_and_long_input() {
+        // A measure that accepts nothing, then only the first call, then everything.
+        for text in wrapped_corpus() {
+            let none = wrapped_screen_map(&text, false, |_| false);
+            assert_eq!(none.logical_len(), text.chars().count());
+            let mut first = true;
+            let once = wrapped_screen_map(&text, true, |_| std::mem::take(&mut first));
+            assert_eq!(once.logical_len(), text.chars().count());
+        }
+        let long = "\u{627}\u{628} ".repeat(5_000);
+        let map = wrapped_screen_map(&long, false, at_most(40));
+        assert!(map.screen_len() >= long.chars().count());
+        assert_eq!(map.logical_of_screen(0..usize::MAX).len(), long.chars().count());
+        let word = "\u{633}".repeat(3_000);
+        assert_eq!(wrapped_screen_map(&word, false, at_most(7)).shaper.matches('\n').count(), 3_000 / 7);
     }
 
     /// With an Arabic face the glyphs of the galley egui builds from the shaper text come in

@@ -91,8 +91,10 @@ pub fn line(text: &mut String) -> BidiEdit<'_> {
     BidiEdit::singleline(text).margin(FIELD_MARGIN).min_size(vec2(0.0, FIELD_MIN_HEIGHT)).horizontal_align(align)
 }
 
-/// A multiline field with the same horizontal inset as [`line`]. egui wraps its lines in logical
-/// order, so right-to-left text in it is aligned against the right edge but not reordered.
+/// A multiline field with the same horizontal inset as [`line`]. Right-to-left script in it is
+/// wrapped in reading order and edited in display order ([`BidiEdit::multiline`]), each paragraph
+/// against the edge it starts from; text without any, and a [`BidiEdit::password`], make it a plain
+/// `egui::TextEdit`.
 pub fn block(text: &mut String) -> BidiEdit<'_> {
     let align = field_align(text.as_str());
     BidiEdit::multiline(text).margin(egui::Margin::symmetric(10, 6)).horizontal_align(align)
