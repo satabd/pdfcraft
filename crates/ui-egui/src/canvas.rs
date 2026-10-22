@@ -6312,7 +6312,16 @@ trailer << /Root 1 0 R >>
         h.run_steps(2);
         assert_eq!(h.state().views[0].thumb_demand.len(), 2, "booklet only needs its two placed pages");
         h.state_mut().dialog = None;
-        h.run_steps(2);
+        // Thumbnail textures are pruned only once no visible main page is still being
+        // rendered on the worker threads, which a slow machine (the emulated FreeBSD CI
+        // runner) can take more than two frames to finish. Wait, bounded, for that frame.
+        for _ in 0..300 {
+            h.run_steps(1);
+            if h.state().views[0].thumbs.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(h.state().views[0].thumb_demand.is_empty());
         assert!(h.state().views[0].thumbs.is_empty());
     }
