@@ -364,7 +364,7 @@ impl LineMeasure {
         }
         let space = word(" ");
         let mut words = line.split(' ');
-        let first = words.next().map_or(0.0, &word);
+        let first = words.next().map_or(0.0, word);
         words.fold(first, |sum, w| sum + space + word(w))
     }
 }
