@@ -84,6 +84,18 @@ pub struct Line {
     pub rtl: bool,
 }
 
+/// The direction of the first strong character of `text` (as `dir="auto"` reads it): `Some(true)`
+/// for right to left, `Some(false)` for left to right, `None` when there is none yet (empty,
+/// digits, punctuation). Only the first 512 characters are looked at.
+pub fn first_strong_rtl(text: &str) -> Option<bool> {
+    let end = text.char_indices().nth(512).map_or(text.len(), |(at, _)| at);
+    match unicode_bidi::get_base_direction(text.get(..end)?) {
+        unicode_bidi::Direction::Rtl => Some(true),
+        unicode_bidi::Direction::Ltr => Some(false),
+        unicode_bidi::Direction::Mixed => None,
+    }
+}
+
 /// Whether `text` holds any right-to-left script, so [`wrap`] or [`visual_auto`] is needed.
 pub fn has_rtl(text: &str) -> bool {
     text.chars().any(is_rtl_script)

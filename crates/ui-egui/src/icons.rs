@@ -25,7 +25,43 @@ fn source(name: &str) -> egui::ImageSource<'static> {
     white_icons().source(white_icons().canonical_name(name).unwrap_or("square"))
 }
 
+/// The icons that point somewhere or lead a line, and so face the other way in a right-to-left
+/// interface (Back is an arrow to the right in Arabic, a list's bullets sit at the right).
+/// Everything else is drawn as it is: clocks, check marks, help, rotate arrows, media controls,
+/// zoom, file and bookmark glyphs, external-link and the signature have no direction of their
+/// own, and `align-left`, `align-right`, `move-right` (the Arrow annotation) and the flip icons
+/// name a physical direction, which does not depend on the language.
+pub const MIRROR: &[&str] = &[
+    "chevron-left",
+    "chevron-right",
+    "chevrons-left",
+    "chevrons-right",
+    "undo-2",
+    "redo-2",
+    "panel-left",
+    "panel-right",
+    "list",
+    "list-ordered",
+    "reply",
+    "send",
+];
+
+/// Whether the icon `name` faces the other way in a right-to-left interface.
+fn mirrors(name: &str) -> bool {
+    MIRROR.contains(&name)
+}
+
+/// The icon as the interface language reads it: a directional icon ([`MIRROR`]) is flipped
+/// horizontally in a right-to-left language. Every icon button and painted icon goes through
+/// here, so a call site does not decide.
 pub fn image(name: &str, size: f32, tint: Color32) -> egui::Image<'static> {
+    let image = image_fixed(name, size, tint);
+    if crate::rtl::mirrored() && mirrors(name) { image.uv(Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))) } else { image }
+}
+
+/// [`image`] for a direction that is physical: the arrows that scroll the tab strip to its left
+/// and right, or a control that moves an item to the left of the page grid. Never flipped.
+pub fn image_fixed(name: &str, size: f32, tint: Color32) -> egui::Image<'static> {
     egui::Image::new(source(name)).fit_to_exact_size(Vec2::splat(size)).tint(tint)
 }
 
@@ -33,8 +69,29 @@ pub fn paint(ui: &egui::Ui, rect: Rect, name: &str, size: f32, tint: Color32) {
     image(name, size, tint).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
 }
 
+/// [`paint`] for a physical direction (see [`image_fixed`]).
+pub fn paint_fixed(ui: &egui::Ui, rect: Rect, name: &str, size: f32, tint: Color32) {
+    image_fixed(name, size, tint).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
+}
+
 /// Square icon button: transparent until hovered; `selected` gets the accent treatment.
 pub fn button(ui: &mut egui::Ui, name: &str, box_size: f32, selected: bool, tooltip: &str) -> Response {
+    icon_button(ui, name, box_size, selected, tooltip, paint)
+}
+
+/// [`button`] whose icon names a physical direction and is never flipped (see [`image_fixed`]).
+pub fn button_fixed(ui: &mut egui::Ui, name: &str, box_size: f32, selected: bool, tooltip: &str) -> Response {
+    icon_button(ui, name, box_size, selected, tooltip, paint_fixed)
+}
+
+fn icon_button(
+    ui: &mut egui::Ui,
+    name: &str,
+    box_size: f32,
+    selected: bool,
+    tooltip: &str,
+    paint: fn(&egui::Ui, Rect, &str, f32, Color32),
+) -> Response {
     let t = Tokens::get(ui.ctx());
     // The shared button paints no fill of its own: the eased press wash below replaces it.
     let clear = |icon| ButtonVisuals { fill: Color32::TRANSPARENT, stroke: Stroke::NONE, icon };
@@ -78,6 +135,76 @@ pub fn button(ui: &mut egui::Ui, name: &str, box_size: f32, selected: bool, tool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Draws in Arabic for the test's lifetime (the language is per thread), then restores it.
+    struct Arabic;
+    impl Arabic {
+        fn on() -> Self {
+            crate::i18n::set_current(crate::i18n::Lang::from_code("ar").expect("ar registered"));
+            Self
+        }
+    }
+    impl Drop for Arabic {
+        fn drop(&mut self) {
+            crate::i18n::set_current(crate::i18n::Lang::EN);
+        }
+    }
+
+    const FLIPPED: Rect = Rect { min: egui::pos2(1.0, 0.0), max: egui::pos2(0.0, 1.0) };
+
+    #[test]
+    fn mirrored_icons_exist_and_the_directionless_ones_are_not_listed() {
+        for name in MIRROR {
+            assert!(exists(name), "{name} is not an icon");
+        }
+        for name in [
+            "check",
+            "circle-check",
+            "clock",
+            "circle-help",
+            "rotate-cw",
+            "rotate-ccw",
+            "zoom-in",
+            "zoom-out",
+            "external-link",
+            "signature",
+            "file-text",
+            "bookmark",
+            "mic",
+            "film",
+            "x",
+            "plus",
+            "search",
+            "chevron-up",
+            "chevron-down",
+            "align-left",
+            "align-right",
+            "move-right",
+            "flip-horizontal-2",
+        ] {
+            assert!(exists(name), "{name} is not an icon");
+            assert!(!MIRROR.contains(&name), "{name} must not be flipped");
+        }
+        // A listed name is listed once.
+        let mut sorted = MIRROR.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), MIRROR.len());
+    }
+
+    #[test]
+    fn a_directional_icon_flips_only_in_a_right_to_left_language() {
+        let default_uv = image_fixed("chevron-left", 16.0, Color32::WHITE).image_options().uv;
+        assert_eq!(image("chevron-left", 16.0, Color32::WHITE).image_options().uv, default_uv, "left to right is untouched");
+        let _arabic = Arabic::on();
+        assert_eq!(image("chevron-left", 16.0, Color32::WHITE).image_options().uv, FLIPPED);
+        assert_eq!(image("undo-2", 16.0, Color32::WHITE).image_options().uv, FLIPPED);
+        assert_eq!(image("check", 16.0, Color32::WHITE).image_options().uv, default_uv, "no direction of its own");
+        assert_eq!(image("move-right", 16.0, Color32::WHITE).image_options().uv, default_uv, "the Arrow annotation is physical");
+        assert_eq!(image_fixed("chevron-left", 16.0, Color32::WHITE).image_options().uv, default_uv, "a fixed icon is never flipped");
+        assert_eq!(image_fixed("chevron-right", 16.0, Color32::WHITE).image_options().uv, default_uv);
+    }
+
     #[test]
     fn every_catalog_icon_exists() {
         for g in pdfcraft_engine::catalog::TOOL_GROUPS {

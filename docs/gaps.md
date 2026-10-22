@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (gap 12: reading order is scored, not just word F1) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (M1: raw-deflate fallback preserves decoding-limit errors; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
-> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (gap 14: Arabic tooltips, dialog text and notes wrap in typing order, document text in the panels is in display order, Find ignores harakat; gap 3: Edit text shapes Arabic replacement text; the mirrored layout and typed text remain) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (gap 14: the Arabic frame is mirrored (panes, rail, mode bar, tab strip, rows, dialog footers); menus, dialog bodies and the canvas are not yet; Arabic tooltips, dialog text and notes wrap in typing order, document text in the panels is in display order, Find ignores harakat; gap 3: Edit text shapes Arabic replacement text; the mirrored layout and typed text remain) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (gap 6: #1910 Organize Pages opens on the current page; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1398 stamps read upright on rotated pages; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1317, #1327, #1302, #1315 and #1340; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -42,7 +42,7 @@ update the numbers.
 | 11 | Accessibility: checker only, no tagging tools | feature | 40–70 | [target-app-parity.md](target-app-parity.md) |
 | 12 | No measured fidelity harness against Acrobat | quality | (in 2) | [target-app-parity.md](target-app-parity.md) |
 | 13 | Performance budgets and lazy loading of very large files | performance | 25–45 | this file |
-| 14 | Arabic not mirrored; no Hindi, Indonesian, Korean | localization | 25–45 | [localization-parity.md](localization-parity.md) |
+| 14 | Arabic only partly mirrored; no Hindi, Indonesian, Korean | localization | 25–45 | [localization-parity.md](localization-parity.md) |
 | 15 | Forms: JavaScript object model, actions, submit, XFA depth | feature | 40–75 | [pdf-spec-parity.md](pdf-spec-parity.md) |
 | 16 | UI precision gaps (multi-select move, rulers, accelerators, windows) | UI/UX | 30–60 | [ui-parity.md](ui-parity.md) |
 | 17 | Certificate security and other protect gaps | feature, spec | 15–30 | [pdf-spec-parity.md](pdf-spec-parity.md) |
@@ -294,14 +294,19 @@ update the numbers.
   to edit.
 - **Estimate:** 25–45 h. **Doc:** this file.
 
-### 14. Arabic not mirrored; no Hindi, Indonesian, Korean
+### 14. Arabic only partly mirrored; no Hindi, Indonesian, Korean
 
-- **Missing:** a right-to-left layout (panels, menus, alignment), bidirectional text in the text
-  layout itself (text being typed; the toast and banners under the Arabic interface); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+- **Done (2026-10-22):** the frame is mirrored for Arabic: Tools at the right, navigation panes and
+  rail at the left, mode bar, tab strip, rows and dialog footers from the right, directional icons
+  flipped, fields aligned to the script typed (`rtl` module; the stock arrangement only, a
+  rearranged layout is kept).
+- **Missing:** the rest of the right-to-left layout (menus and submenus, dialog bodies and
+  `egui::Grid` columns, the Comments, Signatures and Compare panels, the order of document tabs,
+  the canvas), bidirectional text in the text layout itself (text being typed; the toast and banners under the Arabic interface); catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
   Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
   like other non-English languages (no translated help; engine/OS details stay English).
-- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` partial (tooltips, dialog
+- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` partial (mirrored frame; tooltips, dialog
   text and notes wrap in typing order; document text in bookmarks, search, Properties, fields,
   signatures and notices is in display order; Find ignores harakat and matches presentation forms).
 - **Estimate:** 25–45 h (Arabic RTL 20–35, three catalogs 8–12 plus review). **Doc:**
@@ -385,6 +390,7 @@ update the numbers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Gap 14: the Arabic interface mirrors its frame (Tools at the right, navigation panes and rail at the left, mode bar, tab strip, rows and dialog footers from the right, directional icons flipped, fields aligned to the script typed); menus, dialog bodies and grids, some panels, the tab order and the canvas are not mirrored. Estimates unchanged |
 | 2026-10-21 | minor | Gap 14: Arabic interface text that wraps goes through logical-order lookups; document text across the panels is painted in display order; Find folds harakat, presentation forms and digits. Gap 3: Edit text shapes Arabic replacement text (`edit.rtl-cjk-editing` notes). Estimates unchanged |
 | 2026-10-15 | minor | Gap 12: the text oracle scores reading order as well as word F1, which is a bag of words and cannot see order; the first measurement separated 18 improvements from 6 regressions in a change F1 called unchanged on 26 of 29 files. Estimates unchanged. |
 | 2026-10-14 | minor | M1: raw-deflate fallback preserves decoding-limit errors in strict and tolerant decoding; synthetic filter and COS stream regressions. Estimates unchanged. |

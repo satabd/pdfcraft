@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
-> **Last reviewed:** 2026-10-21 · **Last updated:** 2026-10-21 · **Change:** minor (M7: Edit text shapes Arabic replacement text; M14: Arabic tooltips, dialog text and notes wrap in typing order and document text is in display order across the panels; M3: Find ignores harakat and matches presentation forms; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (M14: the Arabic interface mirrors its frame (panes, rail, mode bar, tab strip, rows, dialog footers); menus, dialog bodies and the canvas are not mirrored yet; M7: Edit text shapes Arabic replacement text; M3: Find ignores harakat; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-18 · **Change:** minor (M5, PR #1971: bounded nested FDF export excludes source page/page-tree dictionaries; refreshed against upstream 4db6ac4a; estimates unchanged)
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (M7: the Edit text caret is as tall as the row it is on; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (M6: CSV tab-containing headers; estimates unchanged)
@@ -142,7 +142,7 @@ union). Detail and script notes: [localization-parity.md](docs/localization-pari
 | Simplified Chinese | `zh-hans` | 97.4% | partial (no Hans UI face in releases, #826) |
 | Spanish | `es` | 95.5% | partial |
 | Hindi | `hi` | 0% | none |
-| Arabic | `ar` | 100% | partial (layout not mirrored) |
+| Arabic | `ar` | 100% | partial (frame mirrored; menus and dialog bodies not) |
 | French | `fr` | 99.3% | partial |
 | Portuguese (Brazil) | `pt-br` | 99.4% | partial |
 | Indonesian | `id` | 0% | none |
@@ -172,6 +172,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- **2026-10-22 (M14, mirrored Arabic layout):** The Arabic interface now mirrors its frame. The Tools pane is at the right of the document and the navigation panes (Bookmarks, Page thumbnails, ...) at the left with the rail at the left edge: the stock panel arrangement is laid out again when the language changes (pane widths and open panes kept, `layout_rtl` saved with the settings), and a layout the user rearranged, floated or tabbed is never touched; Reset panel layout gives the arrangement of the language; the explicit Tools panel side stays physical. The mode bar and the tab strip start at the right (Home first, Open and the help, theme and Discord buttons at the left, the window buttons where the desktop puts them, the tabs keep their order and the scroll arrows their direction), the main menu opens towards the left, and the rows of the All tools list and tool pages, Bookmarks (indentation from the right, destination page at the left), Fields, Layers, Attachments, the recent files, the command palette and the dialogs start at the right with OK and Cancel at the left. Directional icons (`icons::MIRROR`) are flipped in one place, and fields align to the script typed. New `rtl` module (one answer to "which edge is the start"), `tests/rtl_layout.rs` (positions in both languages, window buttons, persistence, a sweep of panels, tools and dialogs for rows outside the window). Not mirrored yet: menus, dialog bodies and grids (egui measures a grid against a right edge as infinite), the Comments, Signatures and Compare panels, the order of document tabs and the canvas; `misc.rtl-ui` stays partial. Estimates unchanged.
 
 - **2026-10-22 (M7, Arabic headers, footers, Bates, watermarks and created pages):** Header and footer slots, Bates prefixes and watermark text holding Arabic are drawn shaped with the craft-fonts Arabic face (Type 3 glyphs in the page's resources, one `/ActualText` span per drawn line, measured for the slot and the watermark's rotation) instead of being refused; the Header & footer and Watermark dialogs accept it. Create from text lays out Arabic paragraphs shaped and right-aligned when they run right to left, and generated reports (comment summaries, compare) keep Arabic readable instead of escaping it as code points. Shaping is planned before any mutation, capped in size, and without the face the old refusal and escaping stay. Estimates unchanged.
 
@@ -561,6 +563,7 @@ Newest first: the date, what moved, and the new overall estimate.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | M14: the Arabic interface mirrors its frame (panes, rail, mode bar, tab strip, rows, dialog footers); menus, dialog bodies and the canvas are not mirrored yet. Estimates unchanged. |
 | 2026-10-22 | minor | M7: Arabic in headers, footers, Bates numbers, watermarks and Create from text is drawn shaped instead of refused or escaped. Estimates unchanged. |
 | 2026-10-22 | minor | M5: Arabic FreeText comments (text box, callout, Typewriter, Fill & Sign text) are drawn shaped with per-line ActualText and flatten. Estimates unchanged. |
 | 2026-10-22 | minor | M6: Arabic form-field values are drawn shaped and flatten; the shaped-layout code moves into pdfcraft_fonts::shaped_text. Estimates unchanged. |

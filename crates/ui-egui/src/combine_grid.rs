@@ -1200,10 +1200,10 @@ pub(crate) fn preview(app: &mut PdfCraftApp, ctx: &egui::Context, t: &Tokens) {
         // Previous and next, centred below.
         ui.horizontal(|ui| {
             ui.add_space((width - 2.0 * 30.0 - 6.0) / 2.0);
-            if ui.add_enabled_ui(at > 0, |ui| icons::button(ui, "chevron-left", 30.0, false, tl!("Previous page"))).inner.clicked() {
+            if ui.add_enabled_ui(at > 0, |ui| icons::button_fixed(ui, "chevron-left", 30.0, false, tl!("Previous page"))).inner.clicked() {
                 step = -1;
             }
-            if ui.add_enabled_ui(at + 1 < n, |ui| icons::button(ui, "chevron-right", 30.0, false, tl!("Next page"))).inner.clicked() {
+            if ui.add_enabled_ui(at + 1 < n, |ui| icons::button_fixed(ui, "chevron-right", 30.0, false, tl!("Next page"))).inner.clicked() {
                 step = 1;
             }
         });
