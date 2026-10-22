@@ -6864,6 +6864,16 @@ fn mixed_visual_region_edit_preview_save_reopen_and_undo_through_tools() {
     let unchanged = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1}));
     assert_eq!(unchanged["overflow"], false);
     assert_eq!(unchanged["source_rect"], unchanged["draft_rect"]);
+    // A box to each row (top-left-origin points), and no Arabic to shape in a page face.
+    assert_eq!(unchanged["row_boxes"].as_array().unwrap().len(), unchanged["rows"].as_array().unwrap().len());
+    assert_eq!(unchanged["shaping_faces"], json!([]));
+    // Justified, the rows but the last span the paragraph's width.
+    let long = "Heading\nBody bold text and some more words that fill the row and wrap";
+    let justified = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":long.replace('\n', " "),"align":"justify"}));
+    let (boxes, source) = (justified["row_boxes"].as_array().unwrap(), &justified["source_rect"]);
+    assert!(boxes.len() >= 2, "{justified}");
+    assert!((boxes[0][2].as_f64().unwrap() - source[2].as_f64().unwrap()).abs() < 1.0, "{boxes:?} against {source}");
+    assert!(a.call("text_edit_layout", &json!({"doc":doc,"page":1,"paragraph":1,"align":"sideways"})).is_err());
     let growing = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":"Heading\nBody bold text\nExtra row\nAnother row"}));
     assert_eq!(growing["overflow"], true);
     assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1})), before, "measuring does not apply a draft");

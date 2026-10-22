@@ -155,3 +155,123 @@ fn the_rows_follow_the_draft_as_it_is_typed_and_restyled() {
     assert_eq!(after, layout_rows(&h), "and are the rewrite's for it");
     assert_eq!(h.state().views[0].line_editor.as_ref().map(|ed| ed.text.clone()), Some(LONG.to_owned()), "the text is not touched");
 }
+
+/// The screen `(left, right)` of the ink of each row the editor paints for the draft (without the spaces a wrapped row keeps).
+fn editor_ink(h: &Harness<'static, PdfCraftApp>) -> Vec<(f32, f32)> {
+    let galleys = painted_galleys(h);
+    let (pos, g) = galleys.iter().find(|(_, g)| g.job.text.contains("quick")).expect("the editor paints the draft");
+    g.rows
+        .iter()
+        .map(|row| {
+            let ink: Vec<_> = row.glyphs.iter().filter(|g| g.chr != ' ').collect();
+            let left = ink.iter().map(|g| g.pos.x).fold(f32::MAX, f32::min);
+            let right = ink.iter().map(|g| g.pos.x + g.advance_width).fold(f32::MIN, f32::max);
+            (pos.x + row.pos.x + left, pos.x + row.pos.x + right)
+        })
+        .collect()
+}
+
+/// The screen `(left, right)` of each row of the page's first paragraph, and the left edges of the words of each.
+fn page_ink(h: &Harness<'static, PdfCraftApp>) -> Vec<((f32, f32), Vec<f32>)> {
+    let b = block(h);
+    let lines = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0);
+    b.rows
+        .iter()
+        .map(|row| {
+            let rects: Vec<[f64; 4]> = row.iter().map(|i| lines[*i].rect).collect();
+            let left = rects.iter().map(|r| r[0]).fold(f64::MAX, f64::min);
+            let right = rects.iter().map(|r| r[2]).fold(f64::MIN, f64::max);
+            let words = row.iter().flat_map(|i| lines[*i].ink.iter().map(|w| at(h, w[0], 0.0).x)).collect();
+            ((at(h, left, 0.0).x, at(h, right, 0.0).x), words)
+        })
+        .collect()
+}
+
+/// Justify chosen in the Format panel for a retyped paragraph: the editor stretches the spaces of every row but the last to the
+/// width the page writes the justified rows at, so each of those rows ends where the page's line does (and begins where it
+/// begins), at every zoom. The rows are the rewrite's own; the last row stays as long as its words.
+#[test]
+fn a_justified_paragraph_is_shown_with_its_spaces_stretched_to_the_pages_rows() {
+    for zoom in ["100", "200"] {
+        let mut h = harness(zoom);
+        open_editor(&mut h);
+        h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        h.event(egui::Event::Text(LONG.into()));
+        h.run_steps(4);
+        let natural = editor_ink(&h);
+        h.state_mut().views[0].line_editor.as_mut().expect("the editor is open").look.align = pdfcraft_engine::TextAlign::Justify;
+        h.run_steps(4);
+        let shown = editor_ink(&h);
+        let planned = layout_rows(&h);
+        assert_eq!(shown.len(), natural.len(), "the same rows when justified ({zoom}%)");
+        assert!(shown.len() >= 4, "the paragraph wraps ({zoom}%): {planned:?}");
+        // Before Apply, from the engine: every row but the last is as wide as the paragraph.
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+        h.run_steps(4);
+        let page = page_ink(&h);
+        assert_eq!(page.len(), shown.len(), "as many rows as the editor showed ({zoom}%)");
+        for (i, ((left, right), ((page_left, page_right), _))) in shown.iter().zip(&page).enumerate().take(shown.len() - 1) {
+            assert!((right - page_right).abs() <= 1.5, "row {i} ends at {right}, the page's line at {page_right} ({zoom}%)");
+            assert!((left - page_left).abs() <= 1.5, "row {i} begins at {left}, the page's line at {page_left} ({zoom}%)");
+            // (the stretch is what moved it: the row was shorter before)
+            assert!(natural[i].1 < *right - 1.0 || (natural[i].1 - right).abs() <= 1.0, "row {i} was {natural:?}");
+        }
+        let (last_left, last_right) = shown[shown.len() - 1];
+        let ((_, page_last_right), _) = page[page.len() - 1];
+        assert!(
+            (last_right - page_last_right).abs() <= 2.0,
+            "the last row ends where its words do: {last_right} against {page_last_right} ({zoom}%)"
+        );
+        assert!(last_right - last_left < (shown[0].1 - shown[0].0) * 0.95, "and is not stretched ({zoom}%)");
+    }
+}
+
+/// A retyped paragraph with Justify chosen in the Format panel, in the editor; `apply` also applies it.
+fn justified_draft(zoom: &str, apply: bool) -> Harness<'static, PdfCraftApp> {
+    let mut h = harness(zoom);
+    open_editor(&mut h);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(egui::Event::Text(LONG.into()));
+    h.run_steps(4);
+    h.state_mut().views[0].line_editor.as_mut().expect("the editor is open").look.align = pdfcraft_engine::TextAlign::Justify;
+    h.run_steps(4);
+    if apply {
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+        h.run_steps(4);
+    }
+    h
+}
+
+/// Over stretched spaces the caret and clicks are still on the letters: a click on the first letter of a word of a justified row (the
+/// second row, whose words the stretch has moved furthest from where the interface font puts them) puts the caret before it, and
+/// typing goes there. The places clicked are those of the page's words after Apply.
+#[test]
+fn clicks_over_stretched_spaces_land_on_the_letters_they_are_on() {
+    for zoom in ["100", "200"] {
+        let applied = justified_draft(zoom, true);
+        let page = page_ink(&applied);
+        let rows = page_rows(&applied);
+        let words: Vec<&str> = rows[1].split(' ').collect();
+        let line = applied.state().session.get(applied.state().views[0].id).unwrap().text_lines(0);
+        let b = block(&applied);
+        let second = &line[b.rows[1][0]];
+        let y = at(&applied, 0.0, (second.rect[1] + second.rect[3]) / 2.0).y;
+        assert_eq!(page[1].1.len(), words.len(), "a box for each word of the second row ({zoom}%)");
+        for w in [2, words.len() - 2, words.len() - 1] {
+            let mut h = justified_draft(zoom, false);
+            let click = Pos2::new(page[1].1[w] + 2.0, y);
+            h.hover_at(click);
+            h.run_steps(1);
+            h.drag_at(click);
+            h.run_steps(1);
+            h.drop_at(click);
+            h.run_steps(2);
+            h.event(egui::Event::Text("X".into()));
+            h.run_steps(3);
+            let at_word: usize = rows[0].len() + 1 + words[..w].iter().map(|word| word.len() + 1).sum::<usize>();
+            let expected = format!("{}X{}", &LONG[..at_word], &LONG[at_word..]);
+            let typed = h.state().views[0].line_editor.as_ref().map(|ed| ed.text.clone());
+            assert_eq!(typed, Some(expected), "word {w} of the second row ({zoom}%)");
+        }
+    }
+}

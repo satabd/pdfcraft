@@ -327,16 +327,19 @@ fn editor_row_extents(h: &Harness<'static, PdfCraftApp>, probe: &str) -> Vec<(f3
         .collect()
 }
 
-/// The rows of a wrapped Latin Add text box sit where the saved page writes its lines, at every alignment: each row's ink begins and ends
+/// The rows of a wrapped Latin Add text box sit where the saved page writes its lines, at every alignment (a justified text with its
+/// spaces stretched): each row's ink begins and ends
 /// where the page line's does (the interface font is fitted to the standard font's width) and the rows are as far apart as the page's lines.
 #[test]
 fn the_rows_of_the_add_text_box_sit_where_the_page_writes_them() {
     let input = "The quick brown fox jumps over the lazy dog while nine wizards quickly box jumpers and wrap lines at the edge";
-    use pdfcraft_engine::TextAlign::{Center, Left, Right};
+    use pdfcraft_engine::TextAlign::{Center, Justify, Left, Right};
     // The interface font's rows are 1.21 em apart, the page's 1.2: a large size shows the pitch.
     let cases = [("100", Left, 12.0), ("100", Center, 12.0), ("100", Right, 12.0), ("150", Left, 12.0), ("150", Center, 12.0), ("150", Right, 12.0)]
         .into_iter()
-        .chain([("200", Left, 12.0), ("200", Center, 12.0), ("200", Right, 12.0), ("150", Left, 72.0), ("100", Right, 36.0)]);
+        .chain([("200", Left, 12.0), ("200", Center, 12.0), ("200", Right, 12.0), ("150", Left, 72.0), ("100", Right, 36.0)])
+        // Justified: every row but the last is stretched to the box's width, as the page writes it.
+        .chain([("100", Justify, 12.0), ("150", Justify, 12.0), ("200", Justify, 12.0), ("150", Justify, 36.0)]);
     for (zoom, align, size) in cases {
         {
             let mut h = harness();
@@ -863,4 +866,54 @@ fn released_text_does_not_jump_back_before_the_page_is_redrawn() {
     h.run_steps(2);
     let (old, new) = ink_at(&mut h, from, to);
     assert!(new > 20 && old == 0, "the redrawn page has the text in its new place ({old} old, {new} new)");
+}
+
+/// A justified Arabic Add text box stretches the spaces of its rows but the last to the box's width, as the page writes the text: the rows
+/// that the saved lines span the box are as wide in the editor (their width is the box's plus the space a wrap leaves at the row's left
+/// end), the last row is as long as its words.
+#[test]
+fn a_justified_arabic_add_text_box_stretches_its_rows_to_the_boxs_width() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        return;
+    }
+    let input = "سلام عليكم ورحمة الله وبركاته مع أطيب التحيات من الجميع هنا اليوم وفي كل مكان";
+    for zoom in ["100", "200"] {
+        let mut h = harness();
+        h.state_mut().set_option("zoom", zoom).unwrap();
+        h.run_steps(4);
+        let before: Vec<String> = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0).into_iter().map(|l| l.text).collect();
+        assert!(h.state_mut().execute("edit.text"));
+        h.run_steps(2);
+        let point = at(&h, 140.0, 100.0);
+        click(&mut h, point);
+        h.state_mut().views[0].content.draft.as_mut().expect("the editor is open").style.align = pdfcraft_engine::TextAlign::Justify;
+        h.event(egui::Event::Text(input.into()));
+        h.run_steps(4);
+        let galleys = painted_galleys(&h);
+        let (_, galley) = galleys.iter().find(|(_, g)| g.job.text.contains("\u{633}\u{644}\u{627}\u{645}")).expect("the box paints the draft");
+        let widths: Vec<f32> = galley.rows.iter().map(|row| row.row.size.x).collect();
+        // The width of a space where the rows' break spaces are: the box's own font.
+        let space = h.ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                " ".into(),
+                egui::FontId::new(12.0 * zoom.parse::<f32>().unwrap() / 100.0 * 4.0 / 3.0, egui::FontFamily::Proportional),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x
+        });
+        h.get_by_label("Done adding text").click();
+        h.run_steps(3);
+        let mut lines = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0);
+        lines.retain(|l| !before.contains(&l.text));
+        assert!(lines.len() >= 3 && lines.len() == widths.len(), "{} rows, {} lines ({zoom}%)", widths.len(), lines.len());
+        lines.sort_by(|a, b| b.rect[3].total_cmp(&a.rect[3]));
+        for (i, (width, line)) in widths.iter().zip(&lines).enumerate().take(lines.len() - 1) {
+            let page = at(&h, line.rect[2] as f32, 0.0).x - at(&h, line.rect[0] as f32, 0.0).x;
+            assert!((width - space - page).abs() <= 3.0, "row {i} is {width} wide (a space is {space}), the page's line {page} ({zoom}%)");
+        }
+        let last = lines.len() - 1;
+        let page_last = at(&h, lines[last].rect[2] as f32, 0.0).x - at(&h, lines[last].rect[0] as f32, 0.0).x;
+        assert!(widths[last] <= page_last + space + 3.0 && widths[last] < widths[0] * 0.9, "the last row is not stretched ({zoom}%)");
+    }
 }

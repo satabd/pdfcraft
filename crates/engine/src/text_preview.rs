@@ -41,10 +41,10 @@ pub struct TextDraftProbe {
 }
 
 impl TextDraftProbe {
-    /// The rows the rewrite that applies `text` in `style` lays the paragraph out in (what Apply will write), or `None` if
-    /// it refuses the draft.
-    pub fn rows(&self, text: &str, style: &pdfcraft_edit::BlockStyle) -> Option<Vec<String>> {
-        guard(|| pdfcraft_edit::text::text_edit_layout(&self.cos, self.page, self.block, text, style).ok().map(|layout| layout.rows)).ok().flatten()
+    /// What the rewrite that applies `text` in `style` lays the paragraph out as (see [`pdfcraft_edit::text::TextEditLayout`]):
+    /// its rows and their boxes, and the page fonts it shapes Arabic in. `None` if it refuses the draft.
+    pub fn layout(&self, text: &str, style: &pdfcraft_edit::BlockStyle) -> Option<pdfcraft_edit::text::TextEditLayout> {
+        guard(|| pdfcraft_edit::text::text_edit_layout(&self.cos, self.page, self.block, text, style).ok()).ok().flatten()
     }
 }
 

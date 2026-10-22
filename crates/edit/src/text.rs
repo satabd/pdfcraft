@@ -153,6 +153,60 @@ pub struct TextEditLayout {
     /// The text of each row of the paragraph as the rewrite lays it out, top to bottom: where the page breaks the draft
     /// into lines (a row of several runs is one row).
     pub rows: Vec<String>,
+    /// The box of each of `rows` in user space, as the rewrite writes it (the union of the boxes of its runs): a justified
+    /// row is as wide as the paragraph, a right-to-left one ends where it was put.
+    pub row_rects: Vec<[f64; 4]>,
+    /// The page fonts the rewrite shapes the draft's Arabic in, in place, as `(source run, font resource)` for each source
+    /// run of the paragraph (an index into [`text_lines`]): the complete face the run's font is, or one the page
+    /// has of the same face, which the rewrite shapes the letters in with its own tables and draws them in. Empty where the
+    /// rewrite draws Arabic as generated shaped glyphs instead (a subset or no embedded face, a font or weight change,
+    /// a face lacking a letter), and for text with no Arabic.
+    pub shaping_faces: Vec<(usize, String)>,
+}
+
+/// Whether `style` leaves the paragraph's own fonts alone: no document font chosen, no family or weight change, for
+/// the paragraph or for any range of it. The rewrite then shows the text in the face it is written in when it can.
+fn keeps_source_face(style: &BlockStyle) -> bool {
+    style.resource.is_none()
+        && style.family.is_none()
+        && style.bold.is_none()
+        && style.ranges.iter().all(|r| r.family.is_none() && r.resource.is_none())
+}
+
+/// The page fonts the rewrite of `draft` in `style` shapes Arabic in, in place, for each source run of `block` (see
+/// [`TextEditLayout::shaping_faces`]). This is the decision [`rewrite_block_from`] takes (`arabic_source`) and the styled
+/// rewrite follows, asked for every run: a face that [`shape_source`] shapes each row of the draft in.
+fn shaping_faces(doc: &Document, page: usize, lines: &[TextLine], block: &TextBlock, draft: &str, style: &BlockStyle) -> Vec<(usize, String)> {
+    let members: Vec<&TextLine> = block.lines.iter().filter_map(|i| lines.get(*i)).collect();
+    if !text_shaped::has_arabic(draft)
+        || draft.chars().any(crate::bidi::is_hebrew)
+        || !keeps_source_face(style)
+        || !members.iter().all(|line| line.upright())
+        || members.iter().any(|line| line.visual_order)
+    {
+        return Vec::new();
+    }
+    let Ok(p) = page_dict(doc, page) else { return Vec::new() };
+    let resources = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
+    let fonts = resources.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    let mut by_font: HashMap<&str, Option<String>> = HashMap::new();
+    block
+        .lines
+        .iter()
+        .filter_map(|index| {
+            let line = lines.get(*index)?;
+            let face = by_font
+                .entry(line.font.as_str())
+                .or_insert_with(|| {
+                    // (the rewrite shapes one row at a time; a row of other scripts alone has nothing to shape)
+                    let mut faces = draft.split('\n').filter_map(|row| shape_source(doc, &fonts, &line.font, row).transpose());
+                    let first = faces.next()?.ok()?.3;
+                    faces.all(|face| face.is_ok()).then_some(first)
+                })
+                .clone()?;
+            Some((*index, face))
+        })
+        .collect()
 }
 
 pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, style: &BlockStyle) -> Result<TextEditLayout, EditError> {
@@ -163,7 +217,9 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
     let source = original.get(block).ok_or(EditError::Invalid("text block does not exist".into()))?;
     if text == source.editor_text && *style == BlockStyle::default() {
         let rows = source.rows.iter().map(|row| row.iter().filter_map(|i| lines.get(*i)).map(|l| l.text.as_str()).collect::<String>()).collect();
-        return Ok(TextEditLayout { source_rect: source.rect, draft_rect: Some(source.rect), overflow: false, rows });
+        let row_rects = source.rows.iter().filter_map(|row| row.iter().filter_map(|i| lines.get(*i)).map(|l| l.rect).reduce(union)).collect();
+        let shaping_faces = shaping_faces(doc, page, &lines, source, text, style);
+        return Ok(TextEditLayout { source_rect: source.rect, draft_rect: Some(source.rect), overflow: false, rows, row_rects, shaping_faces });
     }
     // Subtract the untouched runs by value, rather than by operator offsets: a rewrite may
     // split BT/ET or add font resources. A multiset also handles coincident repeated text.
@@ -175,11 +231,12 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
             *untouched.entry(key(line)).or_insert(0_usize) += 1;
         }
     }
+    let shaping_faces = shaping_faces(doc, page, &lines, source, text, style);
     let mut draft = doc.clone();
     rewrite_block_from(&mut draft, page, lines, block, Some(text), style, MAX_TYPE3_GLYPHS)?;
     let mut rect: Option<[f64; 4]> = None;
     // The runs the rewrite wrote, in order; those on one baseline are one row.
-    let mut rows: Vec<(f64, String)> = Vec::new();
+    let mut rows: Vec<(f64, String, [f64; 4])> = Vec::new();
     for line in text_lines(&draft, page)? {
         if let Some(count) = untouched.get_mut(&key(&line))
             && *count > 0
@@ -189,14 +246,18 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
         }
         rect = Some(rect.map_or(line.rect, |r| [r[0].min(line.rect[0]), r[1].min(line.rect[1]), r[2].max(line.rect[2]), r[3].max(line.rect[3])]));
         match rows.last_mut() {
-            Some((baseline, row)) if (*baseline - line.origin_baseline()).abs() <= line.size.abs() * 0.25 => row.push_str(&line.text),
-            _ => rows.push((line.origin_baseline(), line.text.clone())),
+            Some((baseline, row, row_rect)) if (*baseline - line.origin_baseline()).abs() <= line.size.abs() * 0.25 => {
+                row.push_str(&line.text);
+                *row_rect = union(*row_rect, line.rect);
+            }
+            _ => rows.push((line.origin_baseline(), line.text.clone(), line.rect)),
         }
     }
-    let rows = rows.into_iter().map(|(_, row)| row).collect();
+    let row_rects = rows.iter().map(|(_, _, rect)| *rect).collect();
+    let rows = rows.into_iter().map(|(_, row, _)| row).collect();
     let overflow = rect
         .is_some_and(|r| r[0] < source.rect[0] - 0.5 || r[1] < source.rect[1] - 0.5 || r[2] > source.rect[2] + 0.5 || r[3] > source.rect[3] + 0.5);
-    Ok(TextEditLayout { source_rect: source.rect, draft_rect: rect, overflow, rows })
+    Ok(TextEditLayout { source_rect: source.rect, draft_rect: rect, overflow, rows, row_rects, shaping_faces })
 }
 
 /// Text and graphics state captured for rewriting.
@@ -2341,9 +2402,7 @@ fn rewrite_block_from(
     }
     let arabic_source = arabic
         && style.ranges.is_empty()
-        && style.resource.is_none()
-        && style.family.is_none()
-        && style.bold.is_none()
+        && keeps_source_face(style)
         && upright
         && !visual_indic
         && shape_source(doc, &fonts_res, &first.font, draft).ok().flatten().is_some();

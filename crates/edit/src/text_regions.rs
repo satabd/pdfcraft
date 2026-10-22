@@ -164,32 +164,30 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
     blocks
 }
 
+/// The face [`shape_source`] shapes in: its program, the shaped run, the family name, and the page font
+/// resource the program is embedded under (the source's own, or a matching full face the page has).
+pub(super) type SourceShaping = (Vec<u8>, pdfcraft_fonts::source_shaping::ShapedRun, String, String);
+
 /// Shape in the source or an explicitly registered matching full face. Never use interface fonts.
-pub(super) fn shape_source(
-    doc: &Document,
-    fonts: &Dict,
-    name: &str,
-    text: &str,
-) -> Result<Option<(Vec<u8>, pdfcraft_fonts::source_shaping::ShapedRun, String)>, EditError> {
+pub(super) fn shape_source(doc: &Document, fonts: &Dict, name: &str, text: &str) -> Result<Option<SourceShaping>, EditError> {
     if !pdfcraft_fonts::source_shaping::required(text) {
         return Ok(None);
     }
     let source =
         fonts.get(name.as_bytes()).and_then(|f| doc.dict(f)).ok_or_else(|| EditError::Invalid("the shaped text has no font resource".into()))?;
     let family = Metrics::from_dict(doc, &source).base_font;
-    let mut candidates = vec![source];
+    let mut candidates = vec![(name.to_owned(), source)];
     candidates.extend(
-        fonts
-            .iter()
-            .filter_map(|(_, f)| doc.dict(f))
-            .filter(|f| pdfcraft_fonts::embedding::face_key(&Metrics::from_dict(doc, f).base_font) == pdfcraft_fonts::embedding::face_key(&family)),
+        fonts.iter().filter_map(|(resource, f)| Some((String::from_utf8_lossy(resource).into_owned(), doc.dict(f)?))).filter(|(_, f)| {
+            pdfcraft_fonts::embedding::face_key(&Metrics::from_dict(doc, f).base_font) == pdfcraft_fonts::embedding::face_key(&family)
+        }),
     );
-    for font in candidates {
+    for (resource, font) in candidates {
         if let Some(bytes) = pdfcraft_fonts::pdf::embedded_sfnt(doc, &font)
             && pdfcraft_fonts::embedding::covers(&bytes, text)
             && let Ok(shaped) = pdfcraft_fonts::source_shaping::shape(&bytes, text)
         {
-            return Ok(Some((bytes, shaped, family)));
+            return Ok(Some((bytes, shaped, family, resource)));
         }
     }
     Err(EditError::Invalid("complex text needs the complete source TrueType/OpenType face; load that font before editing".into()))
@@ -375,9 +373,14 @@ pub(super) fn rewrite_styled_block(
     if !dx.is_finite() || !dy.is_finite() || style.width.is_some_and(|w| !w.is_finite()) {
         return Err(EditError::Invalid("the paragraph's position and width must be finite".into()));
     }
+    // Text that reads right to left (more Hebrew or Arabic letters than Latin) keeps the right edge of its rows, as the single-style
+    // rewrite does: it is right-aligned unless an alignment is asked for, and a single row grows to the left.
+    let rtl = crate::bidi::rtl_base(&draft.replace('\n', " "));
     // A visual row grows even when it contains several source/font runs. Multi-row
     // paragraphs retain their container width; an explicit width always wins.
-    let natural = if block.invisible || block.rows.len() == 1 {
+    let natural = if rtl && !block.invisible && block.rows.len() == 1 {
+        (block.rect[2] + dx - (p.crop(doc)[0] + 36.0)).max(block.rect[2] - block.rect[0])
+    } else if block.invisible || block.rows.len() == 1 {
         (p.crop(doc)[2] - 36.0 - (block.rect[0] + dx)).max(block.rect[2] - block.rect[0])
     } else {
         block.rect[2] - block.rect[0]
@@ -548,7 +551,7 @@ pub(super) fn rewrite_styled_block(
             }
             let segment = items.get(at..end).unwrap_or_default();
             let string: String = segment.iter().map(|v| v.0).collect();
-            if let Some((_, shaped, _)) = shape_source(doc, &fonts, &item.2, &string)? {
+            if let Some((_, shaped, _, _)) = shape_source(doc, &fonts, &item.2, &string)? {
                 let source = lines.get(item.1).unwrap_or(first);
                 let scale =
                     overrides.get(&item.1).and_then(|r| r.scale).or(style.scale).map_or(source.origin.state.scale, |s| (s / 100.0).clamp(0.1, 10.0));
@@ -665,7 +668,7 @@ pub(super) fn rewrite_styled_block(
             }
             segment_advances.insert((row_index, at), row.get(at..end).unwrap_or_default().iter().map(&advance).sum::<f64>());
             let string: String = row.get(at..end).unwrap_or_default().iter().map(|v| v.0).collect();
-            if let Some((bytes, shaped, family)) = shape_source(doc, &fonts, &item.2, &string)? {
+            if let Some((bytes, shaped, family, _)) = shape_source(doc, &fonts, &item.2, &string)? {
                 shaped_runs.insert((row_index, at), (bytes, shaped, family));
             }
             at = end;
@@ -717,7 +720,13 @@ pub(super) fn rewrite_styled_block(
             continue;
         }
         let w = measured.get(row_index).copied().unwrap_or(0.0);
-        let align = style.align.unwrap_or(if centered { crate::added::Align::Center } else { crate::added::Align::Left });
+        let align = style.align.unwrap_or(if centered {
+            crate::added::Align::Center
+        } else if rtl {
+            crate::added::Align::Right
+        } else {
+            crate::added::Align::Left
+        });
         let original_rect = block.rows.get(row_index).and_then(|row| row_rect(row, lines)).unwrap_or(block.rect);
         let left = if style.width.is_none() && style.align.is_none() { original_rect[0] } else { block.rect[0] };
         let available = if style.width.is_none() && style.align.is_none() { original_rect[2] - original_rect[0] } else { width };

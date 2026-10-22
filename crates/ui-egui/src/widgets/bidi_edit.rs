@@ -1512,8 +1512,24 @@ impl LayoutCtx<'_> {
 
     /// `galley` with its rows aligned as `align` says (see [`Self::layout_aligned`]), for a hook that lays the
     /// text out in a job of its own.
-    pub fn place_aligned(&self, ui: &Ui, galley: Arc<Galley>, map: &ScreenMap, align: RowAlign) -> Arc<Galley> {
+    pub fn place_aligned(&self, ui: &Ui, mut galley: Arc<Galley>, map: &ScreenMap, align: RowAlign) -> Arc<Galley> {
+        // A justified text fills the width with its rows but the last, as the page writes it: the spaces stretch.
+        if align == RowAlign::Justify {
+            let width = self.wrap_width;
+            galley = self.stretch_rows(galley, map, |row| (!row.last).then_some(width).flatten());
+        }
         self.place_rows_with(ui, galley, map, |row| Some(align.offset(row)))
+    }
+
+    /// `galley` with the spaces between the words of each row widened so that the row (without the spaces at its ends) is
+    /// as wide as `target` says, for the rows it answers `Some` for; the glyphs after a space move with it, so the caret and
+    /// clicks stay on their letters. A row with no space between words, or as wide as that already, stays. Nothing moves in a
+    /// single line.
+    pub fn stretch_rows(&self, galley: Arc<Galley>, map: &ScreenMap, target: impl FnMut(RowSlot) -> Option<f32>) -> Arc<Galley> {
+        match self.wrap_width {
+            Some(width) => stretch_rows_at(galley, map, width, target),
+            None => galley,
+        }
     }
 }
 
@@ -1528,9 +1544,9 @@ pub enum RowAlign {
     Center,
     /// Against the right edge.
     Right,
-    /// Against the left edge, as a justified text box lays its rows out when it cannot stretch them
-    /// (the spaces are not widened here); but the last row of a right-to-left paragraph ends at the
-    /// right edge, where such a paragraph's last line ends.
+    /// Every row but the last stretched to the width of the box by widening its spaces (as the page writes a justified
+    /// text) and set against the left edge; the last row is not stretched, and that of a right-to-left paragraph ends at
+    /// the right edge, where such a paragraph's last line ends.
     Justify,
 }
 
@@ -1581,26 +1597,21 @@ fn ink_width(row: &egui::epaint::text::Row) -> f32 {
     (row.size.x - before - after).max(0.0)
 }
 
-/// [`place_rows`] with the place of each row (from the galley's left edge) decided by `x`.
-fn place_rows_at(
-    mut galley: Arc<Galley>,
-    map: &ScreenMap,
-    width: f32,
-    pixels_per_point: f32,
-    mut x: impl FnMut(RowSlot) -> Option<f32>,
-) -> Arc<Galley> {
-    // A row may be wider than the field by the spaces it keeps after its last word (the wrapping measures
-    // it without them), which hang over the edge: a row set against an edge is not pushed back for them.
+/// How wide a galley laid out at `width` is to be placed: the width itself (whole pixels), or the widest row without the spaces
+/// at its ends if that is wider.
+fn field_width(galley: &Galley, width: f32) -> f32 {
     let widest = galley.rows.iter().map(|placed| ink_width(&placed.row)).fold(0.0, f32::max);
-    let hang = |row: &egui::epaint::text::Row| row.glyphs.iter().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
-    let hang_end = |row: &egui::epaint::text::Row| row.glyphs.iter().rev().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
-    let width = if width.is_finite() { width.floor().max(widest) } else { widest };
+    if width.is_finite() { width.floor().max(widest) } else { widest }
+}
+
+/// The rows of `galley` as [`RowSlot`]s, in a galley `width` wide (see [`field_width`]).
+fn row_slots(galley: &Galley, map: &ScreenMap, width: f32) -> Vec<RowSlot> {
     let last = galley.rows.iter().rposition(|placed| !placed.row.glyphs.is_empty());
-    // The place of each row, and how far it may hang over the left edge: the spaces it starts with (the ones a
-    // right-to-left line keeps after its last word), so that what is read ends at the right edge.
+    // The spaces a row keeps at the end where it was broken: a line the field wrapped keeps the space after its last word
+    // (at its left end for a right-to-left line).
     let wrapped = map.rows_ended_by_wrap();
     let space_at = |glyph: Option<&Glyph>| glyph.filter(|g| g.chr == ' ').map_or(0.0, |g| g.advance_width);
-    let moves: Vec<Option<(f32, f32, f32)>> = galley
+    galley
         .rows
         .iter()
         .enumerate()
@@ -1612,9 +1623,28 @@ fn place_rows_at(
                 (true, true) => (space_at(placed.row.glyphs.first()), 0.0),
                 (true, false) => (0.0, space_at(placed.row.glyphs.last())),
             };
-            let slot = RowSlot { index, width: placed.row.size.x, field_width: width, rtl, last: last == Some(index), break_lead, break_trail };
-            x(slot).filter(|at| at.is_finite()).map(|at| (at, hang(&placed.row), hang_end(&placed.row)))
+            RowSlot { index, width: placed.row.size.x, field_width: width, rtl, last: last == Some(index), break_lead, break_trail }
         })
+        .collect()
+}
+
+/// [`place_rows`] with the place of each row (from the galley's left edge) decided by `x`.
+fn place_rows_at(
+    mut galley: Arc<Galley>,
+    map: &ScreenMap,
+    width: f32,
+    pixels_per_point: f32,
+    mut x: impl FnMut(RowSlot) -> Option<f32>,
+) -> Arc<Galley> {
+    // A row may be wider than the field by the spaces it keeps after its last word (the wrapping measures
+    // it without them), which hang over the edge: a row set against an edge is not pushed back for them.
+    let hang = |row: &egui::epaint::text::Row| row.glyphs.iter().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
+    let hang_end = |row: &egui::epaint::text::Row| row.glyphs.iter().rev().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
+    let width = field_width(&galley, width);
+    let moves: Vec<Option<(f32, f32, f32)>> = row_slots(&galley, map, width)
+        .into_iter()
+        .zip(&galley.rows)
+        .map(|(slot, placed)| x(slot).filter(|at| at.is_finite()).map(|at| (at, hang(&placed.row), hang_end(&placed.row))))
         .collect();
     if moves.iter().all(Option::is_none) {
         return galley;
@@ -1632,6 +1662,87 @@ fn place_rows_at(
     }
     inner.rect.max.x = inner.rect.min.x + width;
     inner.mesh_bounds = bounds;
+    galley
+}
+
+/// Moves the vertices of `row` that belong to each glyph by that glyph's `by`: a glyph owns the vertices from its
+/// first up to the first of the next glyph that has any (a glyph the face draws in two pieces, or with marks, owns more
+/// than one quad; a space, none). The glyphs themselves do not move.
+pub(crate) fn shift_glyph_vertices(row: &mut egui::epaint::text::Row, by: &[Vec2]) {
+    let end = row.visuals.glyph_vertex_range.end.min(row.visuals.mesh.vertices.len());
+    let mut current: Option<(usize, Vec2)> = None;
+    let shift = |vertices: &mut [egui::epaint::Vertex], from: usize, to: usize, by: Vec2| {
+        if by != Vec2::ZERO
+            && let Some(owned) = vertices.get_mut(from..to)
+        {
+            for vertex in owned {
+                vertex.pos += by;
+            }
+        }
+    };
+    for (glyph, by) in row.glyphs.iter().zip(by) {
+        let at = (glyph.first_vertex as usize).min(end);
+        if let Some((from, was)) = current {
+            shift(&mut row.visuals.mesh.vertices, from, at, was);
+        }
+        current = Some((at, *by));
+    }
+    if let Some((from, was)) = current {
+        shift(&mut row.visuals.mesh.vertices, from, end, was);
+    }
+}
+
+/// `galley` with the spaces between the words of each row widened so that the row, without the spaces at its ends,
+/// is as wide as `target` says (`None`, or a row that is as wide already, or has no space between words, stays). The
+/// glyphs of the row move as a whole: each space gets the same share of the extra width as an advance of its own, the glyphs
+/// after it move on, so the caret, a click and a selection (which read the glyphs' places) go with the letters.
+fn stretch_rows_at(mut galley: Arc<Galley>, map: &ScreenMap, width: f32, mut target: impl FnMut(RowSlot) -> Option<f32>) -> Arc<Galley> {
+    let width = field_width(&galley, width);
+    let wanted: Vec<Option<(f32, f32)>> = row_slots(&galley, map, width)
+        .into_iter()
+        .zip(&galley.rows)
+        .map(|(slot, placed)| {
+            let glyphs = &placed.row.glyphs;
+            let first = glyphs.iter().position(|g| g.chr != ' ')?;
+            let last = glyphs.iter().rposition(|g| g.chr != ' ')?;
+            let spaces = glyphs.get(first..last)?.iter().filter(|g| g.chr == ' ' && g.advance_width > 0.0).count();
+            let ink = ink_width(&placed.row);
+            let extra = target(slot).filter(|t| t.is_finite())? - ink;
+            // A fraction of a pixel is not worth moving the glyphs for.
+            (spaces > 0 && extra.is_finite() && extra > 0.25).then(|| (extra / spaces as f32, extra))
+        })
+        .collect();
+    if wanted.iter().all(Option::is_none) {
+        return galley;
+    }
+    let inner = Arc::make_mut(&mut galley);
+    let mut bounds = egui::Rect::NOTHING;
+    let mut right = inner.rect.max.x;
+    for (placed, wanted) in inner.rows.iter_mut().zip(wanted) {
+        if let Some((share, extra)) = wanted {
+            let row = Arc::make_mut(&mut placed.row);
+            let first = row.glyphs.iter().position(|g| g.chr != ' ').unwrap_or(0);
+            let last = row.glyphs.iter().rposition(|g| g.chr != ' ').unwrap_or(0);
+            let mut moved = 0.0_f32;
+            let mut by = Vec::with_capacity(row.glyphs.len());
+            for (index, glyph) in row.glyphs.iter_mut().enumerate() {
+                glyph.pos.x += moved;
+                by.push(Vec2::new(moved, 0.0));
+                if index > first && index < last && glyph.chr == ' ' && glyph.advance_width > 0.0 {
+                    glyph.advance_width += share;
+                    moved += share;
+                }
+            }
+            shift_glyph_vertices(row, &by);
+            row.size.x += extra;
+            row.visuals.mesh_bounds =
+                row.visuals.mesh.vertices.iter().fold(egui::Rect::NOTHING, |r, v| r.union(egui::Rect::from_min_max(v.pos, v.pos)));
+        }
+        bounds |= placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2());
+        right = right.max(placed.pos.x + placed.row.size.x);
+    }
+    inner.rect.max.x = right;
+    inner.mesh_bounds = inner.mesh_bounds.union(bounds);
     galley
 }
 
@@ -3837,13 +3948,87 @@ mod tests {
                             (x - expected).abs() <= tolerance,
                             "{align:?} row {i} of {text:?}: at {x}, wanted {expected} (width {w} in {width}, {ppp} px per point)"
                         );
-                        assert!(x >= -leads[i] - 0.01 && x + w <= width + tolerance, "{align:?} row {i} stays inside: {x} + {w} in {width}");
+                        // (a justified row is stretched to the width without the space a wrap left at its end)
+                        let kept = if align == RowAlign::Justify { trails[i] } else { 0.0 };
+                        assert!(x >= -leads[i] - 0.01 && x + w - kept <= width + tolerance, "{align:?} row {i} stays inside: {x} + {w} in {width}");
                     }
                     if arabic {
                         // Whatever the alignment, the words are in display order, laid out by the field.
                         assert_rows_aligned(&out.out, &out.map, text);
                     }
                 }
+            }
+        }
+    }
+
+    /// The ink of a row (without the spaces at its ends): where its first letter begins and its last ends.
+    fn ink_span(row: &egui::epaint::text::PlacedRow) -> (f32, f32) {
+        let glyphs = &row.row.glyphs;
+        let first = glyphs.iter().find(|g| g.chr != ' ').map_or(0.0, |g| g.pos.x);
+        let last = glyphs.iter().rev().find(|g| g.chr != ' ').map_or(0.0, |g| g.pos.x + g.advance_width);
+        (row.pos.x + first, row.pos.x + last)
+    }
+
+    #[test]
+    fn a_justified_text_fills_the_width_with_every_row_but_the_last_by_widening_its_spaces() {
+        for ppp in [1.0, 2.0] {
+            for width in [120.0_f32, 170.0] {
+                let mut rig = Rig::new(latin_fonts(), ppp, true, width, 16.0, "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu");
+                let out = rig.frame(vec![], &|edit| edit.layout(move |ui, map, ctx| ctx.layout_aligned(ui, map, RowAlign::Justify)));
+                let galley = &out.out.galley;
+                let rows = &galley.rows;
+                assert!(rows.len() >= 3, "wraps at {width}");
+                let tolerance = 1.0 / ppp + 0.01;
+                for (i, placed) in rows.iter().enumerate() {
+                    let (left, right) = ink_span(placed);
+                    if i + 1 < rows.len() {
+                        assert!(
+                            left.abs() <= tolerance && (right - width).abs() <= tolerance,
+                            "row {i} spans {left}..{right} of {width} ({ppp} px per point)"
+                        );
+                    } else {
+                        assert!(right < width - 5.0, "the last row stays short: {right} of {width}");
+                    }
+                    // The glyphs keep their order and never overlap; the caret and a click agree about every one of them, over the
+                    // stretched spaces too.
+                    let glyphs = &placed.row.glyphs;
+                    assert!(
+                        glyphs.windows(2).all(|w| w[1].pos.x >= w[0].pos.x + w[0].advance_width - tolerance),
+                        "row {i} glyphs are in order: {:?}",
+                        glyphs.iter().map(|g| (g.chr, g.pos.x, g.advance_width)).collect::<Vec<_>>()
+                    );
+                    let before: usize = rows[..i].iter().map(|r| r.char_count_including_newline().0).sum();
+                    let y = placed.pos.y + placed.row.size.y / 2.0;
+                    for (k, glyph) in glyphs.iter().enumerate() {
+                        let caret = galley.pos_from_cursor(CCursor { index: CharIndex(before + k), prefer_next_row: true }).min.x;
+                        assert!((caret - (placed.pos.x + glyph.pos.x)).abs() <= 0.01, "the caret before glyph {k} of row {i} is at its left edge");
+                        let near = |at: f32| galley.cursor_from_pos(vec2(at, y)).index.0;
+                        assert_eq!(near(placed.pos.x + glyph.pos.x + glyph.advance_width * 0.25), before + k, "left of glyph {k} of row {i}");
+                        if glyph.advance_width > 1.0 {
+                            assert_eq!(
+                                near(placed.pos.x + glyph.pos.x + glyph.advance_width * 0.75),
+                                before + k + 1,
+                                "right of glyph {k} of row {i}"
+                            );
+                        }
+                    }
+                    // Only the spaces between words grew.
+                    let natural = 16.0 * 0.25;
+                    for g in glyphs.iter().filter(|g| g.chr != ' ') {
+                        assert!(g.advance_width < 16.0 && g.advance_width > 0.0, "{:?} keeps its own width", g.chr);
+                    }
+                    if i + 1 < rows.len() {
+                        assert!(glyphs.iter().filter(|g| g.chr == ' ').any(|g| g.advance_width > natural), "row {i} has a widened space");
+                    }
+                }
+                // Left-aligned rows are the same text unstretched: only the spaces differ.
+                let mut plain = Rig::new(latin_fonts(), ppp, true, width, 16.0, "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu");
+                let left = plain.frame(vec![], &|edit| edit.layout(move |ui, map, ctx| ctx.layout_aligned(ui, map, RowAlign::Left)));
+                assert_eq!(left.out.galley.rows.len(), rows.len(), "the same rows");
+                let letters = |galley: &Galley| {
+                    galley.rows.iter().map(|r| r.row.glyphs.iter().filter(|g| g.chr != ' ').map(|g| g.advance_width).sum::<f32>()).collect::<Vec<_>>()
+                };
+                assert_eq!(letters(&left.out.galley), letters(galley), "the letters are as wide as without the stretch");
             }
         }
     }

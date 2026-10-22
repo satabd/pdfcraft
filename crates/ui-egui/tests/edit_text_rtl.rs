@@ -37,11 +37,15 @@ fn page() -> Vec<u8> {
 }
 
 fn harness(zoom: &str) -> Harness<'static, PdfCraftApp> {
+    harness_with(zoom, page())
+}
+
+fn harness_with(zoom: &str, bytes: Vec<u8>) -> Harness<'static, PdfCraftApp> {
     let zoom = zoom.to_owned();
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
         let mut app = PdfCraftApp::new();
         app.set_option("language", "en").unwrap();
-        app.open_bytes("doc.pdf", None, page()).expect("fixture opens");
+        app.open_bytes("doc.pdf", None, bytes).expect("fixture opens");
         app.set_option("zoom", &zoom).unwrap();
         app
     });
@@ -355,4 +359,153 @@ fn a_block_with_more_arabic_than_latin_reads_right_to_left_whatever_it_starts_wi
     let b = block(&h);
     let right = pos.x + row.pos.x + row.row.size.x;
     assert!((right - at(&h, b.rect[2], b.rect[1]).x).abs() <= 2.5, "the row is against the right edge: {right}");
+}
+
+// ---- the page's own face ----
+
+/// A complete static Arabic face for the tests: the one `PDFCRAFT_TEST_ARABIC_FONT` names, else the craft-fonts face if it is
+/// static (the bundled Noto Sans Arabic is a variable font, which the rewrite cannot embed). `None` skips the test.
+fn static_face() -> Option<Vec<u8>> {
+    let bytes = match std::env::var_os("PDFCRAFT_TEST_ARABIC_FONT") {
+        Some(path) => std::fs::read(path).ok()?,
+        None => pdfcraft_fonts::document_arabic_font()?.bytes.to_vec(),
+    };
+    if pdfcraft_fonts::embedding::validate(&bytes).is_err() {
+        eprintln!("skipping: the Arabic face is variable; set PDFCRAFT_TEST_ARABIC_FONT to a static face to run this test");
+        return None;
+    }
+    Some(bytes)
+}
+
+/// A 200 × 300 pt page whose Arabic `rows` are set in the complete face `face` as a producer that embeds a whole font does: the
+/// glyphs of each row (shaped, in drawing order) shown by code at 12 pt, the rows against the right edge at x = 180 and 15 pt
+/// apart from y = 200, with the row's text behind them as `/ActualText`.
+fn face_page(face: &[u8], rows: &[&str]) -> Vec<u8> {
+    use pdfcraft_cos::{Dict, Object, SaveOptions, Stream};
+    let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(page())).expect("the page opens");
+    let (_, postscript) = pdfcraft_fonts::embedding::names(face).expect("the face has names");
+    let mut fonts = Dict::new();
+    let resource = pdfcraft_fonts::embedding::embed(&mut doc, &mut fonts, face, &postscript).expect("the face embeds");
+    // A glyph is shown by the first code of the font that is mapped to it.
+    let top = doc.dict(fonts.get(resource.as_bytes()).expect("the font")).expect("the font dictionary");
+    let Some(Object::Array(descendants)) = top.get(b"DescendantFonts").map(|d| doc.resolve(d).as_ref().clone()) else { panic!("descendant fonts") };
+    let descendant = doc.dict(descendants.first().expect("a descendant")).expect("the descendant font");
+    let Object::Stream(map) = &*doc.resolve(descendant.get(b"CIDToGIDMap").expect("a glyph map")) else { panic!("a glyph map stream") };
+    let gids: Vec<u16> = map.decoded().expect("decodes").chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+    let mut content = String::new();
+    for (i, row) in rows.iter().enumerate() {
+        let shaped = pdfcraft_fonts::source_shaping::shape(face, row).expect("the face shapes the row");
+        let codes: String = shaped
+            .glyphs
+            .iter()
+            .map(|g| {
+                let gid = u16::try_from(g.id.to_u32()).expect("a glyph id");
+                format!("{:04X}", gids.iter().position(|v| *v == gid && gid != 0).expect("the font maps the glyph"))
+            })
+            .collect();
+        let logical: String = row.encode_utf16().map(|u| format!("{u:04X}")).collect();
+        let (x, y) = (180.0 - shaped.advance * 12.0, 200.0 - 15.0 * i as f64);
+        content += &format!("/Span <</ActualText <FEFF{logical}>>> BDC BT /{resource} 12 Tf 1 0 0 1 {x:.3} {y} Tm <{codes}> Tj ET EMC\n");
+    }
+    let page_ref = pdfcraft_model::pages(&doc)[0].obj;
+    let mut resources = Dict::new();
+    resources.set(b"Font".to_vec(), Object::Dict(fonts));
+    let contents = doc.add(Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    doc.update_dict(page_ref, |d| {
+        d.set(b"Resources".to_vec(), Object::Dict(resources));
+        d.set(b"Contents".to_vec(), Object::Ref(contents));
+    })
+    .expect("the page updates");
+    pdfcraft_cos::write_full(&doc, &SaveOptions::default()).expect("the page saves")
+}
+
+const FIRST_ROW: &str = "\u{633}\u{644}\u{627}\u{645} \u{639}\u{644}\u{64A}\u{643}\u{645} \u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{643}\u{645}";
+const SECOND_ROW: &str = "\u{643}\u{62A}\u{627}\u{628} \u{62C}\u{62F}\u{64A}\u{62F}";
+/// Words the paragraph does not have (a retyped word that is one of its words takes the look of its row, and a row of two
+/// source rows' looks is refused by the rewrite), long enough to wrap in the 160 pt box.
+const RETYPED: &str = "هذا نص عربي طويل يكتب في حقل ضيق ليلتف على عدة أسطر ويبقى مطابقا لما تكتبه الصفحة";
+
+/// The ink of the rows of the editor's galley as screen `(left, right)` pairs: the row without the space at either end (the
+/// break space a wrapped row keeps, `space` wide: the galley's glyphs of a right-to-left row are aligned to the characters, so
+/// their advances are not measures of the space).
+fn editor_ink(pos: Pos2, galley: &egui::Galley, space: f32) -> Vec<(f32, f32)> {
+    galley
+        .rows
+        .iter()
+        .map(|placed| {
+            let glyphs = &placed.row.glyphs;
+            let lead = if glyphs.first().is_some_and(|g| g.chr == ' ') { space } else { 0.0 };
+            let trail = if glyphs.last().is_some_and(|g| g.chr == ' ') { space } else { 0.0 };
+            (pos.x + placed.pos.x + lead, pos.x + placed.pos.x + placed.row.size.x - trail)
+        })
+        .collect()
+}
+
+/// The width of a space of the face, in screen pixels.
+fn space_px(h: &Harness<'static, PdfCraftApp>, face: &[u8]) -> f32 {
+    let page = h.state().views[0].page_screen_rect(0).expect("on screen");
+    (pdfcraft_fonts::source_shaping::shape(face, " ").expect("shapes").advance * 12.0) as f32 * page.width() / 200.0
+}
+
+/// The screen `(left, right)` of the page's rows of its first paragraph.
+fn page_ink(h: &Harness<'static, PdfCraftApp>) -> Vec<(f32, f32)> {
+    let b = block(h);
+    let lines = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0);
+    b.rows
+        .iter()
+        .map(|row| {
+            let rect = row.iter().map(|i| lines[*i].rect).reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]).unwrap();
+            (at(h, rect[0], rect[1]).x, at(h, rect[2], rect[1]).x)
+        })
+        .collect()
+}
+
+/// The galley the editor paints for a draft of Arabic rows (it holds a newline, or `needle`).
+fn arabic_editor_galley(h: &Harness<'static, PdfCraftApp>, needle: char) -> (Pos2, std::sync::Arc<egui::Galley>) {
+    painted_galleys(h)
+        .into_iter()
+        .find(|(_, g)| g.job.text.contains(needle) && g.rows.iter().any(|r| r.glyphs.len() > 3))
+        .expect("the editor paints the draft")
+}
+
+/// A paragraph set in a complete Arabic face is edited in that face: the rows of the editor are as wide as the page's
+/// (the face is not the interface's, whose letters are another width), whether the paragraph is as the page has it or retyped
+/// and about to be applied, at every zoom.
+#[test]
+fn arabic_in_a_complete_page_face_is_drawn_in_that_face_so_the_rows_are_the_pages_width() {
+    let Some(face) = static_face() else { return };
+    for zoom in ["100", "250"] {
+        let mut h = harness_with(zoom, face_page(&face, &[FIRST_ROW, SECOND_ROW]));
+        let b = block(&h);
+        assert_eq!(b.rows.len(), 2, "the page has two rows at {zoom}%");
+        assert_eq!(b.editor_text, format!("{FIRST_ROW}\n{SECOND_ROW}"), "read back in typing order");
+        let saved = h.state().session.get(h.state().views[0].id).unwrap().bytes.clone();
+        open_editor(&mut h);
+        // As the page has it: each row ends where the page's does and begins where it begins.
+        let (pos, galley) = arabic_editor_galley(&h, '\n');
+        let (ink, page) = (editor_ink(pos, &galley, space_px(&h, &face)), page_ink(&h));
+        assert_eq!(ink.len(), page.len(), "a row to a row at {zoom}%");
+        for (i, ((left, right), (page_left, page_right))) in ink.iter().zip(&page).enumerate() {
+            assert!((right - page_right).abs() <= 1.0, "row {i} ends at {right}, the page's at {page_right} ({zoom}%)");
+            assert!((left - page_left).abs() <= 1.0, "row {i} begins at {left}, the page's at {page_left} ({zoom}%)");
+        }
+        // Retyped, in other words of the same face: the page after Apply has the rows the editor showed.
+        h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        let typed = RETYPED.to_owned();
+        h.event(egui::Event::Text(typed.clone()));
+        h.run_steps(4);
+        let (pos, galley) = arabic_editor_galley(&h, '\u{647}');
+        let shown = editor_ink(pos, &galley, space_px(&h, &face));
+        assert!(shown.len() >= 2, "the retyped paragraph wraps at {zoom}%: {shown:?}");
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+        h.run_steps(4);
+        assert_eq!(block(&h).editor_text.replace('\n', " "), typed, "applied in typing order at {zoom}%");
+        let page = page_ink(&h);
+        assert_eq!(page.len(), shown.len(), "as many rows as the editor showed at {zoom}%");
+        for (i, ((left, right), (page_left, page_right))) in shown.iter().zip(&page).enumerate() {
+            assert!((right - page_right).abs() <= 1.0, "row {i} ends at {right}, the page's at {page_right} ({zoom}%)");
+            assert!((left - page_left).abs() <= 1.0, "row {i} begins at {left}, the page's at {page_left} ({zoom}%)");
+        }
+        assert_ne!(h.state().session.get(h.state().views[0].id).unwrap().bytes, saved, "something was applied at {zoom}%");
+    }
 }

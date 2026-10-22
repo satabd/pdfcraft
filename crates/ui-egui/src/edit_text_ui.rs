@@ -172,9 +172,45 @@ pub struct LineEditor {
     probe: Option<DraftProbe>,
 }
 
-/// [`pdfcraft_engine::TextDraftProbe`], shared by the copies of the editor the frame makes.
+/// [`pdfcraft_engine::TextDraftProbe`], shared by the copies of the editor the frame makes, with the layouts it was last asked
+/// for: the rewrite behind a layout runs once per change of the draft or of the Format panel, not once per use in a frame.
 #[derive(Clone)]
-struct DraftProbe(std::rc::Rc<pdfcraft_engine::TextDraftProbe>);
+struct DraftProbe(std::rc::Rc<ProbeMemo>);
+
+/// A layout the rewrite made of a draft in a style (`None`: it refuses the draft).
+type Answer = (String, pdfcraft_engine::BlockStyle, Option<std::rc::Rc<pdfcraft_engine::TextEditLayout>>);
+
+struct ProbeMemo {
+    probe: pdfcraft_engine::TextDraftProbe,
+    /// The last few answers, the newest last.
+    answers: std::cell::RefCell<Vec<Answer>>,
+}
+
+/// How many answers a probe keeps (a frame asks about the draft as it was and as it is).
+const KEPT_ANSWERS: usize = 4;
+
+impl DraftProbe {
+    fn new(probe: pdfcraft_engine::TextDraftProbe) -> Self {
+        Self(std::rc::Rc::new(ProbeMemo { probe, answers: std::cell::RefCell::new(Vec::new()) }))
+    }
+
+    /// The layout the rewrite that applies `text` in `style` makes, if it accepts the draft.
+    fn layout(&self, text: &str, style: &pdfcraft_engine::BlockStyle) -> Option<std::rc::Rc<pdfcraft_engine::TextEditLayout>> {
+        if let Ok(answers) = self.0.answers.try_borrow()
+            && let Some((_, _, layout)) = answers.iter().find(|(was_text, was_style, _)| was_text == text && was_style == style)
+        {
+            return layout.clone();
+        }
+        let layout = self.0.probe.layout(text, style).map(std::rc::Rc::new);
+        if let Ok(mut answers) = self.0.answers.try_borrow_mut() {
+            if answers.len() >= KEPT_ANSWERS {
+                answers.remove(0);
+            }
+            answers.push((text.to_owned(), style.clone(), layout.clone()));
+        }
+        layout
+    }
+}
 
 impl std::fmt::Debug for DraftProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -281,6 +317,25 @@ impl LineEditor {
             });
         }
         style
+    }
+
+    /// What the rewrite that applies the draft `text` in the Format panel's style lays the paragraph out as: its rows and
+    /// their boxes, and the page fonts it shapes Arabic in. `None` where the editor has no copy of the document to ask,
+    /// or the rewrite refuses the draft.
+    fn layout_of(&self, text: &str) -> Option<std::rc::Rc<pdfcraft_engine::TextEditLayout>> {
+        self.probe.as_ref()?.layout(text, &self.style())
+    }
+
+    /// The font family (a `pdf-source-N` the editor installed) that draws the Arabic letters of each source line of the
+    /// paragraph for the draft `text`: the page's own face, where Apply shapes the draft in it (see
+    /// [`pdfcraft_engine::TextEditLayout::shaping_faces`]). A line the rewrite draws in another face (the generated shaped
+    /// glyphs of the interface's Arabic face) is not in the map.
+    fn page_faces(&self, text: &str) -> BTreeMap<usize, String> {
+        if !text.chars().any(bidi::is_joining_script) {
+            return BTreeMap::new();
+        }
+        let Some(layout) = self.layout_of(text) else { return BTreeMap::new() };
+        layout.shaping_faces.iter().filter_map(|(line, resource)| Some((*line, self.fonts.get(resource)?.clone()))).collect()
     }
 
     /// After applying formatting: the paragraph now has it.
@@ -987,7 +1042,7 @@ fn open_editor(
         look0: look_of(l),
         extras: Extras::default(),
         extras0: Extras::default(),
-        probe: doc.text_draft_probe(page, block).map(|probe| DraftProbe(std::rc::Rc::new(probe))),
+        probe: doc.text_draft_probe(page, block).map(DraftProbe::new),
     });
 }
 
@@ -1203,13 +1258,25 @@ struct LineFormats {
 
 /// The formats of source line `line`. `rtl_script`: the draft holds right-to-left script, which the page writes
 /// in a face of its own and without the letter spacing that stretches the interface face to the width of the
-/// line it replaces.
-fn line_formats(ctx: &egui::Context, ed: &LineEditor, line: &pdfcraft_engine::TextLine, scale: f32, rtl_script: bool) -> LineFormats {
+/// line it replaces. `page_face`: the family of the page's face that draws the joined letters of the line (see
+/// [`LineEditor::page_faces`]), or the interface's Arabic face where there is none.
+fn line_formats(
+    ctx: &egui::Context,
+    ed: &LineEditor,
+    line: &pdfcraft_engine::TextLine,
+    scale: f32,
+    rtl_script: bool,
+    page_face: Option<&String>,
+) -> LineFormats {
     let look = line_look(ed, line);
     let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
     // Joined letters are drawn by the interface's Arabic face (the one the page's shaper uses): a source
-    // subset may carry the letters' codes without the shaping that joins them.
-    let joined_font = font.clone();
+    // subset may carry the letters' codes without the shaping that joins them. Where Apply shapes the draft in the page's own
+    // face (it is a complete face with the letters), they are drawn in that face: the rows are then as wide as the page's.
+    let mut joined_font = font.clone();
+    if let Some(name) = page_face {
+        joined_font.family = FontFamily::Name(name.clone().into());
+    }
     let original_face = ed.look.family == ed.look0.family && ed.look.bold == ed.look0.bold && ed.look.italic == ed.look0.italic;
     let embedded = original_face && ed.fonts.contains_key(&line.font);
     if embedded && let Some(name) = ed.fonts.get(&line.font) {
@@ -1311,6 +1378,7 @@ fn editor_job(ctx: &egui::Context, ed: &LineEditor, text: &str, map: &ScreenMap,
     job.wrap.max_width = wrap;
     if let Some((block, lines)) = &ed.source {
         let rtl_script = text.chars().any(bidi::is_shaped_rtl);
+        let faces = ed.page_faces(text);
         let mut formats: BTreeMap<usize, LineFormats> = BTreeMap::new();
         for (index, joins, run) in style_runs(&block.edited_spans(text), text, map) {
             let Some(line) = lines.get(index) else {
@@ -1321,7 +1389,7 @@ fn editor_job(ctx: &egui::Context, ed: &LineEditor, text: &str, map: &ScreenMap,
                 );
                 continue;
             };
-            let format = formats.entry(index).or_insert_with(|| line_formats(ctx, ed, line, scale, rtl_script));
+            let format = formats.entry(index).or_insert_with(|| line_formats(ctx, ed, line, scale, rtl_script, faces.get(&index)));
             job.append(&run, 0.0, if joins { format.joined.clone() } else { format.plain.clone() });
         }
     } else {
@@ -1415,31 +1483,25 @@ impl RowGeometry {
     }
 }
 
-/// Moves the vertices of `row` that belong to each glyph down by that glyph's `dy`: a glyph owns the
-/// vertices from its first up to the first of the next glyph that has any (a glyph the face draws in two
-/// pieces, or with marks, owns more than one quad; a space, none).
-fn shift_glyph_vertices(row: &mut egui::epaint::text::Row, dy: &[f32]) {
-    let end = row.visuals.glyph_vertex_range.end.min(row.visuals.mesh.vertices.len());
-    let mut current: Option<(usize, f32)> = None;
-    let shift = |vertices: &mut [egui::epaint::Vertex], from: usize, to: usize, by: f32| {
-        if by != 0.0
-            && let Some(owned) = vertices.get_mut(from..to)
-        {
-            for vertex in owned {
-                vertex.pos.y += by;
-            }
-        }
-    };
-    for (glyph, by) in row.glyphs.iter().zip(dy) {
-        let at = (glyph.first_vertex as usize).min(end);
-        if let Some((from, was)) = current {
-            shift(&mut row.visuals.mesh.vertices, from, at, was);
-        }
-        current = Some((at, *by));
+/// `galley` with the spaces of each row stretched to the width of the row Apply will write: a justified paragraph fills its
+/// width with every row but the last, by widening the spaces. The widths are the rewrite's own (`row_rects` of its layout), so
+/// a paragraph the rewrite does not justify (the styled route that writes a draft with explicit row breaks sets its rows
+/// left-aligned) stays as it is, and so does a draft the rewrite refuses. The caret and clicks follow the letters: the
+/// glyphs after a space move on with it (see [`LayoutCtx::stretch_rows`]).
+fn justify_like_the_page(ed: &LineEditor, ctx: &LayoutCtx<'_>, galley: Arc<egui::Galley>, map: &ScreenMap, scale: f32) -> Arc<egui::Galley> {
+    let Some(layout) = ed.layout_of(ctx.text) else { return galley };
+    // The rows that draw anything, one to a row of the page.
+    let drawn: Vec<usize> =
+        galley.rows.iter().enumerate().filter(|(_, placed)| placed.row.glyphs.iter().any(|g| g.chr != ' ')).map(|(index, _)| index).collect();
+    if drawn.len() != layout.row_rects.len() {
+        return galley;
     }
-    if let Some((from, was)) = current {
-        shift(&mut row.visuals.mesh.vertices, from, end, was);
-    }
+    ctx.stretch_rows(galley, map, |slot| {
+        let at = drawn.iter().position(|index| *index == slot.index)?;
+        let rect = layout.row_rects.get(at)?;
+        // (the last row of the paragraph is not stretched by the page)
+        (at + 1 < drawn.len()).then(|| ((rect[2] - rect[0]) * f64::from(scale)) as f32)
+    })
 }
 
 /// The galley of the draft `ctx.text`, shown as `map` says, in the looks of the page's text, with every row
@@ -1456,6 +1518,9 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &Scre
     // The rows of lines the field wrapped keep the spaces at their ends, as the field's own layout does.
     job.keep_trailing_whitespace = ctx.prewrapped;
     let mut galley = ctx.lay_out(ui, map, job);
+    if ed.look.align == pdfcraft_engine::TextAlign::Justify && ed.look.align != ed.look0.align {
+        galley = justify_like_the_page(ed, ctx, galley, map, scale);
+    }
     let Some((block, lines)) = &ed.source else { return ctx.place_rows(ui, galley, map) };
     let Some(geometry) = RowGeometry::new(ed, block, lines, text) else { return ctx.place_rows(ui, galley, map) };
     let width = ctx.wrap_width.unwrap_or_else(|| galley.rect.width());
@@ -1497,13 +1562,13 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &Scre
         }
         let mut dy = Vec::with_capacity(row.glyphs.len());
         for glyph in &mut row.glyphs {
-            dy.push(ascent - glyph.pos.y);
+            dy.push(egui::vec2(0.0, ascent - glyph.pos.y));
             glyph.pos.y = ascent;
             glyph.font_ascent = ascent;
             glyph.font_height = ascent + descent;
             glyph.line_height = ascent + descent;
         }
-        shift_glyph_vertices(row, &dy);
+        widgets::shift_glyph_vertices(row, &dy);
         row.size.y = (ascent + descent).max(1.0);
         row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
         bounds = bounds.union(Rect::from_min_size(placed.pos, row.size));
@@ -1573,7 +1638,7 @@ fn text_field<'t>(text: &'t mut String, ed: LineEditor, scale: f32, width: f32, 
     let rows = ed.probe.clone().map(|probe| {
         let style = ed.style();
         move |_: &egui::Context, text: &str| {
-            probe.0.rows(text, &style).map(|rows| rows.iter().map(|row| row.split_whitespace().count()).collect::<Vec<usize>>())
+            probe.layout(text, &style).map(|layout| layout.rows.iter().map(|row| row.split_whitespace().count()).collect::<Vec<usize>>())
         }
     });
     let key = format!("{:?}{}", ed.style(), scale.to_bits());
@@ -2260,6 +2325,38 @@ mod tests {
         assert_eq!(selection_bytes(text, 0..4), Some(0..text.len()));
         assert_eq!(selection_bytes(text, 2..99), Some(3..text.len()), "past the end is the end");
         assert_eq!(selection_bytes("", 0..3), None, "nothing to select");
+    }
+
+    /// A letter of Arabic is drawn in the interface's face unless the engine says Apply shapes the draft in the page's own: then in
+    /// that face (a `pdf-source-N` family the editor installed), and the other letters of the line stay in the line's font.
+    #[test]
+    fn the_joined_letters_of_a_line_take_the_pages_face_when_the_engine_names_one() {
+        let (_app, mut ed) = styled_editor(ORIGINAL, true);
+        let ctx = egui::Context::default();
+        let (block, lines) = ed.source.clone().expect("the editor has its source");
+        let line = &lines[block.lines[0]];
+        ed.fonts.insert(line.font.clone(), "pdf-source-7".into());
+        let own = line_formats(&ctx, &ed, line, 2.0, true, None);
+        let page = line_formats(&ctx, &ed, line, 2.0, true, Some(&"pdf-source-7".to_owned()));
+        assert_ne!(own.joined.font_id.family, FontFamily::Name("pdf-source-7".into()), "the interface's face without a page face");
+        assert_eq!(page.joined.font_id.family, FontFamily::Name("pdf-source-7".into()), "the page's face when the engine names one");
+        assert_eq!(page.joined.font_id.size, own.joined.font_id.size, "at the same size");
+        assert_eq!(page.plain.font_id, own.plain.font_id, "the ordinary letters are drawn as before");
+    }
+
+    /// Without a copy of the document to ask (or when the rewrite names no page face for the draft) the editor keeps the interface's face
+    /// for Arabic; a face the engine names but the editor did not install is not used either.
+    #[test]
+    fn no_page_face_is_used_unless_the_engine_names_one_the_editor_has() {
+        let arabic = "\u{633}\u{644}\u{627}\u{645}";
+        let (app, mut ed) = styled_editor(arabic, false);
+        assert!(ed.page_faces(arabic).is_empty(), "nothing to ask");
+        let doc = app.session.get(app.views[0].id).unwrap();
+        ed.probe = doc.text_draft_probe(0, 0).map(DraftProbe::new);
+        assert!(ed.probe.is_some());
+        // (Helvetica has no embedded program to shape in: whatever the rewrite does with the draft, it names no page face.)
+        assert!(ed.page_faces(arabic).is_empty(), "Helvetica has no face to shape in");
+        assert!(ed.page_faces("Hello").is_empty(), "no Arabic in the draft");
     }
 
     #[test]
