@@ -391,7 +391,7 @@ fn face_page(face: &[u8], rows: &[&str]) -> Vec<u8> {
     let Some(Object::Array(descendants)) = top.get(b"DescendantFonts").map(|d| doc.resolve(d).as_ref().clone()) else { panic!("descendant fonts") };
     let descendant = doc.dict(descendants.first().expect("a descendant")).expect("the descendant font");
     let Object::Stream(map) = &*doc.resolve(descendant.get(b"CIDToGIDMap").expect("a glyph map")) else { panic!("a glyph map stream") };
-    let gids: Vec<u16> = map.decoded().expect("decodes").chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+    let gids: Vec<u16> = map.decoded().expect("decodes").as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
     let mut content = String::new();
     for (i, row) in rows.iter().enumerate() {
         let shaped = pdfcraft_fonts::source_shaping::shape(face, row).expect("the face shapes the row");
