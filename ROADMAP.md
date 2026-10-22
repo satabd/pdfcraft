@@ -173,6 +173,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 
 ## Progress log
 
+- **2026-10-22 (M9, Arabic visible signatures):** Visible signature appearances draw Arabic names, reasons, locations and labels shaped with the craft-fonts Arabic face (Type 3 fonts in the appearance's own resources, one `/ActualText` span per line, right-to-left lines right-aligned in their column, wrapped on shaped widths) instead of refusing them; the signing dialog accepts them. Latin-only appearances are byte-identical (ten pinned fingerprints), signing stays deterministic and validates, and without the face the old refusal stays. Not yet: the name stays in the left half for right-to-left signatures, and the signing dialog under the Arabic interface still stamps English labels. Estimates unchanged.
+
 - **2026-10-22 (M5, M6, M8, Arabic leftovers):** Comb fields holding Arabic put one shaped cluster in each cell (the first typed letter in the rightmost cell of a right-to-left value, one `/ActualText` span for the value), push-button captions are shaped and centred, a dynamic stamp's By line and a measurement's value label are drawn shaped as glyph paths with `/ActualText`, and Search & Redact patterns read the page the way Find does (harakat dropped, presentation forms and Arabic-Indic digits reduced to base letters and ASCII digits, glyph owners kept), so a phone number typed in Arabic-Indic digits is found. None of these is marked undrawn any more. Create links from URLs still matches the page's characters as they are. Without the face or for text it cannot draw, the old `?` drawing and mark stay. Estimates unchanged.
 
 - **2026-10-22 (M7, Arabic headers, footers, Bates, watermarks and created pages):** Header and footer slots, Bates prefixes and watermark text holding Arabic are drawn shaped with the craft-fonts Arabic face (Type 3 glyphs in the page's resources, one `/ActualText` span per drawn line, measured for the slot and the watermark's rotation) instead of being refused; the Header & footer and Watermark dialogs accept it. Create from text lays out Arabic paragraphs shaped and right-aligned when they run right to left, and generated reports (comment summaries, compare) keep Arabic readable instead of escaping it as code points. Shaping is planned before any mutation, capped in size, and without the face the old refusal and escaping stay. Estimates unchanged.
@@ -563,6 +565,7 @@ Newest first: the date, what moved, and the new overall estimate.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | M9: Arabic visible signatures drawn shaped with per-line ActualText; Latin output byte-identical. Estimates unchanged. |
 | 2026-10-22 | minor | M7: Arabic in headers, footers, Bates numbers, watermarks and Create from text is drawn shaped instead of refused or escaped. Estimates unchanged. |
 | 2026-10-22 | minor | M5: Arabic FreeText comments (text box, callout, Typewriter, Fill & Sign text) are drawn shaped with per-line ActualText and flatten. Estimates unchanged. |
 | 2026-10-22 | minor | M6: Arabic form-field values are drawn shaped and flatten; the shaped-layout code moves into pdfcraft_fonts::shaped_text. Estimates unchanged. |
