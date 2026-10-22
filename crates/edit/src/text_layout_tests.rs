@@ -42,7 +42,7 @@ fn page_in_the_face(bytes: &[u8], rows: &[&str]) -> pdfcraft_cos::Document {
         Object::Stream(s) => s.decoded().expect("decodes"),
         other => panic!("{other:?}"),
     };
-    let gids: Vec<u16> = map.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+    let gids: Vec<u16> = map.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
     let mut content = String::new();
     for (i, row) in rows.iter().enumerate() {
         let shaped = pdfcraft_fonts::source_shaping::shape(bytes, row).expect("the face shapes the row");
