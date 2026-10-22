@@ -11,5 +11,8 @@ are written as they are (UTF-8, `\uN` escapes in RTF) and nothing is refused or 
 A paragraph, heading or table cell whose first strong character runs right to left (UAX #9) is
 marked as such where the format has a way to: `<w:bidi/>` and, in its runs, `<w:rtl/>` with the
 complex-script size and weight in Word; `<a:pPr algn="r" rtl="1"/>` in PowerPoint; `dir="rtl"` in
-HTML; `\rtlpar\qr` with `\afs`, `\ab` and `\ai` in RTF. Not done: mirrored table column order
-(`w:bidiVisual`), and text a PDF stores in visual order is exported as extracted.
+HTML; `\rtlpar\qr` with `\afs`, `\ab` and `\ai` in RTF. A whole table reads right to left when more
+of its cells open with a right-to-left letter than with a left-to-right one (a tie, or no letters,
+stays left to right; `table_is_rtl`): `<w:bidiVisual/>` in `w:tblPr` (Word mirrors the columns, the
+cells stay in logical order), `rtl="1"` on `<a:tblPr>`, `dir="rtl"` on `<table>`, `\rtlrow` in `\trowd`.
+Not done: text a PDF stores in visual order is exported as extracted.

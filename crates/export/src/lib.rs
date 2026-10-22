@@ -375,6 +375,22 @@ pub(crate) fn is_rtl(text: &str) -> bool {
     pdfcraft_fonts::shaped_text::first_strong_is_rtl(text)
 }
 
+/// Whether a whole table reads right to left: more of its cells with strong text start with a
+/// right-to-left letter ([`is_rtl`]) than with a left-to-right one (any other text with letters in it). A tie, or a table without
+/// strong text (digits, empty cells), reads left to right. The one rule behind Word's
+/// `<w:bidiVisual/>`, PowerPoint's `<a:tblPr rtl="1">`, HTML's `dir="rtl"` and RTF's `\rtlrow`.
+pub(crate) fn table_is_rtl(t: &Table) -> bool {
+    let (mut rtl, mut ltr) = (0usize, 0usize);
+    for c in t.rows.iter().flatten() {
+        if is_rtl(&c.text) {
+            rtl = rtl.saturating_add(1);
+        } else if c.text.chars().any(char::is_alphabetic) {
+            ltr = ltr.saturating_add(1);
+        }
+    }
+    rtl > ltr
+}
+
 pub(crate) fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars().filter(|c| allowed(*c)) {
@@ -429,7 +445,7 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
                 }
             }
             Item::Table(t) => {
-                s.push_str("<table>\n");
+                s.push_str(if table_is_rtl(&t) { "<table dir=\"rtl\">\n" } else { "<table>\n" });
                 for row in &t.rows {
                     s.push_str("<tr>");
                     for c in row {
@@ -507,7 +523,10 @@ fn docx_table(t: &Table) -> String {
     let mut edges = t.cols.clone();
     edges.push(t.rect[2]);
     let widths: Vec<i64> = edges.windows(2).map(|w| ((w[1] - w[0]).max(20.0) * 20.0).round().clamp(60.0, 31680.0) as i64).collect();
-    let mut s = String::from("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
+    // `bidiVisual` comes before `tblW` in CT_TblPr; Word mirrors the columns itself, so the cells
+    // stay in logical order.
+    let bidi = if table_is_rtl(t) { "<w:bidiVisual/>" } else { "" };
+    let mut s = format!("<w:tbl><w:tblPr>{bidi}<w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
     for edge in ["top", "left", "bottom", "right", "insideH", "insideV"] {
         s.push_str(&format!("<w:{edge} w:val=\"nil\"/>"));
     }
@@ -891,8 +910,9 @@ pub fn rtf(pages: &[Page]) -> String {
                 let mut edges = t.cols.clone();
                 edges.push(t.rect[2]);
                 let cellx: Vec<i64> = edges.iter().skip(1).map(|e| (e * 20.0).round() as i64).collect();
+                let rtl_table = table_is_rtl(&t);
                 for row in &t.rows {
-                    s.push_str("\\trowd\\trgaph108");
+                    s.push_str(if rtl_table { "\\trowd\\rtlrow\\trgaph108" } else { "\\trowd\\trgaph108" });
                     // The row's cell boundaries come first: each cell ends at the right edge of
                     // the last grid column it spans.
                     let mut column = 0;

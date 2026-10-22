@@ -243,3 +243,83 @@ fn hostile_text_is_written_without_panicking() {
     let xml = part(&docx(&[p], "t"), "word/document.xml");
     assert!(xml.contains(">مرحبا</w:t>") && !xml.contains('\u{1}'), "{xml}");
 }
+
+/// A page with a two-column table, the cells' text given row by row, and a body paragraph after it.
+fn table_page(rows: [[&str; 2]; 3]) -> Page {
+    let cell = |t: &str, x: f64, y: f64| Block { rect: [x, y, x + 100.0, y + 12.0], ..block(t, y, 11.0, false) };
+    let mut blocks = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let y = 620.0 - 30.0 * i as f64;
+        blocks.push(cell(row[0], 72.0, y));
+        blocks.push(cell(row[1], 232.0, y));
+    }
+    blocks.push(block("Notes follow the table and are long enough to be the body text size of the page here.", 100.0, 11.0, false));
+    Page { width: 612.0, height: 792.0, blocks, images: Vec::new() }
+}
+
+const ARABIC_TABLE: [[&str; 2]; 3] = [[ARABIC, "شكرا"], ["بالعالم", "kWh"], ["12", "٣٤"]];
+const LATIN_TABLE: [[&str; 2]; 3] = [["Name", "Unit"], ["Power", "kWh"], ["12", "34"]];
+// Two Arabic cells against three Latin ones: the Latin cells are the majority.
+const MIXED_TABLE: [[&str; 2]; 3] = [[ARABIC, "Unit"], ["Power", "kWh"], ["مرحبا", "Total"]];
+
+fn tables_of(rows: [[&str; 2]; 3]) -> Vec<Table> {
+    items(std::slice::from_ref(&table_page(rows))).into_iter().filter_map(|i| if let Item::Table(t) = i { Some(t) } else { None }).collect()
+}
+
+/// All four exports of a table page: Word, PowerPoint, HTML and RTF.
+fn exports(rows: [[&str; 2]; 3]) -> [String; 4] {
+    let page = table_page(rows);
+    let word = part(&docx(std::slice::from_ref(&page), "t"), "word/document.xml");
+    let mut slide_page = page.clone();
+    slide_page.width = 720.0;
+    slide_page.height = 540.0;
+    slide_page.blocks.insert(0, block("Title text for the slide", 500.0, 11.0, false));
+    let slide = part(&pptx(&[slide_page], "t"), "ppt/slides/slide1.xml");
+    [word, slide, html(std::slice::from_ref(&page), "t"), rtf(std::slice::from_ref(&page))]
+}
+
+#[test]
+fn an_arabic_table_is_marked_right_to_left_in_all_four_exports() {
+    let tables = tables_of(ARABIC_TABLE);
+    assert_eq!(tables.len(), 1, "the fixture must be detected as one table");
+    assert!(table_is_rtl(&tables[0]));
+    let [word, slide, h, r] = exports(ARABIC_TABLE);
+    assert!(word.contains("<w:tblPr><w:bidiVisual/><w:tblW"), "bidiVisual belongs first in tblPr: {word}");
+    // The cells stay in logical order: the first cell of the first row is the first Arabic text.
+    assert!(word.find(ARABIC) < word.find("شكرا"), "{word}");
+    assert!(slide.contains("<a:tblPr rtl=\"1\"/>"), "{slide}");
+    assert!(h.contains("<table dir=\"rtl\">"), "{h}");
+    assert!(r.contains("\\trowd\\rtlrow\\trgaph108"), "{r}");
+}
+
+#[test]
+fn latin_and_latin_majority_tables_get_no_table_direction() {
+    for rows in [LATIN_TABLE, MIXED_TABLE] {
+        assert!(tables_of(rows).iter().all(|t| !table_is_rtl(t)));
+        let [word, slide, h, r] = exports(rows);
+        assert!(word.contains("<w:tbl>") && !word.contains("bidiVisual"), "{word}");
+        assert!(slide.contains("<a:tblPr/>") && !slide.contains("tblPr rtl"), "{slide}");
+        assert!(h.contains("<table>") && !h.contains("<table dir"), "{h}");
+        assert!(r.contains("\\trowd\\trgaph108") && !r.contains("rtlrow"), "{r}");
+    }
+}
+
+#[test]
+fn table_direction_counts_cells_and_leaves_ties_left_to_right() {
+    let cell = |t: &str| Cell { text: t.into(), size: 11.0, bold: false, italic: false, color: [0.0; 3], span: 1 };
+    let table = |texts: &[&str]| Table { rect: [0.0; 4], cols: vec![0.0], rows: texts.iter().map(|t| vec![cell(t)]).collect() };
+    assert!(table_is_rtl(&table(&[ARABIC, HEBREW, "Unit"])));
+    assert!(!table_is_rtl(&table(&[ARABIC, "Unit"])), "a tie is left to right");
+    assert!(!table_is_rtl(&table(&["12", "", "٣٤"])), "no strong text is left to right");
+    assert!(!table_is_rtl(&table(&[])), "an empty table");
+}
+
+#[test]
+fn an_empty_table_is_written_without_panicking() {
+    let empty = Table { rect: [0.0; 4], cols: Vec::new(), rows: Vec::new() };
+    assert!(!table_is_rtl(&empty));
+    assert!(!docx_table(&empty).contains("bidiVisual"));
+    let no_cells = Table { rows: vec![Vec::new()], ..empty };
+    assert!(!table_is_rtl(&no_cells));
+    let _ = docx_table(&no_cells);
+}

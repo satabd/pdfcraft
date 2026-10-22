@@ -1,7 +1,7 @@
 //! PowerPoint presentation (.pptx, Office Open XML PresentationML): slides per page,
 //! largest text as slide title, remaining paragraphs as body text, images and tables between them.
 
-use crate::{Block, Image, Page, Table, Zip, esc, hex, is_rtl};
+use crate::{Block, Image, Page, Table, Zip, esc, hex, is_rtl, table_is_rtl};
 
 /// Items on a slide in reading order.
 enum SlideBodyItem<'a> {
@@ -108,12 +108,13 @@ fn pptx_table(shape_id: usize, t: &Table, x: i64, y: i64, content_w: i64) -> (St
         rows_xml.push_str("</a:tr>");
     }
 
+    let tbl_rtl = if table_is_rtl(t) { " rtl=\"1\"" } else { "" };
     let frame = format!(
         "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{shape_id}\" name=\"Table {shape_id}\"/>\
 <p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=\"1\"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr>\
 <p:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{table_w}\" cy=\"{table_h}\"/></p:xfrm>\
 <a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\">\
-<a:tbl><a:tblPr/><a:tblGrid>{grid_cols}</a:tblGrid>{rows_xml}</a:tbl>\
+<a:tbl><a:tblPr{tbl_rtl}/><a:tblGrid>{grid_cols}</a:tblGrid>{rows_xml}</a:tbl>\
 </a:graphicData></a:graphic></p:graphicFrame>"
     );
     (frame, table_h)
