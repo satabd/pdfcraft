@@ -789,7 +789,7 @@ pub(crate) fn page(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             group(ui, &t, edge, 2.0 * 30.0 + 6.0);
             // Thumbnails or the table; the choice is kept in the settings.
             for (view, icon, label) in [(CombineView::Grid, "layout-grid", tl!("Grid view")), (CombineView::List, "list", tl!("List view"))] {
-                if icons::button(ui, icon, 30.0, app.combine_view == view, label).clicked() {
+                if icons::button_fixed(ui, icon, 30.0, app.combine_view == view, label).clicked() {
                     app.combine_view = view;
                 }
             }
@@ -1061,7 +1061,7 @@ fn group(ui: &mut egui::Ui, t: &Tokens, edge: f32, width: f32) {
 
 /// A toolbar icon button, disabled with a reason.
 fn tool(ui: &mut egui::Ui, enabled: bool, icon: &str, label: &str, disabled_why: &str) -> egui::Response {
-    ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, 30.0, false, label)).inner.on_disabled_hover_text(disabled_why)
+    ui.add_enabled_ui(enabled, |ui| icons::button_fixed(ui, icon, 30.0, false, label)).inner.on_disabled_hover_text(disabled_why)
 }
 
 /// Whether a file can be shown as its pages: readable, unlocked, and adding more than one.

@@ -1,13 +1,13 @@
 //! Left tool panel (All tools + tool sub-panels, generated from the engine catalogue) and the
 //! right-hand panels (Comments, Bookmarks, Pages, Fields, Layers, Attachments).
 
-use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, Sense, Stroke, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, pos2, vec2};
 use pdfcraft_engine::catalog::{self, Availability, TOOL_GROUPS, ToolGroup};
 use pdfcraft_render::{DocInfo, FieldKind, OutlineItem};
 
 use crate::i18n::Logical;
 use crate::theme::{self, Tokens};
-use crate::{LeftPanel, PdfCraftApp, RightPanel, icons, widgets};
+use crate::{LeftPanel, PdfCraftApp, RightPanel, icons, rtl, widgets};
 
 const COLLAPSED_TOOLS: usize = 14;
 
@@ -22,32 +22,34 @@ pub fn left_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     if app.left == LeftPanel::Tool("organize") && app.active.and_then(|i| app.views.get(i)).is_some_and(|v| !v.organize) {
         app.left = crate::organize_panel::workspace_panel(app.mode);
     }
-    egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin { left: 14, right: 10, top: 12, bottom: 10 }).stroke(Stroke::new(1.0, t.divider)).show(
-        ui,
-        |ui| match app.left {
-            // Organize pages has its own panel whenever the grid shows (with a document open).
-            _ if app.active.is_some() && crate::organize_panel::showing(app) => crate::organize_panel::panel(app, ui, &t),
-            LeftPanel::AllTools => all_tools(app, ui, &t),
-            LeftPanel::Tool(id) => match catalog::group(id) {
-                Some(g) => tool_detail(app, ui, &t, g),
-                None => app.left = LeftPanel::AllTools,
-            },
+    egui::Frame::NONE.fill(t.panel).inner_margin(rtl::margin(14, 10, 12, 10)).stroke(Stroke::new(1.0, t.divider)).show(ui, |ui| match app.left {
+        // Organize pages has its own panel whenever the grid shows (with a document open).
+        _ if app.active.is_some() && crate::organize_panel::showing(app) => crate::organize_panel::panel(app, ui, &t),
+        // The list holds no egui::Grid, so it can sit against the start edge.
+        LeftPanel::AllTools => rtl::page(ui, |ui| all_tools(app, ui, &t)),
+        LeftPanel::Tool(id) => match catalog::group(id) {
+            Some(g) => tool_detail(app, ui, &t, g),
+            None => app.left = LeftPanel::AllTools,
         },
-    );
+    });
 }
 
 fn panel_header(ui: &mut egui::Ui, t: &Tokens, title: &str, back: bool) -> (bool, bool) {
     let mut go_back = false;
     let mut close = false;
-    ui.horizontal(|ui| {
+    // Back first and Close last, from the start edge.
+    rtl::horizontal(ui, |ui| {
         if back && icons::button(ui, "chevron-left", 26.0, false, tl!("Back to all tools")).clicked() {
             go_back = true;
         }
         // Reserve space for Close before laying out the translated title. Long tool names
         // must never expand the fixed-width sidebar or push the Close control off-screen.
         let title_width = (ui.available_width() - 26.0 - ui.spacing().item_spacing.x).max(1.0);
-        ui.add_sized([title_width, 26.0], egui::Label::new(egui::RichText::new(tl!(title)).font(theme::semibold(15.5)).color(t.text)).truncate())
-            .on_hover_text(tl!(title));
+        ui.add_sized(
+            [title_width, 26.0],
+            egui::Label::new(egui::RichText::new(tl!(title)).font(theme::semibold(15.5)).color(t.text)).truncate().halign(rtl::text_align()),
+        )
+        .on_hover_text(tl!(title));
         if icons::button(ui, "x", 26.0, false, tl!("Close panel")).clicked() {
             close = true;
         }
@@ -87,13 +89,15 @@ fn all_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
 }
 
 /// Draw a one-line row label without painting into the status chip or beyond the sidebar.
-/// Accessibility retains the complete name through the row's WidgetInfo.
-fn row_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32, left_center: egui::Pos2, max_width: f32) -> bool {
+/// `start_center` is the middle of the label's start edge: its left edge in English, its right
+/// edge when mirrored. Accessibility retains the complete name through the row's WidgetInfo.
+fn row_label(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32, start_center: egui::Pos2, max_width: f32) -> bool {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping { max_width: max_width.max(1.0), max_rows: 1, break_anywhere: true, ..Default::default() };
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let elided = galley.elided;
-    ui.painter().galley(left_center - vec2(0.0, galley.size().y / 2.0), galley, color);
+    let rect = rtl::flip(Align2::LEFT_CENTER).anchor_size(start_center, galley.size());
+    ui.painter().galley(rect.min, galley, color);
     elided
 }
 
@@ -103,7 +107,7 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
     let press = theme::Press::track(ui, &resp);
     press.wash(ui, rect, 6, false);
     let body = rect.translate(press.offset());
-    icons::paint(ui, Rect::from_min_size(body.min + vec2(6.0, 7.0), vec2(20.0, 20.0)), g.icon, 19.0, hue(g));
+    icons::paint(ui, rtl::start_rect(body, 6.0, 7.0, vec2(20.0, 20.0)), g.icon, 19.0, hue(g));
     let right_reserved = match (g.badge, g.availability) {
         (Some(b), _) => ui.fonts_mut(|f| f.layout_no_wrap(tl!(b).to_owned(), theme::semibold(9.5), Color32::WHITE).size().x) + 26.0,
         (None, Availability::Planned(m)) if resp.hovered() => {
@@ -112,22 +116,21 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup) -> egui::Response {
         }
         _ => 8.0,
     };
-    let clipped =
-        row_label(ui, tl!(g.label), theme::regular(13.5), t.text, body.left_center() + vec2(36.0, 0.0), rect.width() - 36.0 - right_reserved);
+    let clipped = row_label(ui, tl!(g.label), theme::regular(13.5), t.text, rtl::start_center(body, 36.0), rect.width() - 36.0 - right_reserved);
     match (g.badge, g.availability) {
         (Some(b), _) => {
             let font = theme::semibold(9.5);
             let badge = tl!(b);
             let w = ui.fonts_mut(|f| f.layout_no_wrap(badge.to_string(), font.clone(), Color32::WHITE).size().x);
-            let r = Rect::from_center_size(body.right_center() - vec2(w / 2.0 + 10.0, 0.0), vec2(w + 10.0, 16.0));
+            let r = Rect::from_center_size(rtl::end_center(body, w / 2.0 + 10.0), vec2(w + 10.0, 16.0));
             ui.painter().rect_filled(r, CornerRadius::same(4), t.badge_new);
             ui.painter().text(r.center(), Align2::CENTER_CENTER, badge, font, Color32::WHITE);
         }
         // Planned tools: a quiet milestone hint instead of a chip, so the list stays calm.
         (None, Availability::Planned(m)) if resp.hovered() => {
             ui.painter().text(
-                body.right_center() - vec2(10.0, 0.0),
-                Align2::RIGHT_CENTER,
+                rtl::end_center(body, 10.0),
+                rtl::flip(Align2::RIGHT_CENTER),
                 format!("{} · {m}", tl!("Planned")),
                 theme::medium(10.5),
                 t.text_faint,
@@ -176,7 +179,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
     }
     // Prepare a form: Preview fills the form as a reader would; Edit goes back.
     if g.id == "form" {
-        ui.horizontal(|ui| {
+        rtl::horizontal(ui, |ui| {
             let label = if app.form_preview { "Edit fields" } else { "Preview" };
             if widgets::pill_button(ui, tl!(label), app.form_preview).on_hover_text(tl!("Try the form as people filling it in will see it")).clicked()
             {
@@ -221,13 +224,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
                 press.wash(ui, rect, 6, false);
                 let body = rect.translate(press.offset());
                 let fg = if ready { t.text } else { t.text_muted };
-                icons::paint(
-                    ui,
-                    Rect::from_min_size(body.min + vec2(6.0, 8.0), vec2(18.0, 18.0)),
-                    item.icon,
-                    17.0,
-                    if ready { hue(g) } else { t.text_faint },
-                );
+                icons::paint(ui, rtl::start_rect(body, 6.0, 8.0, vec2(18.0, 18.0)), item.icon, 17.0, if ready { hue(g) } else { t.text_faint });
                 let (chip, fill, cfg) = match item.availability {
                     Availability::Ready => (tl!("Ready"), Color32::from_rgb(0xDD, 0xF3, 0xE4), Color32::from_rgb(0x1E, 0x7B, 0x43)),
                     Availability::Planned(m) => (m, t.pressed, t.text_muted),
@@ -236,8 +233,10 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
                 let font = theme::semibold(9.5);
                 let chip_label = tl!(chip).to_string();
                 let w = crate::widgets::text_width(ui, &chip_label, &font);
-                let r = Rect::from_center_size(body.right_center() - vec2(w / 2.0 + 10.0, 0.0), vec2(w + 10.0, 16.0));
-                row_label(ui, tl!(item.label), theme::regular(13.0), fg, body.left_center() + vec2(34.0, 0.0), r.left() - body.left() - 42.0);
+                let r = Rect::from_center_size(rtl::end_center(body, w / 2.0 + 10.0), vec2(w + 10.0, 16.0));
+                // The label's room runs from its start to the chip, minus the icon column and a gap.
+                let room = body.width() - w - 15.0 - 42.0;
+                row_label(ui, tl!(item.label), theme::regular(13.0), fg, rtl::start_center(body, 34.0), room);
                 ui.painter().rect_filled(r, CornerRadius::same(4), fill);
                 ui.painter().text(r.center(), Align2::CENTER_CENTER, chip_label, font, cfg);
                 let resp = theme::hand(resp).on_hover_text(format!("{} — {}", tl!(item.label), item.command));
@@ -247,7 +246,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
                     }
                 } else {
                     // A caret before the chip says the entry opens a menu (Add / Update / Remove).
-                    let c = r.left_center() - vec2(10.0, 0.0);
+                    let c = rtl::start_center(r, -10.0);
                     ui.painter().add(egui::Shape::convex_polygon(
                         vec![c + vec2(-3.5, -2.0), c + vec2(3.5, -2.0), c + vec2(0.0, 2.5)],
                         fg,
@@ -278,7 +277,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
     });
     if footer {
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        rtl::horizontal(ui, |ui| {
             if marks > 0 {
                 ui.label(
                     egui::RichText::new(if marks == 1 {
@@ -289,7 +288,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
                     .color(t.text_muted),
                 );
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            rtl::end(ui, |ui| {
                 if ui.add_enabled_ui(marks > 0, |ui| widgets::pill_button(ui, tl!("Redact all"), true)).inner.clicked() {
                     run = Some("redact.apply");
                 }
@@ -503,6 +502,17 @@ pub(crate) enum Nav {
     Flash(usize, [f32; 4]),
 }
 
+/// [`right_panel`] with its body against the start edge when the panel can take that: the
+/// panels without an `egui::Grid`, which measures infinite in a layout aligned to the right
+/// (the others, Comments, Signatures, Compare and the like, keep their left alignment).
+pub fn right_panel_page(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+    if matches!(app.right, Some(RightPanel::Bookmarks | RightPanel::Pages | RightPanel::Fields | RightPanel::Layers | RightPanel::Attachments)) {
+        rtl::page(ui, |ui| right_panel(app, ui));
+    } else {
+        right_panel(app, ui);
+    }
+}
+
 pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some((index, id)) = app.active_ids() else { return };
@@ -537,7 +547,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         let modal = app.dialog.is_some() || app.palette_open;
         egui::Frame::NONE
             .fill(t.panel)
-            .inner_margin(egui::Margin { left: 14, right: 12, top: 12, bottom: 8 })
+            // The margins swap sides in a mirrored interface.
+            .inner_margin(rtl::margin(14, 12, 12, 8))
             .stroke(Stroke::new(1.0, t.divider))
             .show(ui, |ui| {
                 let (title, count) = match panel {
@@ -553,7 +564,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     RightPanel::Search => ("Search", None),
                     RightPanel::Compare => ("Compare", compare.as_ref().filter(|c| c.new == id).map(|c| c.result.changes.len())),
                 };
-                ui.horizontal(|ui| {
+                rtl::horizontal(ui, |ui| {
                     ui.label(egui::RichText::new(tl!(title)).font(theme::semibold(15.5)));
                     if let Some(c) = count {
                         ui.label(egui::RichText::new(c.to_string()).font(theme::medium(13.0)).color(t.text_faint));
@@ -563,11 +574,11 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         let picked = crate::i18n::fmt(tl!("{n} pages selected"), &[("n", &n)]);
                         ui.label(egui::RichText::new(picked).font(theme::medium(12.0)).color(t.accent_text));
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    rtl::end(ui, |ui| {
                         if icons::button(ui, "x", 26.0, false, tl!("Close")).clicked() {
                             close = true;
                         }
-                        // Right to left: close, "…", filter, search (Acrobat's order left to right).
+                        // From the end edge: close, "…", filter, search (Acrobat's order left to right).
                         if panel == RightPanel::Comments {
                             panel_command = crate::comments_panel::header_controls(ui, info, view, doc.comments_hidden());
                         }
@@ -612,14 +623,17 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let search_id = egui::Id::new(("bookmark_search", id.0));
                 let mut bookmark_query = ui.data(|d| d.get_temp::<String>(search_id)).unwrap_or_default();
                 if panel == RightPanel::Bookmarks && !info.outline.is_empty() {
-                    ui.horizontal(|ui| {
+                    rtl::horizontal(ui, |ui| {
                         const CLEAR: f32 = 26.0;
                         let label = ui.label(tl!("Search"));
                         let previous = bookmark_query.clone();
                         // The panel keeps whatever width its content used, so this row must fit
                         // exactly: any overflow would widen the panel again on every repaint.
                         let width = ui.available_width() - CLEAR - ui.spacing().item_spacing.x;
-                        let response = ui.add(egui::TextEdit::singleline(&mut bookmark_query).desired_width(width)).labelled_by(label.id);
+                        let align = widgets::field_align(&bookmark_query);
+                        let response = ui
+                            .add(egui::TextEdit::singleline(&mut bookmark_query).desired_width(width).horizontal_align(align))
+                            .labelled_by(label.id);
                         response.widget_info(|| {
                             let mut info = egui::WidgetInfo::text_edit(ui.is_enabled(), &previous, &bookmark_query, "");
                             info.label = Some(tl!("Search").to_string());
@@ -690,15 +704,15 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             let body = rect.translate(press.offset());
                             icons::paint(
                                 ui,
-                                Rect::from_min_size(body.min + vec2(4.0, 7.0), vec2(18.0, 18.0)),
+                                rtl::start_rect(body, 4.0, 7.0, vec2(18.0, 18.0)),
                                 if l.visible { "eye" } else { "eye-off" },
                                 16.0,
                                 t.icon,
                             );
                             let fg = if l.visible { t.text } else { t.text_faint };
-                            crate::widgets::paint_left_doc(
+                            crate::widgets::paint_start_doc(
                                 ui,
-                                body.left_center() + vec2(32.0, 0.0),
+                                rtl::start_center(body, 32.0),
                                 &l.name,
                                 theme::regular(13.0),
                                 fg,
@@ -732,9 +746,9 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         }
                         for (ai, a) in info.attachments.iter().enumerate() {
                             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 6)).show(ui, |ui| {
-                                ui.horizontal(|ui| {
+                                rtl::horizontal(ui, |ui| {
                                     ui.add(icons::image("paperclip", 16.0, t.icon));
-                                    ui.vertical(|ui| {
+                                    rtl::vertical(ui, |ui| {
                                         ui.set_width(ui.available_width() - 70.0);
                                         ui.add(
                                             egui::Label::new(egui::RichText::new(crate::bidi::visual(&a.name)).font(theme::medium(13.0))).truncate(),
@@ -752,7 +766,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                         }
                                         ui.add(egui::Label::new(egui::RichText::new(meta).color(t.text_faint).small()).truncate());
                                     });
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    rtl::end(ui, |ui| {
                                         if icons::button(ui, "file-down", 28.0, false, tl!("Save attachment…")).clicked() {
                                             attachment_action = Some((ai, false));
                                         }
@@ -974,7 +988,7 @@ fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineIte
         // Inline rename: Enter commits, Escape cancels.
         let mut commit = None;
         let mut cancel = false;
-        ui.horizontal(|ui| {
+        rtl::horizontal(ui, |ui| {
             ui.add_space(x_text);
             crate::widgets::begin_dialog(ui);
             let edit = crate::widgets::line(text).desired_width(ui.available_width() - 8.0).id(id.with("rename"));
@@ -1018,9 +1032,9 @@ fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineIte
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &item.title));
         theme::Press::track(ui, &resp).wash(ui, rect, 6, false);
-        let x0 = rect.left() + indent;
+        // The rows indent from the start edge, the expander first and the title after it.
         if !item.children.is_empty() {
-            let tri = Rect::from_min_size(pos2(x0, rect.top() + 6.0), vec2(16.0, 16.0));
+            let tri = rtl::start_rect(rect, indent, 6.0, vec2(16.0, 16.0));
             icons::paint(ui, tri, if open { "chevron-down" } else { "chevron-right" }, 14.0, t.text_muted);
             if !cx.searching && ui.interact(tri, id.with("tri"), Sense::click()).clicked() {
                 open = !open;
@@ -1029,16 +1043,25 @@ fn outline_item(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, item: &OutlineIte
         }
         let mut y = rect.top() + 6.0;
         for (rtl, galley) in lines {
-            // A right-to-left line ends at the right edge of the column the title wraps in.
-            let x = if rtl { x0 + 20.0 + wrap_w - galley.size().x } else { x0 + 20.0 };
+            // A right-to-left line ends at the right edge of the column the title wraps in; when
+            // the panel is mirrored every line starts at the right edge of the column.
+            let column = rtl::start(rect, indent + 20.0);
+            let x = if rtl::mirrored() {
+                column - galley.size().x
+            } else if rtl {
+                column + wrap_w - galley.size().x
+            } else {
+                column
+            };
             let line_h = galley.size().y;
             ui.painter().galley(pos2(x, y), galley, t.text);
             y += line_h;
         }
         if let Some(g) = label_galley {
-            // Right-aligned, vertically centred at the first line, inside the column the title
-            // wrapped around.
-            let pos = pos2(rect.right() - 6.0 - g.size().x, rect.top() + 14.0 - g.size().y / 2.0);
+            // At the end edge (right-aligned in English), vertically centred at the first line,
+            // inside the column the title wrapped around.
+            let end = rtl::end_x(rect, 6.0);
+            let pos = pos2(if rtl::mirrored() { end } else { end - g.size().x }, rect.top() + 14.0 - g.size().y / 2.0);
             ui.painter().galley(pos, g, t.text_faint);
         }
         if theme::hand(resp.clone()).clicked()
@@ -1344,7 +1367,7 @@ fn fields(
         let names = selection.names();
         // Keep the field rows in place when the first click selects a field, so the
         // second click of a double-click still lands on the same row.
-        ui.horizontal(|ui| {
+        rtl::horizontal(ui, |ui| {
             ui.label(crate::i18n::fmt(tl!("{n} selected"), &[("n", &names.len().to_string())]));
             if ui.add_enabled(!names.is_empty(), egui::Button::new(tl!("Properties…"))).clicked() {
                 properties = selection.selected.clone();
@@ -1380,7 +1403,7 @@ fn fields(
                 let press = theme::Press::track(ui, &resp);
                 press.wash(ui, rect, 6, selected);
                 let body = rect.translate(press.offset());
-                icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 7.0), vec2(16.0, 16.0)), icon, 15.0, Color32::from_rgb(0x8E, 0x4E, 0xE6));
+                icons::paint(ui, rtl::start_rect(body, 8.0, 7.0, vec2(16.0, 16.0)), icon, 15.0, Color32::from_rgb(0x8E, 0x4E, 0xE6));
                 // The value is cut in logical order, then put in display order for painting.
                 let value = f.value.as_ref().map(|v| {
                     let cut = if v.chars().count() > 18 { format!("{}…", v.chars().take(17).collect::<String>()) } else { v.clone() };
@@ -1390,15 +1413,15 @@ fn fields(
                 let value_w = value.as_ref().map(|v| crate::widgets::text_width(ui, v, &value_font)).unwrap_or(0.0);
                 let arrows = if preparing && f.page.is_some() { 56.0 } else { 0.0 };
                 let max_w = (rect.width() - 32.0 - value_w - arrows - 16.0).max(0.0);
-                crate::widgets::paint_left_doc(ui, body.left_center() + vec2(32.0, 0.0), &f.name, theme::regular(13.0), t.text, max_w);
+                crate::widgets::paint_start_doc(ui, rtl::start_center(body, 32.0), &f.name, theme::regular(13.0), t.text, max_w);
                 if let Some(v) = value {
                     let x = if arrows > 0.0 { 64.0 } else { 8.0 };
-                    ui.painter().text(body.right_center() - vec2(x, 0.0), Align2::RIGHT_CENTER, v, value_font, t.text_faint);
+                    ui.painter().text(rtl::end_center(body, x), rtl::flip(Align2::RIGHT_CENTER), v, value_font, t.text_faint);
                 }
             }
             if preparing && f.page.is_some() {
-                let up = Rect::from_center_size(rect.right_center() - vec2(44.0, 0.0), vec2(22.0, 22.0));
-                let down = Rect::from_center_size(rect.right_center() - vec2(20.0, 0.0), vec2(22.0, 22.0));
+                let up = Rect::from_center_size(rtl::end_center(rect, 44.0), vec2(22.0, 22.0));
+                let down = Rect::from_center_size(rtl::end_center(rect, 20.0), vec2(22.0, 22.0));
                 for (r, icon, earlier, tip) in
                     [(up, "chevron-up", true, tl_logical!("Earlier in tab order")), (down, "chevron-down", false, tl_logical!("Later in tab order"))]
                 {

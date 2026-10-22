@@ -1,0 +1,308 @@
+//! Mirroring the interface for a right-to-left language (Arabic).
+//!
+//! The shell is laid out from its start edge: the left in English, the right in Arabic. These
+//! helpers answer "which edge is the start?" in one place so a panel, a row or a painted icon
+//! does not carry its own `if rtl`. Mirroring changes positions only. The labels of the Arabic
+//! catalog are already in display order ([`crate::bidi::display_rtl`]), so nothing here (and no
+//! caller) puts them through `bidi::visual*` again.
+//!
+//! Every helper is the identity when [`mirrored`] is false, so the English layout cannot change.
+//! What stays physical: the window controls, scrollbars, the document canvas and its overlays,
+//! menus and submenus (their layout is justified towards the left), `egui::Grid` dialogs, the
+//! order of the document tabs, and the explicit "Tools panel side" preference.
+
+use egui::{Align, Align2, InnerResponse, Layout, Margin, Pos2, Rect, Ui, Vec2, pos2, vec2};
+
+/// Whether the interface language is written right to left ([`crate::i18n::current`], set at the
+/// start of every frame from the language preference).
+pub fn mirrored() -> bool {
+    crate::i18n::current().rtl()
+}
+
+/// Whether the language preference `pref` ([`crate::PdfCraftApp::language`], possibly Auto) is
+/// written right to left, for code that runs outside a frame (a control-channel command).
+pub fn of_pref(pref: &str) -> bool {
+    crate::i18n::Lang::from_pref(pref).rtl()
+}
+
+/// Which side of the window a panel belongs to, in reading order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The side where reading starts: the left in English, the right in Arabic. No panel sits
+    /// there yet (the Tools pane is placed by the docking workspace).
+    #[cfg_attr(not(test), expect(dead_code, reason = "the complete pair; only the end side has a panel today"))]
+    Start,
+    /// The opposite side.
+    End,
+}
+
+/// A horizontal layout whose first item sits at the start edge.
+pub fn start_layout(cross: Align) -> Layout {
+    if mirrored() { Layout::right_to_left(cross) } else { Layout::left_to_right(cross) }
+}
+
+/// A horizontal layout whose first item sits at the end edge (an end-aligned cluster).
+pub fn end_layout(cross: Align) -> Layout {
+    if mirrored() { Layout::left_to_right(cross) } else { Layout::right_to_left(cross) }
+}
+
+/// The layout of a panel or dialog body: items are placed against the start edge.
+pub fn page_layout() -> Layout {
+    if mirrored() { Layout::top_down(Align::Max) } else { Layout::top_down(Align::Min) }
+}
+
+/// The start alignment of text and of a text field.
+pub fn text_align() -> Align {
+    if mirrored() { Align::Max } else { Align::Min }
+}
+
+/// Run `add_contents` with the [`page_layout`] (a panel or page body: items against the start
+/// edge). In a left-to-right language the content runs in `ui` as it is, with no extra scope.
+///
+/// Never around anything that may hold an `egui::Grid`, and never around a window whose width is
+/// not set yet: both measure infinite when aligned to the right edge.
+pub fn page<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    if mirrored() { ui.with_layout(page_layout(), add_contents).inner } else { add_contents(ui) }
+}
+
+/// `ui.vertical`, with its items against the start edge.
+pub fn vertical<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let width = ui.available_size_before_wrap().x;
+    if mirrored() && width.is_finite() {
+        ui.allocate_ui_with_layout(vec2(width, 0.0), page_layout(), add_contents)
+    } else {
+        ui.vertical(add_contents)
+    }
+}
+
+/// `ui.horizontal`, with the first item at the start edge.
+///
+/// Where the row has no width to sit against (a scroll area that scrolls sideways, a window that
+/// fits its contents) it is an ordinary left-to-right row: an end against infinity has no place.
+pub fn horizontal<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let width = ui.available_size_before_wrap().x;
+    if mirrored() && width.is_finite() {
+        // `Ui::horizontal` only follows the parent's direction; this does not depend on it.
+        ui.allocate_ui_with_layout(vec2(width, ui.spacing().interact_size.y), start_layout(Align::Center), add_contents)
+    } else {
+        ui.horizontal(add_contents)
+    }
+}
+
+/// `ui.horizontal_centered`, with the first item at the start edge (and, like [`horizontal`],
+/// an ordinary row where the width is unbounded).
+pub fn horizontal_centered<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    let size = ui.available_size_before_wrap();
+    if mirrored() && size.is_finite() {
+        ui.allocate_ui_with_layout(size, start_layout(Align::Center), add_contents)
+    } else {
+        ui.horizontal_centered(add_contents)
+    }
+}
+
+/// A cluster pushed to the end edge of the row (the replacement for
+/// `with_layout(Layout::right_to_left(Align::Center), ..)`).
+pub fn end<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
+    ui.with_layout(end_layout(Align::Center), add_contents)
+}
+
+/// The panel at the `side` of the window: Start is the left in English and the right in Arabic.
+pub fn panel(id: impl Into<egui::Id>, side: Side) -> egui::Panel {
+    match (side, mirrored()) {
+        (Side::Start, false) | (Side::End, true) => egui::Panel::left(id),
+        (Side::Start, true) | (Side::End, false) => egui::Panel::right(id),
+    }
+}
+
+/// The x of a thing `off` from the start edge of `rect`.
+pub fn start(rect: Rect, off: f32) -> f32 {
+    if mirrored() { rect.right() - off } else { rect.left() + off }
+}
+
+/// The left edge of a block `width` wide that starts at `start_x` (a point on the start edge,
+/// from [`start`]): `start_x` itself in English, `width` further left when mirrored.
+pub fn block_left(start_x: f32, width: f32) -> f32 {
+    if mirrored() { start_x - width } else { start_x }
+}
+
+/// The x of a thing `off` from the end edge of `rect`.
+pub fn end_x(rect: Rect, off: f32) -> f32 {
+    if mirrored() { rect.left() + off } else { rect.right() - off }
+}
+
+/// The point `off` from the start edge, level with the middle of `rect`.
+pub fn start_center(rect: Rect, off: f32) -> Pos2 {
+    pos2(start(rect, off), rect.center().y)
+}
+
+/// The point `off` from the end edge, level with the middle of `rect`.
+pub fn end_center(rect: Rect, off: f32) -> Pos2 {
+    pos2(end_x(rect, off), rect.center().y)
+}
+
+/// A box of `size` whose start edge is `off` in from the start edge of `rect` and whose top is
+/// `top` below the top of `rect` (an icon at the start of a row).
+pub fn start_rect(rect: Rect, off: f32, top: f32, size: Vec2) -> Rect {
+    let x = if mirrored() { rect.right() - off - size.x } else { rect.left() + off };
+    Rect::from_min_size(pos2(x, rect.top() + top), size)
+}
+
+/// `align` flipped horizontally when mirrored: the anchor of text painted at a start or end
+/// position (`LEFT_CENTER` becomes `RIGHT_CENTER`).
+pub fn flip(align: Align2) -> Align2 {
+    if !mirrored() {
+        return align;
+    }
+    Align2([
+        match align.x() {
+            Align::Min => Align::Max,
+            Align::Center => Align::Center,
+            Align::Max => Align::Min,
+        },
+        align.y(),
+    ])
+}
+
+/// A margin with `start` against the start edge and `end` against the end edge.
+pub fn margin(start: i8, end: i8, top: i8, bottom: i8) -> Margin {
+    if mirrored() { Margin { left: end, right: start, top, bottom } } else { Margin { left: start, right: end, top, bottom } }
+}
+
+/// Where a popup opens relative to a start-side button: below it, reaching away from its edge.
+pub fn menu_align() -> egui::RectAlign {
+    if mirrored() { egui::RectAlign::BOTTOM_END } else { egui::RectAlign::BOTTOM_START }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{Lang, set_current};
+
+    /// Draws in Arabic for the test's lifetime (the language is per thread), then restores it.
+    struct Arabic;
+    impl Arabic {
+        fn on() -> Self {
+            set_current(Lang::from_code("ar").expect("ar registered"));
+            Self
+        }
+    }
+    impl Drop for Arabic {
+        fn drop(&mut self) {
+            set_current(Lang::EN);
+        }
+    }
+
+    const ROW: Rect = Rect { min: pos2(100.0, 40.0), max: pos2(400.0, 74.0) };
+
+    #[test]
+    fn english_is_the_identity() {
+        assert!(!mirrored());
+        assert_eq!(start_layout(Align::Center), Layout::left_to_right(Align::Center));
+        assert_eq!(end_layout(Align::Center), Layout::right_to_left(Align::Center));
+        assert_eq!(page_layout(), Layout::top_down(Align::Min));
+        assert_eq!(text_align(), Align::Min);
+        assert_eq!(block_left(106.0, 50.0), 106.0);
+        assert_eq!(start(ROW, 6.0), 106.0);
+        assert_eq!(end_x(ROW, 6.0), 394.0);
+        assert_eq!(start_center(ROW, 6.0), pos2(106.0, 57.0));
+        assert_eq!(end_center(ROW, 10.0), pos2(390.0, 57.0));
+        assert_eq!(start_rect(ROW, 6.0, 7.0, vec2(20.0, 20.0)), Rect::from_min_size(pos2(106.0, 47.0), vec2(20.0, 20.0)));
+        assert_eq!(flip(Align2::LEFT_CENTER), Align2::LEFT_CENTER);
+        assert_eq!(flip(Align2::RIGHT_TOP), Align2::RIGHT_TOP);
+        assert_eq!(margin(14, 10, 12, 8), Margin { left: 14, right: 10, top: 12, bottom: 8 });
+        assert_eq!(menu_align(), egui::RectAlign::BOTTOM_START);
+    }
+
+    #[test]
+    fn arabic_mirrors_positions() {
+        let _arabic = Arabic::on();
+        assert!(mirrored());
+        assert_eq!(start_layout(Align::Center), Layout::right_to_left(Align::Center));
+        assert_eq!(end_layout(Align::Center), Layout::left_to_right(Align::Center));
+        assert_eq!(page_layout(), Layout::top_down(Align::Max));
+        assert_eq!(text_align(), Align::Max);
+        assert_eq!(block_left(394.0, 50.0), 344.0);
+        assert_eq!(start(ROW, 6.0), 394.0);
+        assert_eq!(end_x(ROW, 6.0), 106.0);
+        assert_eq!(start_center(ROW, 6.0), pos2(394.0, 57.0));
+        assert_eq!(end_center(ROW, 10.0), pos2(110.0, 57.0));
+        assert_eq!(start_rect(ROW, 6.0, 7.0, vec2(20.0, 20.0)), Rect::from_min_size(pos2(374.0, 47.0), vec2(20.0, 20.0)));
+        assert_eq!(flip(Align2::LEFT_CENTER), Align2::RIGHT_CENTER);
+        assert_eq!(flip(Align2::RIGHT_TOP), Align2::LEFT_TOP);
+        assert_eq!(flip(Align2::CENTER_CENTER), Align2::CENTER_CENTER);
+        assert_eq!(margin(14, 10, 12, 8), Margin { left: 10, right: 14, top: 12, bottom: 8 });
+        assert_eq!(menu_align(), egui::RectAlign::BOTTOM_END);
+    }
+
+    #[test]
+    fn a_start_box_and_an_end_point_stay_inside_the_row_on_opposite_sides() {
+        for arabic in [false, true] {
+            let _guard = arabic.then(Arabic::on);
+            let a = start_rect(ROW, 6.0, 7.0, vec2(20.0, 20.0));
+            let b = end_center(ROW, 10.0);
+            assert!(ROW.contains_rect(a) && ROW.contains(b));
+            assert_eq!(a.center().x < b.x, !arabic, "the start box is left of the end point only in English");
+        }
+    }
+
+    #[test]
+    fn panels_swap_sides() {
+        // The panel's side is not readable back, so check it through a laid-out frame.
+        fn left_edge(arabic: bool) -> bool {
+            let _guard = arabic.then(Arabic::on);
+            let ctx = egui::Context::default();
+            let mut at_left = false;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let shown = panel("probe", Side::Start).exact_size(50.0).show(ui, |_| {});
+                at_left = shown.response.rect.center().x < ui.max_rect().center().x;
+            });
+            out.textures_delta.clear();
+            at_left
+        }
+        assert!(left_edge(false), "the start panel is on the left in English");
+        assert!(!left_edge(true), "and on the right in Arabic");
+    }
+
+    #[test]
+    fn a_row_with_no_width_to_sit_against_stays_finite() {
+        let _arabic = Arabic::on();
+        let ctx = egui::Context::default();
+        let mut rects = Vec::new();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                // A region as wide as the world, as a window that fits its contents offers.
+                let world = Rect::from_min_size(pos2(0.0, 0.0), vec2(f32::INFINITY, 400.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(world), |ui| {
+                    rects.push(horizontal(ui, |ui| ui.label("a")).response.rect);
+                    rects.push(horizontal_centered(ui, |ui| ui.label("b")).response.rect);
+                    rects.push(vertical(ui, |ui| ui.label("c")).response.rect);
+                });
+            });
+        });
+        out.textures_delta.clear();
+        assert_eq!(rects.len(), 3);
+        for rect in rects {
+            assert!(rect.min.is_finite() && rect.max.is_finite(), "{rect:?}");
+        }
+    }
+
+    #[test]
+    fn horizontal_puts_the_first_item_at_the_start() {
+        for arabic in [false, true] {
+            let _guard = arabic.then(Arabic::on);
+            let ctx = egui::Context::default();
+            let mut xs = (0.0, 0.0);
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    horizontal(ui, |ui| {
+                        let a = ui.allocate_space(vec2(20.0, 20.0)).1.center().x;
+                        let b = ui.allocate_space(vec2(20.0, 20.0)).1.center().x;
+                        xs = (a, b);
+                    });
+                });
+            });
+            out.textures_delta.clear();
+            assert_eq!(xs.0 < xs.1, !arabic, "first item left of the second only in English: {xs:?}");
+        }
+    }
+}

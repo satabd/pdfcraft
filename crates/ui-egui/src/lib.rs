@@ -117,6 +117,7 @@ mod web_print;
 mod word_count_ui;
 pub use print_ui::{Handling as PrintHandling, PrintDraft, PrinterSource, Which as PrintWhich, system_printers};
 mod redact_ui;
+mod rtl;
 pub use redact_ui::{HiddenDraft, PagesDraft as RedactPagesDraft, RedactPrefs, SearchDraft as RedactSearchDraft, SearchMode as RedactSearchMode};
 pub mod i18n;
 
@@ -495,6 +496,9 @@ pub struct RecentFile {
 
 pub struct PdfCraftApp {
     pub docking: docking::Workspace,
+    /// Whether `docking`'s stock arrangement was last laid out for a right-to-left language, so
+    /// a language switch mirrors it once (and only if the user has not rearranged it).
+    pub(crate) layout_rtl: bool,
     pub(crate) pending_panel_reveals: Vec<docking::Panel>,
     pub session: Session,
     pub views: Vec<DocView>,
@@ -912,6 +916,7 @@ impl PdfCraftApp {
             mode_override: None,
             left: LeftPanel::AllTools,
             docking: docking::Workspace::default(),
+            layout_rtl: false,
             pending_panel_reveals: Vec::new(),
             left_open: true,
             right: None,
@@ -2317,6 +2322,7 @@ impl PdfCraftApp {
         });
         // Set apart: one more key inside the macro above passes serde_json's recursion limit.
         v["redact_prefs"] = self.redact_defaults.to_json();
+        v["layout_rtl"] = serde_json::Value::Bool(self.layout_rtl);
         // Set outside json! above, which is at serde_json's macro recursion limit.
         v["hide_empty_highlight_hover"] = serde_json::Value::Bool(self.comment_prefs.hide_empty_highlight_hover);
         v.to_string()
@@ -2330,6 +2336,7 @@ impl PdfCraftApp {
             && workspace.validate().is_ok()
         {
             self.docking = workspace;
+            self.layout_rtl = v.get("layout_rtl").and_then(serde_json::Value::as_bool).unwrap_or(false);
             self.left_open =
                 v.get("docking_left_open").and_then(serde_json::Value::as_bool).unwrap_or(self.docking.layout.contains(&docking::Panel::Tools));
             self.right = v.get("docking_right").and_then(|value| serde_json::from_value(value.clone()).ok()).flatten();
@@ -3130,6 +3137,12 @@ impl eframe::App for PdfCraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         i18n::set_current(i18n::Lang::from_pref(&self.language));
+        // A language switch mirrors the stock panel arrangement once; a layout the user changed
+        // is theirs.
+        if rtl::mirrored() != self.layout_rtl {
+            self.docking.mirror_standard_shape(rtl::mirrored());
+            self.layout_rtl = rtl::mirrored();
+        }
         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
         if !self.fonts_ready {
             ctx.request_repaint();
@@ -3181,12 +3194,12 @@ impl eframe::App for PdfCraftApp {
             // there, so its buttons (Bookmarks, Page thumbnails, ...) must open their panels.
             // Outside Read mode the docking workspace draws the inspector.
             if self.mode == Mode::Read && self.right.is_some() {
-                egui::Panel::right("read_right_panel")
+                rtl::panel("read_right_panel", rtl::Side::End)
                     .resizable(true)
                     .default_size(330.0)
                     .size_range(260.0..=520.0)
                     .frame(egui::Frame::NONE)
-                    .show(ui, |ui| panels::right_panel(self, ui));
+                    .show(ui, |ui| panels::right_panel_page(self, ui));
             }
         }
         let t = theme::Tokens::get(&ctx);
@@ -3194,7 +3207,7 @@ impl eframe::App for PdfCraftApp {
             if self.mode == Mode::Read {
                 match self.active {
                     None if self.combine_showing() => combine_ui::page(self, ui),
-                    None => home::show(self, ui),
+                    None => rtl::page(ui, |ui| home::show(self, ui)),
                     Some(index) => match compare_ui::side_by_side(self, index) {
                         Some((old, new)) => compare_ui::compare_area(self, old, new, ui),
                         None => canvas::document_area(self, index, ui),
