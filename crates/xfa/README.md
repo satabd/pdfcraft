@@ -30,7 +30,14 @@ the automation tools) works on it unchanged. The engine does this when it opens 
   XObjects, and widgets: text (multi-line, max length, alignment), date (Acrobat's `AFDate`
   format and keystroke actions from the picture clause), check boxes and radio groups (from
   `exclGroup`), push buttons with Reset / Print / Save As / URI actions recognised from their
-  scripts. Appearance streams are left empty for the forms layer to generate. Each field keeps
+  scripts. Appearance streams are left empty for the forms layer to generate. Arabic in the
+  form's own text (draws, captions, read-only values) is laid out on its shaped width and drawn
+  from generated Type 3 fonts (`pdfcraft_fonts::shaped_text`), one `/ActualText` span per line so
+  search and copy read it in typing order, and a paragraph that runs right to left (its first
+  strong character) is right-aligned unless the template states `hAlign` (`Para::h_explicit`;
+  a stated alignment, left included, is written as the field's `/Q` too). The Latin pieces keep
+  the standard font. Without the Arabic face, or with a letter it lacks, the text is shown as `?`
+  and reported once, as before. Hebrew and Thai in a form's text still show `?`. Each field keeps
   its SOM path in `/PCSom`; the AcroForm gets `/PCXfaLayout` so a saved form is not laid out
   twice. The XFA packets stay, so Adobe's viewers keep rendering the form from them.
 

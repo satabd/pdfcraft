@@ -2,7 +2,13 @@
 //! template's typefaces (no font programs are embedded in dynamic XFA forms, and none are
 //! bundled here).
 
+use pdfcraft_fonts::shaped_text::{self, Measure};
+
 use crate::model::{Font, HAlign, Para, Rect, RichText, Run};
+
+/// Most characters of one piece of text measured by shaping it; a longer piece is estimated at
+/// half an em a character, which keeps a hostile text from costing more than it is worth.
+const MAX_SHAPED_CHARS: usize = 4000;
 
 /// The standard-14 family a typeface maps to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -104,8 +110,27 @@ impl Face {
         self.family.resource_name(self.bold, self.italic)
     }
 
-    /// Advance of `s` at this face's size.
+    /// Advance of `s` at this face's size: Arabic is measured as it is drawn (shaped, in the
+    /// direction its first strong letter gives), everything else in the standard font.
     pub fn width(&self, s: &str) -> f64 {
+        self.width_in(s, shaped_text::has_arabic(s) && shaped_text::first_strong_is_rtl(s))
+    }
+
+    /// [`Self::width`] for text in a paragraph that runs `rtl` or not.
+    pub fn width_in(&self, s: &str, rtl: bool) -> f64 {
+        if !shaped_text::has_arabic(s) {
+            return self.latin_width(s);
+        }
+        if s.chars().take(MAX_SHAPED_CHARS + 1).count() > MAX_SHAPED_CHARS {
+            return s.chars().count() as f64 * 0.5 * self.size;
+        }
+        let latin = |t: &str| self.latin_width(t);
+        let w = Measure::new(rtl, self.size, &latin).line(s);
+        if w.is_finite() { w } else { 0.0 }
+    }
+
+    /// Advance of `s` in the standard font that stands in for the face.
+    fn latin_width(&self, s: &str) -> f64 {
         match self.family {
             Family::Courier => s.chars().count() as f64 * 0.6 * self.size,
             Family::Helvetica => pdfcraft_fonts::helvetica_width(s, self.size) * if self.bold { 1.04 } else { 1.0 },
@@ -122,11 +147,15 @@ pub fn line_height(size: f64) -> f64 {
 /// One positioned piece of text, ready to emit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {
+    /// The left end of the line as drawn.
     pub x: f64,
     /// Baseline, top-left based (y grows downwards).
     pub baseline: f64,
+    /// In typing order.
     pub text: String,
     pub face: Face,
+    /// Whether its paragraph runs right to left (the order Arabic and Latin pieces are drawn in).
+    pub rtl: bool,
 }
 
 /// A laid-out block of text.
@@ -144,36 +173,47 @@ struct Word {
     width: f64,
 }
 
-/// Break the runs of a paragraph into words (spaces stay attached to the word before them).
-fn words(runs: &[Run], base: &Face, embed: &dyn Fn(&str) -> String) -> Vec<Word> {
+/// The text of each run of a paragraph, as it is set: embedded fields resolved, spaces and
+/// invisible characters normalised.
+fn run_texts(runs: &[Run], base: &Face, embed: &dyn Fn(&str) -> String) -> Vec<(Face, String)> {
+    runs.iter()
+        .map(|run| {
+            let face = base.with_run(run);
+            let text: String = match &run.embed {
+                Some(id) => embed(id),
+                None => run
+                    .text
+                    .chars()
+                    .filter_map(|c| match c {
+                        '\r' | '\n' | '\t' | '\u{2028}' | '\u{2029}' | '\u{2009}' | '\u{202F}' | '\u{3000}' => Some(' '),
+                        '\u{00AD}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' => None,
+                        '\u{2011}' | '\u{2010}' | '\u{2012}' | '\u{2013}' => Some('-'),
+                        '\u{2018}' | '\u{2019}' => Some('\''),
+                        _ => Some(c),
+                    })
+                    .collect(),
+            };
+            (face, text)
+        })
+        .collect()
+}
+
+/// Break the runs of a paragraph into words (spaces stay attached to the word before them), set
+/// in a paragraph that runs `rtl` or not.
+fn words(parts: &[(Face, String)], rtl: bool) -> Vec<Word> {
     let mut out = Vec::new();
-    for run in runs {
-        let face = base.with_run(run);
-        let text: String = match &run.embed {
-            Some(id) => embed(id),
-            None => run
-                .text
-                .chars()
-                .filter_map(|c| match c {
-                    '\r' | '\n' | '\t' | '\u{2028}' | '\u{2029}' | '\u{2009}' | '\u{202F}' | '\u{3000}' => Some(' '),
-                    '\u{00AD}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' => None,
-                    '\u{2011}' | '\u{2010}' | '\u{2012}' | '\u{2013}' => Some('-'),
-                    '\u{2018}' | '\u{2019}' => Some('\''),
-                    _ => Some(c),
-                })
-                .collect(),
-        };
+    for (face, text) in parts {
         let mut cur = String::new();
         for ch in text.chars() {
             cur.push(ch);
             if ch == ' ' {
-                let width = face.width(&cur);
+                let width = face.width_in(&cur, rtl);
                 out.push(Word { text: std::mem::take(&mut cur), face: face.clone(), width });
             }
         }
         if !cur.is_empty() {
-            let width = face.width(&cur);
-            out.push(Word { text: cur, face, width });
+            let width = face.width_in(&cur, rtl);
+            out.push(Word { text: cur, face: face.clone(), width });
         }
     }
     out
@@ -187,39 +227,60 @@ pub fn layout(rich: &RichText, rect: Rect, para: &Para, base: &Face, embed: &dyn
         width: f64,
         size: f64,
         first: bool,
+        /// Whether its paragraph runs right to left.
+        rtl: bool,
+        /// Whether the paragraph states its alignment (`hAlign`, or `text-align` in rich text).
+        stated: bool,
     }
     let avail = (rect.w - para.margin_left - para.margin_right).max(1.0);
     let mut lines: Vec<(Line, Option<HAlign>)> = Vec::new();
     let mut total = 0.0;
     for (pi, p) in rich.paragraphs.iter().enumerate() {
-        let ws = words(&p.runs, base, embed);
-        let mut line = Line { words: Vec::new(), width: 0.0, size: base.size, first: true };
+        let parts = run_texts(&p.runs, base, embed);
+        // The paragraph's direction: its first strong character (UAX #9).
+        let rtl = parts.iter().any(|(_, t)| shaped_text::has_arabic(t))
+            && shaped_text::first_strong_is_rtl(&parts.iter().map(|(_, t)| t.as_str()).collect::<String>());
+        let stated = p.h_align.is_some() || para.h_explicit;
+        let fresh = |first: bool| Line { words: Vec::new(), width: 0.0, size: base.size, first, rtl, stated };
+        let ws = words(&parts, rtl);
+        let mut line = fresh(true);
         let mut first_in_para = true;
         let indent = |first: bool| if first { para.text_indent.max(0.0) } else { 0.0 };
         for w in ws {
             let fits = line.width + w.width <= avail - indent(line.first) || line.words.is_empty() && w.width <= avail - indent(line.first);
             if !fits && !line.words.is_empty() {
-                let done = std::mem::replace(&mut line, Line { words: Vec::new(), width: 0.0, size: base.size, first: false });
+                let done = std::mem::replace(&mut line, fresh(false));
                 lines.push((done, p.h_align));
             }
             if w.width > avail - indent(line.first) && line.words.is_empty() {
                 // A word longer than a line: break it by character.
+                let shaped = shaped_text::has_arabic(&w.text);
                 let mut piece = String::new();
+                let mut piece_width = 0.0;
                 for ch in w.text.chars() {
                     piece.push(ch);
-                    if w.face.width(&piece) > avail - indent(line.first) && piece.chars().count() > 1 {
+                    // Shaped text is measured a character at a time (a long word would otherwise
+                    // be shaped again for every character); the standard fonts' widths add up.
+                    let fits_width = if shaped {
+                        piece_width += w.face.width_in(&ch.to_string(), rtl);
+                        piece_width
+                    } else {
+                        w.face.width(&piece)
+                    };
+                    if fits_width > avail - indent(line.first) && piece.chars().count() > 1 {
                         piece.pop();
-                        let width = w.face.width(&piece);
+                        let width = w.face.width_in(&piece, rtl);
                         line.words.push(Word { text: std::mem::take(&mut piece), face: w.face.clone(), width });
                         line.width += width;
                         line.size = line.size.max(w.face.size);
-                        let done = std::mem::replace(&mut line, Line { words: Vec::new(), width: 0.0, size: base.size, first: false });
+                        let done = std::mem::replace(&mut line, fresh(false));
                         lines.push((done, p.h_align));
                         piece.push(ch);
+                        piece_width = if shaped { w.face.width_in(&ch.to_string(), rtl) } else { 0.0 };
                     }
                 }
                 if !piece.is_empty() {
-                    let width = w.face.width(&piece);
+                    let width = w.face.width_in(&piece, rtl);
                     line.size = line.size.max(w.face.size);
                     line.width += width;
                     line.words.push(Word { text: piece, face: w.face.clone(), width });
@@ -249,32 +310,49 @@ pub fn layout(rich: &RichText, rect: Rect, para: &Para, base: &Face, embed: &dyn
     for ((line, align), lh) in lines.into_iter().zip(heights) {
         let indent = if line.first { para.text_indent.max(0.0) } else { 0.0 };
         // Trailing spaces don't count for alignment.
-        let trailing = line.words.last().map_or(0.0, |w| if w.text.ends_with(' ') { w.face.width(" ") } else { 0.0 });
+        let trailing = line.words.last().map_or(0.0, |w| if w.text.ends_with(' ') { w.face.width_in(" ", line.rtl) } else { 0.0 });
         let used = (line.width - trailing).max(0.0);
-        let mut x = rect.x + para.margin_left + indent;
-        x += match align.unwrap_or(para.h_align) {
+        // A paragraph that runs right to left starts at the right: it is right-aligned unless the
+        // template says otherwise, and "justify" starts at the right too.
+        let align = match align.unwrap_or(para.h_align) {
+            _ if line.rtl && !line.stated => HAlign::Right,
+            HAlign::Justify if line.rtl => HAlign::Right,
+            a => a,
+        };
+        // The indent is on the side the paragraph starts from.
+        let mut x = rect.x + para.margin_left + if line.rtl { 0.0 } else { indent };
+        x += match align {
             HAlign::Left | HAlign::Justify => 0.0,
             HAlign::Center => ((avail - indent - used) / 2.0).max(0.0),
             HAlign::Right => (avail - indent - used).max(0.0),
         };
         // Baseline: ascent sits about 0.8 of the size below the line top for these faces.
         let baseline = y + lh - (lh - line.size * 0.8).max(0.0) / 2.0 - line.size * 0.08;
-        let mut run: Option<Span> = None;
+        // Runs of one face are one span. In a paragraph that runs right to left the first run is
+        // at the right, so the runs are placed from the line's right end.
+        let mut runs: Vec<Span> = Vec::new();
         for w in line.words {
-            match &mut run {
+            match runs.last_mut() {
                 Some(s) if s.face == w.face => s.text.push_str(&w.text),
-                _ => {
-                    if let Some(s) = run.take() {
-                        x += s.face.width(&s.text);
-                        spans.push(s);
-                    }
-                    run = Some(Span { x, baseline, text: w.text, face: w.face });
-                }
+                _ => runs.push(Span { x, baseline, text: w.text, face: w.face, rtl: line.rtl }),
             }
         }
-        if let Some(s) = run.take() {
-            spans.push(s);
+        if line.rtl {
+            // The ink ends at the alignment edge; a trailing space hangs out past the left end.
+            let right = x + used;
+            let mut consumed = 0.0;
+            for s in &mut runs {
+                consumed += s.face.width_in(&s.text, true);
+                s.x = right - consumed;
+            }
+        } else {
+            let mut pen = x;
+            for s in &mut runs {
+                s.x = pen;
+                pen += s.face.width_in(&s.text, false);
+            }
         }
+        spans.extend(runs);
         y += lh;
     }
     Block { spans, height: total }

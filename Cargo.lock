@@ -4146,6 +4146,7 @@ name = "pdfcraft-export"
 version = "0.11.0"
 dependencies = [
  "flate2",
+ "pdfcraft-fonts",
 ]
 
 [[package]]

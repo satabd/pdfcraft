@@ -5795,6 +5795,203 @@ fn xfa_forms_flatten_and_convert_to_static_through_tools() {
     assert!(text.to_string().contains("Japan"), "{text}");
 }
 
+// ---- Arabic in a dynamic XFA form and in the Office exports ----
+
+/// A one-page dynamic XFA form: an Arabic draw, a Latin draw, a draw that states its alignment, and
+/// a text field whose data holds Arabic.
+fn arabic_xfa_form(title: &str) -> Vec<u8> {
+    let xdp = format!(
+        r##"<?xml version="1.0" encoding="UTF-8"?>
+<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
+<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">
+<subform name="form" layout="tb">
+ <pageSet><pageArea name="front"><contentArea x="0.5in" y="0.5in" w="7.5in" h="10in"/><medium short="8.5in" long="11in"/></pageArea></pageSet>
+ <draw name="title" w="4in" h="0.4in"><value><text>{title}</text></value><font typeface="Arial" size="16pt"/></draw>
+ <draw name="plain" w="4in" h="0.3in"><value><text>Applicant 123</text></value><font typeface="Arial" size="12pt"/></draw>
+ <draw name="left" w="4in" h="0.3in"><value><text>سلام عليكم</text></value><font typeface="Arial" size="12pt"/><para hAlign="left"/></draw>
+ <field name="who" w="3in" h="0.3in"><ui><textEdit/></ui></field>
+</subform>
+</template>
+<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data><form><who>أهلا وسهلا</who></form></xfa:data></xfa:datasets>
+</xdp:xdp>
+"##
+    );
+    pdfcraft_xfa::fixtures::shell(&xdp)
+}
+
+fn matches_of(a: &mut Automation, doc: u64, query: &str) -> usize {
+    ok(a, "text_find", json!({ "doc": doc, "query": query }))["matches"].as_array().unwrap().len()
+}
+
+/// A dynamic XFA form's Arabic text is drawn shaped, found by search, and kept when the form is
+/// converted to a static one, flattened, saved and reopened.
+#[test]
+fn xfa_arabic_text_is_drawn_through_flatten_and_static_conversion_save_and_reopen() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic XFA text");
+        return;
+    }
+    let dir = workdir("xfa-arabic");
+    std::fs::write(dir.join("arabic.pdf"), arabic_xfa_form("مرحبا بالعالم")).unwrap();
+    std::fs::write(dir.join("latin.pdf"), arabic_xfa_form("Hello world")).unwrap();
+    let mut a = auto(&dir);
+
+    // Opened (laid out from the template): the Arabic is on the page, searchable, and the page
+    // differs from the same form with a Latin title.
+    let doc = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    let info = ok(&mut a, "doc_info", json!({ "doc": doc }));
+    assert_eq!(info["xfa"], "dynamic");
+    let warnings = info["xfa_layout"]["warnings"].to_string();
+    assert!(!warnings.contains("standard fonts"), "{warnings}");
+    assert_eq!(matches_of(&mut a, doc, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, doc, "عليكم"), 1);
+    let arabic_render = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    let latin = ok(&mut a, "doc_open", json!({ "path": "latin.pdf" }))["doc"].as_u64().unwrap();
+    assert_ne!(a.call("page_render", &json!({ "doc": latin, "page": 1, "dpi": 72 })).unwrap(), arabic_render);
+    let text = page_text(&mut a, doc).join("\n");
+    assert!(text.contains("مرحبا بالعالم") && text.contains("Applicant 123"), "{text}");
+    assert!(!text.contains('?'), "{text}");
+
+    // Converted to a static form: the same page, the field with its Arabic value; saved and
+    // reopened it is unchanged.
+    ok(&mut a, "xfa_to_static", json!({ "doc": doc }));
+    assert!(ok(&mut a, "doc_info", json!({ "doc": doc }))["xfa"].is_null());
+    assert_eq!(matches_of(&mut a, doc, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, doc, "أهلا"), 1, "the field's value is drawn too");
+    let fields = ok(&mut a, "form_fields", json!({ "doc": doc }));
+    assert_eq!(fields["fields"][0]["value"], "أهلا وسهلا");
+    let static_render = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "static.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "static.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(matches_of(&mut a, re, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, re, "أهلا"), 1);
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), static_render);
+
+    // Flattened: plain page content, no fields and no XFA, the Arabic still searchable.
+    let flat = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_flatten", json!({ "doc": flat, "comments": false, "fields": true }));
+    assert!(ok(&mut a, "doc_info", json!({ "doc": flat }))["xfa"].is_null());
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": flat }))["fields"].as_array().unwrap().len(), 0);
+    assert_eq!(matches_of(&mut a, flat, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, flat, "أهلا"), 1);
+    let flat_render = a.call("page_render", &json!({ "doc": flat, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(flat_render, a.call("page_render", &json!({ "doc": latin, "page": 1, "dpi": 72 })).unwrap());
+    ok(&mut a, "doc_save", json!({ "doc": flat, "path": "flat.pdf" }));
+    let flat_re = ok(&mut a, "doc_open", json!({ "path": "flat.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(matches_of(&mut a, flat_re, "بالعالم"), 1);
+    assert_eq!(a.call("page_render", &json!({ "doc": flat_re, "page": 1, "dpi": 72 })).unwrap(), flat_render);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the Arabic face the form's Arabic is shown as `?` with a warning, as it always was; the
+/// form still opens and converts. (The face is taken away on this thread, so it runs in every build.)
+#[test]
+fn xfa_arabic_text_without_the_arabic_face_is_reported_and_shown_as_before() {
+    use pdfcraft_fonts::shaped_text::{Shaper, set_test_shaper};
+    struct NoFace;
+    impl Drop for NoFace {
+        fn drop(&mut self) {
+            set_test_shaper(None);
+        }
+    }
+    set_test_shaper(Some(Shaper {
+        shape: |_, _, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        has: |_, _| false,
+        outline: |_, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        arabic_available: || false,
+    }));
+    let _no_face = NoFace;
+    let dir = workdir("xfa-arabic-no-face");
+    std::fs::write(dir.join("arabic.pdf"), arabic_xfa_form("مرحبا بالعالم")).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    let info = ok(&mut a, "doc_info", json!({ "doc": doc }));
+    let warnings = info["xfa_layout"]["warnings"].to_string();
+    assert!(warnings.contains("standard fonts can't draw") && warnings.contains("Arabic"), "{warnings}");
+    assert_eq!(matches_of(&mut a, doc, "بالعالم"), 0);
+    assert!(page_text(&mut a, doc).join("\n").contains('?'));
+    ok(&mut a, "xfa_to_static", json!({ "doc": doc }));
+    assert!(ok(&mut a, "doc_info", json!({ "doc": doc }))["xfa"].is_null());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// One part of an Office package, inflated.
+fn package_part(zip: &[u8], name: &str) -> String {
+    let mut at = 0;
+    while zip[at..].starts_with(b"PK\x03\x04") {
+        let size = u32::from_le_bytes(zip[at + 18..at + 22].try_into().unwrap()) as usize;
+        let len = u16::from_le_bytes(zip[at + 26..at + 28].try_into().unwrap()) as usize;
+        let data = at + 30 + len;
+        if zip[at + 30..data] == *name.as_bytes() {
+            let mut xml = String::new();
+            std::io::Read::read_to_string(&mut flate2::read::DeflateDecoder::new(&zip[data..data + size]), &mut xml).unwrap();
+            return xml;
+        }
+        at = data + size;
+    }
+    panic!("{name} missing");
+}
+
+/// Export writes text as text (UTF-8 in Word, PowerPoint and HTML, `\u` escapes in RTF), so Arabic
+/// needs no font and is never refused or written as `?`; right-to-left paragraphs are marked as such.
+#[test]
+fn arabic_text_exports_to_every_office_format_as_right_to_left_paragraphs() {
+    use pdfcraft_cos::{Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
+    use std::sync::Arc;
+
+    let dir = workdir("export-arabic");
+    let logical = "مرحبا بالعالم 123";
+    let hex: String = logical.encode_utf16().map(|u| format!("{u:04X}")).collect();
+    // The page's glyph codes are Latin letters; ActualText says what they spell.
+    let content =
+        format!("/Span <</ActualText <FEFF{hex}>>> BDC BT /F1 14 Tf 20 150 Td (abcd) Tj (efgh) Tj ET EMC BT /F1 14 Tf 20 100 Td (Latin line) Tj ET");
+    let mut doc = Document::open(Arc::new(fixture(1))).unwrap();
+    doc.set(ObjRef::new(5, 0), Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    std::fs::write(dir.join("arabic.pdf"), write_full(&doc, &SaveOptions::default()).unwrap()).unwrap();
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "text_lines", json!({ "doc": id, "page": 1 }))["lines"][0]["text"], logical);
+    for ext in ["docx", "pptx", "html", "rtf"] {
+        let r = ok(&mut a, "doc_export_office", json!({ "doc": id, "path": format!("out.{ext}") }));
+        assert_eq!(r["format"], ext);
+    }
+    let zip = std::fs::read(dir.join("out.docx")).unwrap();
+    let word = package_part(&zip, "word/document.xml");
+    assert!(word.contains(">مرحبا بالعالم 123</w:t>") && word.contains("<w:bidi/>") && word.contains("<w:rtl/>"), "{word}");
+    assert!(word.contains(">Latin line</w:t>"), "{word}");
+    assert_eq!(word.matches("<w:bidi/>").count(), 1, "only the Arabic paragraph: {word}");
+    let slide = package_part(&std::fs::read(dir.join("out.pptx")).unwrap(), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>مرحبا بالعالم 123</a:t>") && slide.contains("algn=\"r\" rtl=\"1\""), "{slide}");
+    let html = std::fs::read_to_string(dir.join("out.html")).unwrap();
+    assert!(html.contains("dir=\"rtl\">مرحبا بالعالم 123<"), "{html}");
+    assert!(html.contains("<p>Latin line</p>"), "{html}");
+    let rtf = std::fs::read_to_string(dir.join("out.rtf")).unwrap();
+    assert!(rtf.contains("\\rtlpar\\qr") && rtf.contains("\\u1605?\\u1585?"), "{rtf}");
+    assert!(!rtf.contains("?\\u1585??"), "no stray question marks: {rtf}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Arabic typed into a page with the Arabic face exports the same way.
+#[test]
+fn arabic_added_with_the_arabic_face_exports_to_word_and_html() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise exporting added Arabic text");
+        return;
+    }
+    let dir = workdir("export-arabic-face");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let typed = "مرحبا بالعالم";
+    ok(&mut a, "text_edit", json!({ "doc": id, "page": 1, "paragraph": 1, "text": typed }));
+    ok(&mut a, "doc_export_office", json!({ "doc": id, "path": "out.docx" }));
+    ok(&mut a, "doc_export_office", json!({ "doc": id, "path": "out.html" }));
+    let word = package_part(&std::fs::read(dir.join("out.docx")).unwrap(), "word/document.xml");
+    assert!(word.contains(typed) && word.contains("<w:bidi/>"), "{word}");
+    let html = std::fs::read_to_string(dir.join("out.html")).unwrap();
+    assert!(html.contains(&format!("dir=\"rtl\">{typed}<")), "{html}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn xfa_data_files_export_and_import_through_tools() {
     let dir = workdir("xfa-data");

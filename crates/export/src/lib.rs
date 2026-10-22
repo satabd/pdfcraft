@@ -363,6 +363,18 @@ fn allowed(c: char) -> bool {
     matches!(c, '\t' | '\n' | '\r') || !(c.is_ascii_control() || c == '\u{FFFE}' || c == '\u{FFFF}')
 }
 
+/// ` dir="rtl"` for an HTML element holding right-to-left `text`, else nothing.
+fn html_dir(text: &str) -> &'static str {
+    if is_rtl(text) { " dir=\"rtl\"" } else { "" }
+}
+
+/// Whether the paragraph `text` runs right to left (Arabic, Hebrew): its first strong character,
+/// ignoring digits and punctuation, is a right-to-left letter (UAX #9, rules P2 and P3).
+/// Text that merely contains such letters after Latin ones stays left to right.
+pub(crate) fn is_rtl(text: &str) -> bool {
+    pdfcraft_fonts::shaped_text::first_strong_is_rtl(text)
+}
+
 pub(crate) fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars().filter(|c| allowed(*c)) {
@@ -410,9 +422,10 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
                     t = format!("<strong>{t}</strong>");
                 }
                 let style = hex(b.color).map_or(String::new(), |h| format!(" style=\"color:#{h}\""));
+                let dir = html_dir(&b.text);
                 match lvl {
-                    0 => s.push_str(&format!("<p{style}>{t}</p>\n")),
-                    l => s.push_str(&format!("<h{l}{style}>{t}</h{l}>\n")),
+                    0 => s.push_str(&format!("<p{dir}{style}>{t}</p>\n")),
+                    l => s.push_str(&format!("<h{l}{dir}{style}>{t}</h{l}>\n")),
                 }
             }
             Item::Table(t) => {
@@ -429,7 +442,7 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
                         }
                         let span = if c.span > 1 { format!(" colspan=\"{}\"", c.span) } else { String::new() };
                         let style = hex(c.color).map_or(String::new(), |h| format!(" style=\"color:#{h}\""));
-                        s.push_str(&format!("<td{span}{style}>{body}</td>"));
+                        s.push_str(&format!("<td{span}{}{style}>{body}</td>", html_dir(&c.text)));
                     }
                     s.push_str("</tr>\n");
                 }
@@ -458,20 +471,33 @@ pub(crate) fn hex(c: [f64; 3]) -> Option<String> {
     (r | g | b != 0).then(|| format!("{r:02X}{g:02X}{b:02X}"))
 }
 
+/// `<w:pPr>` for a paragraph: its style (the element `style` holds) and, for right-to-left `text`,
+/// `<w:bidi/>`, which makes the paragraph start at the right.
+fn ppr_xml(style: &str, text: &str) -> String {
+    let bidi = if is_rtl(text) { "<w:bidi/>" } else { "" };
+    if style.is_empty() && bidi.is_empty() { String::new() } else { format!("<w:pPr>{style}{bidi}</w:pPr>") }
+}
+
 /// A formatted text run (shared by paragraphs and table cells).
 fn run_xml(text: &str, size: f64, bold: bool, italic: bool, color: [f64; 3]) -> String {
     let mut rpr = String::new();
+    // Right-to-left text is complex-script text: Word sizes and weighs it by the `Cs` properties
+    // (and gives it its right-to-left font), and flags the run `rtl`. Children keep the schema's order.
+    let rtl = is_rtl(text);
     if bold {
-        rpr.push_str("<w:b/>");
+        rpr.push_str(if rtl { "<w:b/><w:bCs/>" } else { "<w:b/>" });
     }
     if italic {
-        rpr.push_str("<w:i/>");
+        rpr.push_str(if rtl { "<w:i/><w:iCs/>" } else { "<w:i/>" });
     }
     if let Some(h) = hex(color) {
         rpr.push_str(&format!("<w:color w:val=\"{h}\"/>"));
     }
     let half_points = if size.is_finite() { (size * 2.0).round().clamp(2.0, 3276.0) as i64 } else { 24 };
     rpr.push_str(&format!("<w:sz w:val=\"{half_points}\"/>"));
+    if rtl {
+        rpr.push_str(&format!("<w:szCs w:val=\"{half_points}\"/><w:rtl/>"));
+    }
     format!("<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", esc(text))
 }
 
@@ -496,7 +522,8 @@ fn docx_table(t: &Table) -> String {
             let span = if c.span > 1 { format!("<w:gridSpan w:val=\"{}\"/>", c.span) } else { String::new() };
             let w: i64 = widths.iter().take(c.span.min(widths.len())).sum();
             s.push_str(&format!(
-                "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr><w:p>{}</w:p></w:tc>",
+                "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{span}</w:tcPr><w:p>{}{}</w:p></w:tc>",
+                ppr_xml("", &c.text),
                 run_xml(&c.text, c.size, c.bold, c.italic, c.color)
             ));
         }
@@ -612,8 +639,10 @@ fn positioned_page<'a>(page: &'a Page, media: &mut Vec<(String, &'a Image)>, sha
             "position:absolute;margin-left:{x:.3}pt;margin-top:{y:.3}pt;width:{w:.3}pt;height:{h:.3}pt;rotation:{rotation:.3};z-index:{z};mso-position-horizontal-relative:page;mso-position-vertical-relative:page"
         );
         s.push_str(&format!(
-            "<w:r><w:pict><v:rect id=\"Text{}\" style=\"{style}\" filled=\"f\" stroked=\"f\"><v:textbox inset=\"0,0,0,0\" style=\"mso-fit-shape-to-text:t\"><w:txbxContent><w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>{}</w:p></w:txbxContent></v:textbox><w10:wrap type=\"none\"/></v:rect></w:pict></w:r>",
-            shape_id, run_xml(&b.text, b.size, b.bold, b.italic, b.color)
+            "<w:r><w:pict><v:rect id=\"Text{}\" style=\"{style}\" filled=\"f\" stroked=\"f\"><v:textbox inset=\"0,0,0,0\" style=\"mso-fit-shape-to-text:t\"><w:txbxContent><w:p><w:pPr>{}<w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>{}</w:p></w:txbxContent></v:textbox><w10:wrap type=\"none\"/></v:rect></w:pict></w:r>",
+            shape_id,
+            if is_rtl(&b.text) { "<w:bidi/>" } else { "" },
+            run_xml(&b.text, b.size, b.bold, b.italic, b.color)
         ));
     }
     for im in &page.images {
@@ -682,11 +711,11 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
                 match &it {
                     Item::Para(b, lvl) => {
                         let style = match lvl {
-                            1 => "<w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>",
-                            2 => "<w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr>",
+                            1 => "<w:pStyle w:val=\"Heading1\"/>",
+                            2 => "<w:pStyle w:val=\"Heading2\"/>",
                             _ => "",
                         };
-                        body.push_str(&format!("<w:p>{style}{}</w:p>", run(b)));
+                        body.push_str(&format!("<w:p>{}{}</w:p>", ppr_xml(style, &b.text), run(b)));
                     }
                     Item::Table(t) => {
                         if after_table {
@@ -800,6 +829,25 @@ fn rtf_text(s: &str) -> String {
     o
 }
 
+/// The control words that set a paragraph's or cell's size and weight, after `lead`. Right-to-left
+/// `text` starts at the right (`\rtlpar\qr`) and takes its size and weight from the
+/// complex-script words (`\afs`, `\ab`, `\ai`) as well, which is what Word sizes Arabic and Hebrew by.
+fn rtf_format(lead: &str, text: &str, size: f64, bold: bool, italic: bool) -> String {
+    let rtl = is_rtl(text);
+    let half_points = (size * 2.0).round() as i64;
+    let mut fmt = format!("{lead}{}\\fs{half_points}", if rtl { "\\rtlpar\\qr" } else { "" });
+    if rtl {
+        fmt.push_str(&format!("\\afs{half_points}"));
+    }
+    if bold {
+        fmt.push_str(if rtl { "\\b\\ab" } else { "\\b" });
+    }
+    if italic {
+        fmt.push_str(if rtl { "\\i\\ai" } else { "\\i" });
+    }
+    fmt
+}
+
 /// Rich Text Format: paragraphs with their sizes and bold/italic, real table rows, page breaks
 /// between pages (images are left out).
 pub fn rtf(pages: &[Page]) -> String {
@@ -835,13 +883,7 @@ pub fn rtf(pages: &[Page]) -> String {
     for it in items {
         match it {
             Item::Para(b, _) => {
-                let mut fmt = format!("\\fs{}", (b.size * 2.0).round() as i64);
-                if b.bold {
-                    fmt.push_str("\\b");
-                }
-                if b.italic {
-                    fmt.push_str("\\i");
-                }
+                let mut fmt = rtf_format("", &b.text, b.size, b.bold, b.italic);
                 fmt.push_str(&cf(b.color));
                 s.push_str(&format!("{{\\pard{fmt} {}\\par}}\n", rtf_text(&b.text)));
             }
@@ -861,13 +903,7 @@ pub fn rtf(pages: &[Page]) -> String {
                         }
                     }
                     for c in row {
-                        let mut fmt = format!("\\intbl\\fs{}", (c.size * 2.0).round() as i64);
-                        if c.bold {
-                            fmt.push_str("\\b");
-                        }
-                        if c.italic {
-                            fmt.push_str("\\i");
-                        }
+                        let mut fmt = rtf_format("\\intbl", &c.text, c.size, c.bold, c.italic);
                         fmt.push_str(&cf(c.color));
                         s.push_str(&format!("{{{fmt} {}}}\\cell", rtf_text(&c.text)));
                     }
@@ -881,6 +917,9 @@ pub fn rtf(pages: &[Page]) -> String {
     s.push('}');
     s
 }
+
+#[cfg(test)]
+mod rtl_tests;
 
 #[cfg(test)]
 mod tests {
