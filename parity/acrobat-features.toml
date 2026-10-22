@@ -5973,7 +5973,7 @@ status = "shipped"
 commands = ["sign.digital"]
 tools = ["sign_document"]
 evidence = ["crates/ui-egui/tests/signing.rs::drawing_a_signature_creating_an_id_signing_and_trusting", "crates/automation/tests/automation.rs::digital_ids_signing_and_validation_through_tools"]
-notes = "drag a rectangle; Acrobat's name-and-details appearance"
+notes = "drag a rectangle; Acrobat's name-and-details appearance; Arabic names, reasons and locations are drawn shaped (see sign.signature-appearance)"
 
 [[feature]]
 id = "sign.sign-existing-field"
@@ -6008,8 +6008,8 @@ milestone = "M9"
 status = "partial"
 commands = ["sign.digital"]
 tools = ["sign_document"]
-evidence = ["crates/ui-egui/tests/signing.rs::drawing_a_signature_creating_an_id_signing_and_trusting", "crates/ui-egui/tests/signing.rs::the_fill_and_sign_signature_or_an_image_shows_in_a_digital_signature", "crates/sign/tests/pdf.rs::visible_signatures_show_a_drawn_typed_or_image_graphic", "crates/sign/tests/pdf.rs::malformed_signature_graphics_are_refused_not_drawn", "crates/sign/tests/pdf.rs::an_encrypted_documents_signature_graphic_is_encrypted_with_it", "crates/automation/tests/automation.rs::signing_with_an_image_typed_or_drawn_graphic_through_tools", "crates/sign/tests/pdf.rs::appearance_labels_helvetica_cannot_draw_are_refused", "crates/ui-egui/tests/signing.rs::the_signature_labels_follow_the_interface_language", "crates/automation/tests/automation.rs::signing_with_translated_labels_through_tools"]
-notes = "text items (name, date, reason, location, DN, labels), and a graphic where the large name would be: the saved Fill & Sign signature (drawn, typed or image) or an imported PNG/JPEG (white paper made transparent, as in Fill & Sign), remembered for the next signing; alone it fills the box. The labels are stamped in the interface language when Helvetica (WinAnsi) can draw all of them (German, Spanish, French, Italian, Portuguese, Polish, Turkish, Slovene, Hungarian), otherwise all in English with a note under the preview, which shows the same labels and the signing time; sign_document takes labels and the shown items (appearance), and a drawn label the font can't draw is refused, never written as ?. Missing: labels in non-Latin scripts (needs an embedded font), the DN line in the preview, named saved appearances (one remembered choice only), a PDF page as the graphic, the logo/watermark background, drawing a new signature inside the dialog"
+evidence = ["crates/ui-egui/tests/signing.rs::drawing_a_signature_creating_an_id_signing_and_trusting", "crates/ui-egui/tests/signing.rs::the_fill_and_sign_signature_or_an_image_shows_in_a_digital_signature", "crates/sign/tests/pdf.rs::visible_signatures_show_a_drawn_typed_or_image_graphic", "crates/sign/tests/pdf.rs::malformed_signature_graphics_are_refused_not_drawn", "crates/sign/tests/pdf.rs::an_encrypted_documents_signature_graphic_is_encrypted_with_it", "crates/automation/tests/automation.rs::signing_with_an_image_typed_or_drawn_graphic_through_tools", "crates/sign/tests/pdf.rs::appearance_labels_helvetica_cannot_draw_are_refused", "crates/ui-egui/tests/signing.rs::the_signature_labels_follow_the_interface_language", "crates/automation/tests/automation.rs::signing_with_translated_labels_through_tools", "crates/sign/src/shaped_tests.rs::an_arabic_name_and_reason_are_drawn_shaped_in_spans_and_right_aligned", "crates/sign/src/shaped_tests.rs::arabic_labels_make_every_line_right_to_left_and_right_aligned", "crates/sign/src/shaped_tests.rs::latin_appearances_are_byte_for_byte_what_they_were", "crates/sign/src/shaped_tests.rs::a_signature_with_an_arabic_appearance_validates_from_the_saved_file", "crates/automation/tests/automation.rs::arabic_visible_signatures_are_drawn_shaped_validate_and_survive_reopen_through_tools"]
+notes = "text items (name, date, reason, location, DN, labels), and a graphic where the large name would be: the saved Fill & Sign signature (drawn, typed or image) or an imported PNG/JPEG (white paper made transparent, as in Fill & Sign), remembered for the next signing; alone it fills the box. The labels are stamped in the interface language when Helvetica (WinAnsi) can draw all of them (German, Spanish, French, Italian, Portuguese, Polish, Turkish, Slovene, Hungarian), otherwise all in English with a note under the preview, which shows the same labels and the signing time; sign_document takes labels and the shown items (appearance), and a drawn label the font can't draw is refused, never written as ?. Arabic in the signer's name, reason, location or labels is drawn shaped with the craft-fonts face (joined forms, marks, Latin and digits in order, one /ActualText span per line, a right-to-left line right-aligned in its column, wrapped on shaped widths), and refused as before in a build without the face; the dialog still stamps English labels under the Arabic interface, whose catalog is in display order (pass Arabic labels through sign_document). Missing: labels in other non-Latin scripts (Chinese, Japanese, Cyrillic, Greek: needs an embedded font), a mirrored layout (the name stays in the left half) for right-to-left signatures, the DN line in the preview, named saved appearances (one remembered choice only), a PDF page as the graphic, the logo/watermark background, drawing a new signature inside the dialog"
 
 [[feature]]
 id = "sign.reason-location"
@@ -6020,8 +6020,8 @@ milestone = "M9"
 status = "shipped"
 commands = ["sign.digital"]
 tools = ["sign_document"]
-evidence = ["crates/sign/tests/pdf.rs::signing_then_validating_with_and_without_trust", "crates/automation/tests/automation.rs::digital_ids_signing_and_validation_through_tools"]
-notes = ""
+evidence = ["crates/sign/tests/pdf.rs::signing_then_validating_with_and_without_trust", "crates/automation/tests/automation.rs::digital_ids_signing_and_validation_through_tools", "crates/sign/src/shaped_tests.rs::an_arabic_name_and_reason_are_drawn_shaped_in_spans_and_right_aligned"]
+notes = "an Arabic reason or location is stored as typed and, when shown in a visible signature, drawn shaped (needs the craft-fonts Arabic face; refused without it)"
 
 [[feature]]
 id = "sign.lock-after-signing"

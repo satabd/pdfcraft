@@ -5002,6 +5002,112 @@ fn signing_with_translated_labels_through_tools() {
     assert!(stamped.contains("(Genehmigt)") && !stamped.contains("Reason") && !stamped.contains("Date"), "{stamped}");
 }
 
+/// A visible signature with an Arabic signer name, reason and labels is drawn shaped: the page
+/// looks different, the typed text is in the appearance, the signature validates and survives
+/// reopening.
+#[test]
+fn arabic_visible_signatures_are_drawn_shaped_validate_and_survive_reopen_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in visible signatures");
+        return;
+    }
+    let dir = workdir("signing-arabic");
+    let mut a = auto(&dir);
+    ok(&mut a, "sign_id_create", json!({ "name": "أحمد محمد", "key": "p256", "password": "secret12", "path": "ahmad.p12" }));
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let render = |a: &mut Automation, doc: u64| a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 96 })).unwrap();
+    let before = render(&mut a, doc);
+    let r = ok(
+        &mut a,
+        "sign_document",
+        json!({
+            "doc": doc, "id": "ahmad.p12", "password": "secret12", "page": 1, "rect": [20, 150, 280, 290],
+            "reason": "موافقة على العقد (نسخة 2)", "location": "Dubai", "out": "signed.pdf",
+            "appearance": { "reason": true, "location": true },
+            "labels": { "signed_by": "وقّعه رقمياً", "reason": "السبب: ", "location": "الموقع: ", "date": "التاريخ: " },
+        }),
+    );
+    assert_eq!((r["signature"]["signer"].as_str(), r["signature"]["reason"].as_str()), (Some("أحمد محمد"), Some("موافقة على العقد (نسخة 2)")));
+    let signed = render(&mut a, doc);
+    assert_ne!(signed, before, "the Arabic signature is drawn on the page");
+
+    // The appearance carries the typed text for copy and search, and no question marks.
+    let bytes = std::fs::read(dir.join("signed.pdf")).unwrap();
+    let (spans, question_marks) = {
+        use pdfcraft_cos::{Document, ObjRef, Object};
+        let reopened = Document::open(std::sync::Arc::new(bytes)).unwrap();
+        let mut spans = Vec::new();
+        let mut question_marks = false;
+        for num in reopened.object_numbers() {
+            if let Object::Stream(st) = &*reopened.get(ObjRef { num, generation: 0 })
+                && st.dict.name(b"Subtype") == Some(b"Form")
+            {
+                let content = String::from_utf8_lossy(&st.decoded().unwrap()).into_owned();
+                question_marks |= content.contains('?');
+                spans.extend(content.split("/ActualText <FEFF").skip(1).filter_map(|s| s.split('>').next().map(str::to_string)));
+            }
+        }
+        (spans, question_marks)
+    };
+    assert!(!question_marks);
+    let hex = |t: &str| t.encode_utf16().map(|u| format!("{u:04X}")).collect::<String>();
+    // (The reason is wrapped to the details' column: each line holds its part in typing order.)
+    for typed in ["أحمد محمد", "السبب: موافقة", "العقد (نسخة 2)"] {
+        assert!(spans.iter().any(|s| s.starts_with(&hex(typed))), "{typed}: {spans:?}");
+    }
+
+    // Trusting the signer makes it valid; the saved file reads back the same.
+    ok(&mut a, "sign_trust", json!({ "paths": ["ahmad.p12"], "password": "secret12" }));
+    let list = ok(&mut a, "sign_list", json!({ "doc": doc }));
+    assert_eq!((list["all_valid"].as_bool(), list["signatures"][0]["status"].as_str()), (Some(true), Some("valid")), "{list}");
+    let re = ok(&mut a, "doc_open", json!({ "path": "signed.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(render(&mut a, re), signed);
+    // Copy and search read the typed text, not the glyphs.
+    let text = words(&page_text(&mut a, re).join(" "));
+    for typed in ["أحمد محمد", "السبب: موافقة على العقد", "الموقع: Dubai"] {
+        assert!(text.contains(typed), "{typed}: {text}");
+    }
+    assert!(ok(&mut a, "text_find", json!({ "doc": re, "query": "أحمد محمد" }))["count"].as_u64().unwrap() >= 2);
+    let list = ok(&mut a, "sign_list", json!({ "doc": re }));
+    assert_eq!((list["all_valid"].as_bool(), list["signatures"][0]["signer"].as_str()), (Some(true), Some("أحمد محمد")), "{list}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the Arabic face a visible signature with Arabic is refused as it always was, naming
+/// the character and what to do, and nothing is written; an invisible one signs.
+#[test]
+fn arabic_visible_signatures_without_the_arabic_face_are_refused_and_write_nothing() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("signing-arabic-no-face");
+    let mut a = auto(&dir);
+    ok(&mut a, "sign_id_create", json!({ "name": "Ada Lovelace", "key": "p256", "password": "secret12", "path": "ada.p12" }));
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let sign = |a: &mut Automation, extra: Value, out: &str| {
+        let mut args = json!({ "doc": doc, "id": "ada.p12", "password": "secret12", "page": 1, "rect": [20, 150, 280, 290], "out": out });
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        a.call("sign_document", &args)
+    };
+    let shown = json!({ "reason": "موافقة", "appearance": { "reason": true } });
+    let e = sign(&mut a, shown, "bad.pdf").unwrap_err().to_string();
+    assert!(e.contains("U+0645") && e.contains("the reason") && e.contains("sign without a visible appearance"), "{e}");
+    // A label: refused by name before anything is written, as before.
+    let r = sign(&mut a, json!({ "labels": { "reason": "السبب: " } }), "bad.pdf");
+    assert!(matches!(&r, Err(ToolError::InvalidArgs(m)) if m.contains("labels.reason") && m.contains("U+0627")), "{r:?}");
+    assert!(!dir.join("bad.pdf").exists());
+    // An Arabic reason that the appearance leaves out signs.
+    ok(
+        &mut a,
+        "sign_document",
+        json!({ "doc": doc, "id": "ada.p12", "password": "secret12", "page": 1, "rect": [20, 150, 280, 290], "reason": "موافقة", "out": "ok.pdf" }),
+    );
+    assert!(dir.join("ok.pdf").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn optimizing_through_tools() {
     let dir = workdir("optimize");
