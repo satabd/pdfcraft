@@ -246,3 +246,95 @@ fn a_two_line_arabic_comment_typed_into_the_composer_is_stored_in_order_and_draw
     let margin = 10.0;
     assert!((most - (field.right() - margin)).abs() < 2.0, "the rows end at {most}, the field's text area at {}", field.right() - margin);
 }
+
+/// The painted galley whose text holds `c` and has the most rows (a field's, not a label's).
+fn galley_holding(h: &Harness<'static, PdfCraftApp>, c: char) -> (Pos2, std::sync::Arc<egui::Galley>) {
+    painted_galleys(h).into_iter().filter(|(_, g)| g.job.text.contains(c)).max_by_key(|(_, g)| g.rows.len()).expect("the field's text is painted")
+}
+
+/// The characters of `row` of `galley`, left to right as drawn.
+fn row_chars(galley: &egui::Galley, row: usize) -> String {
+    galley.rows.get(row).map(|placed| placed.glyphs.iter().map(|g| g.chr).collect()).unwrap_or_default()
+}
+
+/// "ali" (ain, lam, ya), a space and "abc": a line that starts right to left and ends in a Latin word.
+const ALI_ABC: &str = "\u{639}\u{644}\u{64A} abc";
+/// The same line as drawn: read from the right, so the Latin word is at the left end and the ain at the right.
+const ALI_ABC_DRAWN: &str = "abc \u{64A}\u{644}\u{639}";
+
+#[test]
+fn arabic_typed_into_the_fill_and_sign_text_box_is_stored_in_typing_order_and_drawn_from_the_right() {
+    let mut h = harness();
+    h.state_mut().execute("sign.fill.text");
+    h.run_steps(2);
+    let p = at(&h, 50.0, 80.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    h.drag_at(p);
+    h.run_steps(1);
+    h.drop_at(p);
+    h.run_steps(3);
+    assert!(h.state().views[0].fill_text.is_some(), "the type box opened");
+    for typed in ["\u{639}", "\u{644}", "\u{64A}", " ", "a", "b", "c"] {
+        h.event(Event::Text(typed.to_owned()));
+        h.run_steps(2);
+    }
+    assert_eq!(h.state().views[0].fill_text.as_ref().map(|t| t.text.as_str()), Some(ALI_ABC), "stored as typed");
+    let field = h.query_all_by_role(Role::TextInput).find(|n| n.is_focused()).expect("the type box has the focus");
+    assert_eq!(field.value().as_deref(), Some(ALI_ABC), "announced as typed");
+    // Drawn in display order: the line reads from the right, its Latin word at the left end.
+    let (_, galley) = galley_holding(&h, '\u{639}');
+    assert_eq!(row_chars(&galley, 0), ALI_ABC_DRAWN);
+    // The caret is after the "c", where the next Latin letter goes.
+    assert_eq!(cursor(&h), 3);
+    // Backspace takes the letter typed last.
+    h.key_press(Key::Backspace);
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].fill_text.as_ref().map(|t| t.text.as_str()), Some("\u{639}\u{644}\u{64A} ab"));
+    h.event(Event::Text("c".to_owned()));
+    h.run_steps(2);
+    // Placed on the page as typed.
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    let s = h.state();
+    let contents: Vec<Option<String>> =
+        s.session.get(s.views[0].id).expect("the document").info.annotations.iter().map(|a| a.contents.clone()).collect();
+    assert!(contents.iter().any(|c| c.as_deref() == Some(ALI_ABC)), "{contents:?}");
+}
+
+#[test]
+fn arabic_typed_into_the_search_and_redact_word_list_is_stored_in_typing_order_and_each_phrase_drawn_from_the_right() {
+    let mut h = harness();
+    h.state_mut().run_command("redact.search");
+    h.run_steps(3);
+    h.state_mut().redact_search.mode = pdfcraft_ui_egui::RedactSearchMode::Words;
+    h.run_steps(2);
+    let editor = || h.query_all_by(|n| n.placeholder() == Some("One word or phrase per line")).next().expect("the word list");
+    editor().click();
+    h.run_steps(2);
+    // Two phrases, one per line, a letter at a time.
+    let second = "\u{628}\u{628} 12";
+    for (i, line) in [ALI_ABC, second].into_iter().enumerate() {
+        if i > 0 {
+            h.key_press(Key::Enter);
+            h.run_steps(2);
+        }
+        for typed in line.chars() {
+            h.event(Event::Text(typed.to_string()));
+            h.run_steps(2);
+        }
+    }
+    let typed = format!("{ALI_ABC}\n{second}");
+    assert_eq!(h.state().redact_search.words, typed, "stored as typed");
+    let node = h.query_all_by(|n| n.role() == Role::MultilineTextInput).next().expect("the word list");
+    assert_eq!(node.value().as_deref(), Some(typed.as_str()), "announced as typed");
+    // Drawn in display order, a row for each phrase, each read from the right and set against the right edge.
+    let (pos, galley) = galley_holding(&h, '\u{628}');
+    assert_eq!(galley.rows.len(), 2, "{:?}", galley.job.text);
+    assert_eq!(row_chars(&galley, 0), ALI_ABC_DRAWN);
+    assert_eq!(row_chars(&galley, 1), "12 \u{628}\u{628}");
+    let rights: Vec<f32> = galley.rows.iter().map(|placed| pos.x + placed.pos.x + placed.row.size.x).collect();
+    assert!((rights[0] - rights[1]).abs() < 2.0, "both phrases end at the right edge: {rights:?}");
+    // The list the search uses is the stored text's.
+    assert_eq!(pdfcraft_engine::redact_word_list(&h.state().redact_search.words), [ALI_ABC, second]);
+}

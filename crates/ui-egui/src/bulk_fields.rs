@@ -303,7 +303,8 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
         widgets::form_grid_of(ui, "bulk-field-properties", [16.0, 10.0], None, 3, |ui| match d.tab {
             Tab::General => {
                 row(ui, "Tooltip:", &mut d.tooltip, |ui, v| {
-                    ui.add(egui::TextEdit::singleline(v).desired_width(280.0));
+                    let align = widgets::field_align(v);
+                    ui.add(widgets::BidiEdit::singleline(v).desired_width(280.0).horizontal_align(align));
                 });
                 bool_row(ui, "Read Only", &mut d.read_only);
                 bool_row(ui, "Required", &mut d.required);

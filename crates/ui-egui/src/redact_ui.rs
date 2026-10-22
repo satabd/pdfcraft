@@ -393,7 +393,15 @@ pub(crate) fn search_body(ui: &mut egui::Ui, d: &mut SearchDraft, t: &Tokens) ->
     let mut import = false;
     ui.add_enabled_ui(d.mode == SearchMode::Words, |ui| {
         egui::ScrollArea::vertical().id_salt("redact-words").max_height(120.0).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut d.words).hint_text(tl!("One word or phrase per line")).desired_width(380.0).desired_rows(4));
+            // One phrase per line, each read from its first strong letter (an Arabic phrase from the right).
+            let align = widgets::field_align(&d.words);
+            ui.add(
+                widgets::BidiEdit::multiline(&mut d.words)
+                    .hint_text(tl!("One word or phrase per line"))
+                    .desired_width(380.0)
+                    .desired_rows(4)
+                    .horizontal_align(align),
+            );
         });
         ui.horizontal(|ui| {
             import = ui.button(tl!("Import list…")).clicked();

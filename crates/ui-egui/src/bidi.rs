@@ -11,7 +11,9 @@
 //!
 //! [`screen_map`] keeps where every character of a [`visual`] line goes, which is what a text field
 //! needs to turn the caret and selection egui reports (in the order the glyphs are drawn) into
-//! places in the stored, logical text (`widgets::BidiEdit`).
+//! places in the stored, logical text (`widgets::BidiEdit`). A field's line reads in the direction
+//! of its first strong character ([`line_rtl`], [`line_screen_map`]), as a paragraph of a
+//! multi-line field does ([`wrapped_screen_map`]).
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -135,11 +137,39 @@ pub struct ScreenMap {
 pub const VIRTUAL: usize = usize::MAX;
 
 /// The [`ScreenMap`] of `text`: [`visual`] with the position of every character kept. Text without
-/// right-to-left script maps to itself.
+/// right-to-left script maps to itself. A field's line is laid out by [`line_screen_map`], which is
+/// this for a line that reads left to right.
+#[cfg_attr(not(test), expect(dead_code, reason = "the left-to-right map the tests compare a field's line with"))]
 pub fn screen_map(text: &str) -> ScreenMap {
     if !has_rtl(text) {
         return ScreenMap::identity(text);
     }
+    screen_map_at(text, Level::ltr())
+}
+
+/// The direction one line of a field reads in, by the rule [`wrapped_screen_map_with`] gives each
+/// paragraph of a multi-line field: `forced_rtl` when the field's owner decides it, else the
+/// direction of the line's first strong character (as `dir="auto"` reads it, [`first_strong_rtl`]),
+/// else `neutral_rtl` (an empty line, or digits and punctuation only, which do not say where they
+/// belong; a field passes the interface's direction, as `widgets::field_align` does).
+pub fn line_rtl(text: &str, neutral_rtl: bool, forced_rtl: Option<bool>) -> bool {
+    forced_rtl.or_else(|| first_strong_rtl(text)).unwrap_or(neutral_rtl)
+}
+
+/// The [`ScreenMap`] of the one line of a single-line field: [`screen_map`], but laid out by UAX #9
+/// for the base direction [`line_rtl`] gives the line (paragraph level 1 when it reads right to
+/// left), so an Arabic sentence with a Latin word at its end draws that word at the left end. Text
+/// without right-to-left script maps to itself.
+pub fn line_screen_map(text: &str, neutral_rtl: bool, forced_rtl: Option<bool>) -> ScreenMap {
+    if !has_rtl(text) {
+        return ScreenMap::identity(text);
+    }
+    screen_map_at(text, if line_rtl(text, neutral_rtl, forced_rtl) { Level::rtl() } else { Level::ltr() })
+}
+
+/// The [`ScreenMap`] of `text`, which holds right-to-left script, with every paragraph laid out for
+/// the base direction `base`.
+fn screen_map_at(text: &str, base: Level) -> ScreenMap {
     let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
     let count = offsets.len();
     let mut map = ScreenMap {
@@ -150,7 +180,7 @@ pub fn screen_map(text: &str) -> ScreenMap {
         to_screen: vec![None; count],
         row_rtl: Vec::new(),
     };
-    let info = BidiInfo::new(text, Some(Level::ltr()));
+    let info = BidiInfo::new(text, Some(base));
     for para in &info.paragraphs {
         let mut drawn = String::with_capacity(para.range.len());
         for_each_shown(text, &info, para, para.range.clone(), |c, at, rtl| {
@@ -940,6 +970,49 @@ pub(crate) fn arabic_test_fonts() -> Option<egui::FontDefinitions> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_field_line_reads_in_the_direction_of_its_first_strong_character() {
+        let drawn = |text: &str, neutral_rtl: bool, forced_rtl: Option<bool>| -> String {
+            line_screen_map(text, neutral_rtl, forced_rtl).drawn.into_iter().collect()
+        };
+        // "ali abc": right to left, so the Latin word that ends it is at the left end and the first
+        // letter of the Arabic word (ain) at the right.
+        let ali_abc = "\u{639}\u{644}\u{64A} abc";
+        assert!(line_rtl(ali_abc, false, None));
+        assert_eq!(drawn(ali_abc, false, None), "abc \u{64A}\u{644}\u{639}");
+        let map = line_screen_map(ali_abc, false, None);
+        assert_eq!(map.screen_positions(0), [7], "the start of reading is the right edge");
+        assert_eq!(map.screen_positions(7), [3], "its end is after the c");
+        assert_eq!(map.logical_positions(7), [0]);
+        // The interface's direction does not matter once a letter has one.
+        assert_eq!(drawn(ali_abc, true, None), "abc \u{64A}\u{644}\u{639}");
+        // Latin first: left to right, the same map as before.
+        let abc_ali = "abc \u{639}\u{644}\u{64A}";
+        assert!(!line_rtl(abc_ali, true, None));
+        assert_eq!(line_screen_map(abc_ali, true, None), screen_map(abc_ali));
+        assert_eq!(drawn(abc_ali, false, None), "abc \u{64A}\u{644}\u{639}");
+        // No strong character (digits, a full stop): the interface's direction.
+        let digits = "\u{661}\u{662}.";
+        assert_eq!(drawn(digits, false, None), "\u{661}\u{662}.");
+        assert_eq!(drawn(digits, true, None), ".\u{661}\u{662}");
+        assert!(!line_rtl("2024", false, None) && !line_rtl("", false, None));
+        assert!(line_rtl("", true, None), "an empty field in Arabic reads from the right");
+        assert_eq!(line_screen_map("", true, None), ScreenMap::identity(""));
+        assert_eq!(line_screen_map("2024", true, None), ScreenMap::identity("2024"), "nothing right to left: drawn as stored");
+        // The owner's word wins.
+        assert_eq!(drawn(ali_abc, false, Some(false)), "\u{64A}\u{644}\u{639} abc");
+        assert_eq!(drawn(abc_ali, false, Some(true)), "\u{64A}\u{644}\u{639} abc");
+        // Whatever the text, every character is drawn once and maps back to itself.
+        for text in [ali_abc, abc_ali, digits, "\u{202B}\u{639}\u{202C} x", "\u{639}\nab", "( \u{639} [b] )"] {
+            for neutral in [false, true] {
+                let map = line_screen_map(text, neutral, None);
+                for (v, l) in map.shown.iter().enumerate() {
+                    assert_eq!(map.to_screen.get(*l).copied().flatten(), Some(v), "{text:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn text_without_rtl_is_borrowed_unchanged() {

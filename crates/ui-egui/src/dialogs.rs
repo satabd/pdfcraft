@@ -634,7 +634,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 rtl::horizontal(ui, |ui| {
                     let l = ui.label(tl!("File name"));
                     let align = widgets::field_align(&app.extract_draft.name);
-                    ui.add(egui::TextEdit::singleline(&mut app.extract_draft.name).desired_width(240.0).horizontal_align(align)).labelled_by(l.id);
+                    ui.add(widgets::BidiEdit::singleline(&mut app.extract_draft.name).desired_width(240.0).horizontal_align(align)).labelled_by(l.id);
                 });
                 ui.add(widgets::checkbox(&mut app.extract_draft.delete, tl!("Delete pages after extracting")));
                 ui.add(widgets::checkbox(&mut app.extract_draft.separate, tl!("Extract pages as separate files")));

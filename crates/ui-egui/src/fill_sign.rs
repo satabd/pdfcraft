@@ -714,8 +714,9 @@ pub(crate) fn type_box(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
         // The area's max rect is last frame's size, which caps the edit's width; widen it so the
         // box grows as text is typed.
         ui.set_min_width(width);
+        // Arabic typed here reads in display order (the box stays at its left edge, where the text is placed).
         let r = ui.add(
-            egui::TextEdit::singleline(&mut t.text)
+            crate::widgets::BidiEdit::singleline(&mut t.text)
                 .font(egui::FontId::proportional((t.size as f32 * zoom).max(8.0)))
                 .desired_width(width)
                 .background_color(Color32::from_rgba_unmultiplied(255, 255, 255, 230))
@@ -802,11 +803,13 @@ pub(crate) fn signature_pad(
     }
     if !d.drawing {
         let l = ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Type your {what}."), &[("what", what)])).color(t.text_muted));
+        let align = crate::widgets::field_align(&d.text);
         ui.add(
-            egui::TextEdit::singleline(&mut d.text)
+            crate::widgets::BidiEdit::singleline(&mut d.text)
                 .char_limit(pdfcraft_engine::MAX_SIGNATURE_CHARS)
                 .desired_width(460.0)
-                .hint_text(tl!(if d.initials { "Initials" } else { "Your name" })),
+                .hint_text(tl!(if d.initials { "Initials" } else { "Your name" }))
+                .horizontal_align(align),
         )
         .labelled_by(l.id);
         let (rect, _) = ui.allocate_exact_size(vec2(460.0, 150.0), Sense::hover());

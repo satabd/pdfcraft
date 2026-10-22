@@ -593,6 +593,7 @@ Newest first: the date, what moved, and the new overall estimate.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-22 | minor | M6: right-to-left tables read right to left in the Word (`bidiVisual`), PowerPoint, HTML and RTF exports. Estimates unchanged. |
+| 2026-10-22 | minor | M14: single-line fields read from their first strong letter and the last plain text fields (Fill & Sign box, tag search and values, extract name, Search & Redact word list) edit Arabic in display order. Estimates unchanged. |
 | 2026-10-22 | minor | M6: Arabic in XFA text drawn shaped through Flatten and static conversion; Office, HTML and RTF exports mark right-to-left paragraphs. Estimates unchanged. |
 | 2026-10-22 | minor | M14: the toast and canvas banners wrap in typing order under the Arabic interface (`notify` takes logical text, `widgets::logical_label`); lists joined in code follow the reading order (`rtl::join`, `rtl::caption_value`). Estimates unchanged. |
 | 2026-10-22 | minor | M14: the Arabic interface mirrors its frame (panes, rail, mode bar, tab strip, rows, dialog footers); menus, dialog bodies and the canvas are not mirrored yet. Estimates unchanged. |

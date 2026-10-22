@@ -1,9 +1,14 @@
 //! A text field that shows, selects and edits right-to-left script in display order.
 //!
 //! egui lays the runs of a line out left to right in logical order, so the words of a typed
-//! Arabic line come out reversed; [`crate::bidi::visual`] puts the words in display order, and
-//! that is what this field hands egui to draw. egui's caret, click placement and selection then
-//! all work in the order the glyphs are drawn: *screen order*, the i-th character from the left.
+//! Arabic line come out reversed; [`bidi::line_screen_map`] puts the words in display order, and
+//! that is what this field hands egui to draw. A line reads in the direction of its first strong
+//! character, as `dir="auto"` has it and as each paragraph of a multi-line field does
+//! ([`bidi::line_rtl`]): an Arabic sentence is laid out right to left (UAX #9 paragraph level 1),
+//! so a Latin word at its end is drawn at the left end; a line that starts in Latin reads left to
+//! right, and one without a strong character in the interface's direction. egui's caret, click
+//! placement and selection then all work in the order the glyphs are drawn: *screen order*, the
+//! i-th character from the left.
 //! The stored text stays in logical order (what is typed, saved and read aloud), so the field
 //! keeps `egui::TextEdit` for events, IME, undo and clipboard and gives it a [`TextBuffer`]
 //! ([`BidiBuffer`]) whose indices are screen indices and whose `as_str` is the logical text.
@@ -26,8 +31,8 @@
 //!
 //! What this means for the user:
 //! - Left and Right move the caret on screen, a character at a time. In a single line, Home and
-//!   End go to the start and end of the text when it begins in a right-to-left script (the right
-//!   and left edge), to the screen edges otherwise. In a multi-line field they go to the ends of
+//!   End go to the start and end of the text when it reads right to left (the right and left
+//!   edge), to the screen edges otherwise. In a multi-line field they go to the ends of
 //!   the row, and Ctrl+Home and Ctrl+End to the start and end of the text in reading order; Up
 //!   and Down move between the rows as drawn.
 //! - Backspace and Delete work in logical order: Backspace removes the letter typed last.
@@ -155,6 +160,30 @@ struct MapCache {
     map: Option<Arc<ScreenMap>>,
     /// Set for a multi-line field.
     wrap: Option<Wrap>,
+    /// Which way the line of a single-line field reads.
+    line: LineDir,
+}
+
+/// What decides the direction of a single-line field's line besides its text (see [`bidi::line_rtl`]):
+/// the same two settings [`Wrap`] has for the paragraphs of a multi-line field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LineDir {
+    /// The direction of a line without a strong character (the interface's).
+    neutral_rtl: bool,
+    /// The direction of the line when the field's owner decides it.
+    forced_rtl: Option<bool>,
+}
+
+impl LineDir {
+    /// The map of `text` as the line of a single-line field.
+    fn map(self, text: &str) -> ScreenMap {
+        bidi::line_screen_map(text, self.neutral_rtl, self.forced_rtl)
+    }
+
+    /// Whether `text` reads right to left as the line of a single-line field.
+    fn rtl(self, text: &str) -> bool {
+        bidi::line_rtl(text, self.neutral_rtl, self.forced_rtl)
+    }
 }
 
 type SharedCache = Rc<RefCell<MapCache>>;
@@ -162,7 +191,10 @@ type SharedCache = Rc<RefCell<MapCache>>;
 /// The screen map of `text`, from `cache` when it is the text (and width) the cache saw last.
 fn map_of(cache: &SharedCache, text: &str) -> Arc<ScreenMap> {
     // Nothing holds the cache across a call, but a re-entrant borrow must not panic.
-    let Ok(mut cache) = cache.try_borrow_mut() else { return Arc::new(bidi::screen_map(text)) };
+    let Ok(mut cache) = cache.try_borrow_mut() else {
+        let line = cache.try_borrow().map(|c| c.line).unwrap_or_default();
+        return Arc::new(line.map(text));
+    };
     let width = cache.wrap.as_ref().map(|w| w.width.to_bits());
     if let Some(map) = &cache.map
         && cache.text == text
@@ -172,7 +204,7 @@ fn map_of(cache: &SharedCache, text: &str) -> Arc<ScreenMap> {
     }
     let map = Arc::new(match &cache.wrap {
         Some(wrap) => wrap.map(text),
-        None => bidi::screen_map(text),
+        None => cache.line.map(text),
     });
     text.clone_into(&mut cache.text);
     cache.width = width;
@@ -862,7 +894,7 @@ struct Settings {
     wrap_override: Option<f32>,
     /// How a multi-line text is measured, if not with the field's own font.
     measure: Option<Measure>,
-    /// The direction of every paragraph of a multi-line text, if the owner decides it.
+    /// The direction of every paragraph of a multi-line text (or of a single line), if the owner decides it.
     forced_rtl: Option<bool>,
     /// A multi-line text without right-to-left script is wrapped by the field too, not by egui.
     wrap_ltr: bool,
@@ -970,7 +1002,9 @@ impl BidiOutput {
 }
 
 impl<'t> BidiEdit<'t> {
-    /// A single-line field.
+    /// A single-line field. Its line reads in the direction of its first strong character (see the
+    /// [module](self)); where the line sits in the field is [`Self::horizontal_align`]'s to say
+    /// (`widgets::line` puts a line that reads right to left against the right edge).
     pub fn singleline(text: &'t mut String) -> Self {
         Self { text, multiline: false, s: Settings::default(), hook: None }
     }
@@ -1147,8 +1181,9 @@ impl<'t> BidiEdit<'t> {
         self
     }
 
-    /// Read every paragraph of a multi-line text right to left (`Some(true)`) or left to right,
-    /// whatever its first strong character says; for an owner whose text has a direction of its own.
+    /// Read every paragraph of a multi-line text, or the line of a single-line one, right to left
+    /// (`Some(true)`) or left to right, whatever its first strong character says; for an owner whose
+    /// text has a direction of its own.
     pub fn forced_rtl(mut self, rtl: Option<bool>) -> Self {
         self.s.forced_rtl = rtl;
         self
@@ -1829,7 +1864,8 @@ fn show_reordered(
     hook: &mut Option<LayoutHook<'_>>,
 ) -> (TextEditOutput, Arc<ScreenMap>, Option<usize>) {
     let ctx = ui.ctx().clone();
-    let cache: SharedCache = Rc::default();
+    let line = LineDir { neutral_rtl: crate::rtl::mirrored(), forced_rtl: s.forced_rtl };
+    let cache: SharedCache = Rc::new(RefCell::new(MapCache { line, ..MapCache::default() }));
     let caret: SharedCaret = Rc::default();
 
     // The layouter: the default one of a `TextEdit`, but for the text in display order.
@@ -1899,7 +1935,7 @@ fn show_reordered(
     // Events egui would apply to the wrong characters: Copy and Cut slice the logical text with
     // screen indices, Home and End of text that starts right to left go to the screen edges, and
     // Left and Right would stop at the zero-width places inside a ligature.
-    let rtl_start = bidi::first_strong_rtl(text) == Some(true);
+    let rtl_start = line.rtl(text);
     if focused && multiline {
         defer_after_undo(ui, id);
     }
@@ -2293,6 +2329,126 @@ mod tests {
         (a - b).abs() < 1.5
     }
 
+    /// The map a single-line field draws `text` with, in the interface of the test's thread.
+    fn line_map(text: &str) -> ScreenMap {
+        bidi::line_screen_map(text, crate::rtl::mirrored(), None)
+    }
+
+    /// The characters of the galley's first row, left to right.
+    fn drawn(out: &TextEditOutput) -> String {
+        out.galley.rows.first().map(|row| row.glyphs.iter().map(|g| g.chr).collect()).unwrap_or_default()
+    }
+
+    /// "ali abc": an Arabic word, then a Latin one.
+    const ALI_ABC: &str = "\u{639}\u{644}\u{64A} abc";
+
+    #[test]
+    fn a_line_that_starts_right_to_left_draws_its_trailing_latin_word_at_the_left_end() {
+        let Some((mut field, out)) = Field::arabic_with(ALI_ABC) else { return };
+        // Read from the right: "ali" first, at the right end (its first letter, ain, rightmost), then "abc" at the left.
+        assert_eq!(drawn(&out), "abc \u{64A}\u{644}\u{639}");
+        let (a, ain) = (glyph_span(&out, 0), glyph_span(&out, 6));
+        assert!(a.1 < ain.0, "the Latin word {a:?} is left of the Arabic one {ain:?}");
+        assert_eq!(field.map(), Some(bidi::line_screen_map(ALI_ABC, false, None)));
+        // The caret opens at the end of the reading order: after the "c".
+        assert_eq!(field.caret(), Some(Caret { l: 7, v: 3 }));
+        assert!(near(cursor_of(&out).1, glyph_span(&out, 2).1));
+
+        // Latin typed at the end extends the Latin word, still at the left end.
+        let out = field.type_text("d");
+        assert_eq!(field.text, "\u{639}\u{644}\u{64A} abcd");
+        assert_eq!(drawn(&out), "abcd \u{64A}\u{644}\u{639}");
+        assert_eq!(field.caret(), Some(Caret { l: 8, v: 4 }));
+        let out = field.press(Key::Backspace);
+        assert_eq!(field.text, ALI_ABC, "Backspace takes the letter typed last");
+        assert_eq!(drawn(&out), "abc \u{64A}\u{644}\u{639}");
+        assert_eq!(field.caret(), Some(Caret { l: 7, v: 3 }));
+
+        // Home is where reading starts, the right edge; Left steps into the Arabic word.
+        let out = field.press(Key::Home);
+        assert_eq!(field.caret(), Some(Caret { l: 0, v: 7 }));
+        assert!(near(cursor_of(&out).1, glyph_span(&out, 6).1), "Home is at the right edge of the ain");
+        field.press(Key::ArrowLeft);
+        assert_eq!(field.caret(), Some(Caret { l: 1, v: 6 }), "one letter on, past the ain");
+        // Backspace there removes the ain, the first letter; typing it again puts it back.
+        let out = field.press(Key::Backspace);
+        assert_eq!(field.text, "\u{644}\u{64A} abc");
+        assert_eq!(drawn(&out), "abc \u{64A}\u{644}");
+        assert_eq!(field.caret(), Some(Caret { l: 0, v: 6 }));
+        field.type_text(AIN);
+        assert_eq!(field.text, ALI_ABC);
+        assert_eq!(field.caret(), Some(Caret { l: 1, v: 6 }), "the next letter goes left of the one typed");
+        // Delete removes the letter after the caret in reading order: the lam.
+        field.press(Key::Delete);
+        assert_eq!(field.text, "\u{639}\u{64A} abc");
+        field.type_text(LAM);
+        assert_eq!(field.text, ALI_ABC);
+        // End is the end of reading: after the "c".
+        let out = field.press(Key::End);
+        assert_eq!(field.caret(), Some(Caret { l: 7, v: 3 }));
+        assert_eq!(cursor_of(&out).0, 3);
+
+        // A click picks the logical place next to the character it is over.
+        let y = out.response.response.rect.center().y;
+        let click = |field: &mut Field, x: f32| {
+            field.time += 2.0;
+            let at = Pos2::new(x, y);
+            field.frame(vec![Event::PointerMoved(at)]);
+            field.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+            field.frame(vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+            field.caret()
+        };
+        let out = field.frame(vec![]);
+        let (ain, a) = (glyph_span(&out, 6), glyph_span(&out, 0));
+        assert_eq!(click(&mut field, ain.1 - 1.0), Some(Caret { l: 0, v: 7 }), "the right half of the ain: before it");
+        assert_eq!(click(&mut field, a.0 + 1.0), Some(Caret { l: 4, v: 0 }), "the left half of the a: before it");
+        field.type_text("x");
+        assert_eq!(field.text, "\u{639}\u{644}\u{64A} xabc");
+
+        // Select all and copy: the text in logical order; Cut empties the field.
+        field.press_with(Key::A, Modifiers::COMMAND);
+        field.frame(vec![Event::Copy]);
+        assert_eq!(field.copied.last().map(String::as_str), Some("\u{639}\u{644}\u{64A} xabc"));
+        field.frame(vec![Event::Cut]);
+        assert_eq!(field.text, "");
+    }
+
+    #[test]
+    fn a_line_without_a_strong_letter_reads_in_the_interfaces_direction_and_latin_first_lines_are_unchanged() {
+        let Some(mut field) = Field::arabic() else { return };
+        field.frame(vec![]);
+        // Latin first: left to right, as before; the Arabic word is drawn reversed after it.
+        field.text = AB_ALI.to_owned();
+        let out = field.frame(vec![]);
+        assert_eq!(drawn(&out), "ab\u{64A}\u{644}\u{639}");
+        assert_eq!(field.map(), Some(bidi::screen_map(AB_ALI)));
+        // Arabic-Indic digits and a full stop have no strong direction: the English interface's, left to right.
+        let digits = "\u{661}\u{662}.";
+        field.text = digits.to_owned();
+        let out = field.frame(vec![]);
+        assert_eq!(drawn(&out), "\u{661}\u{662}.");
+        // An empty field is a plain one.
+        field.text.clear();
+        let out = field.frame(vec![]);
+        assert_eq!(drawn(&out), "");
+        assert_eq!(field.map(), None, "drawn as a plain field");
+
+        // In the Arabic interface the same digits read right to left: the full stop ends at the left.
+        let english = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").expect("the Arabic catalog"));
+        field.text = digits.to_owned();
+        let out = field.frame(vec![]);
+        let arabic = drawn(&out);
+        let ui_map = field.map();
+        // ...and a Latin-first line still reads left to right.
+        field.text = AB_ALI.to_owned();
+        let latin = drawn(&field.frame(vec![]));
+        crate::i18n::set_current(english);
+        assert_eq!(arabic, ".\u{661}\u{662}");
+        assert_eq!(ui_map, Some(bidi::line_screen_map(digits, true, None)));
+        assert_eq!(latin, "ab\u{64A}\u{644}\u{639}");
+    }
+
     #[test]
     fn typing_latin_then_arabic_stores_logical_text_and_keeps_the_caret_at_the_screen_edge() {
         let Some(mut field) = Field::arabic() else { return };
@@ -2414,7 +2570,7 @@ mod tests {
     /// left, `x` never goes back and the glyphs' vertices follow each other (the selection paints
     /// the text it covers by them).
     fn assert_aligned(out: &TextEditOutput, text: &str) {
-        let map = bidi::screen_map(text);
+        let map = line_map(text);
         let n = map.screen_len();
         let Some(row) = out.galley.rows.first() else {
             assert_eq!(n, 0, "{text:?}: a galley without rows");
@@ -2479,7 +2635,7 @@ mod tests {
         let text = "\u{645}\u{6CC}\u{200C}\u{631}\u{648}\u{645}";
         field.text = text.to_owned();
         let out = field.frame(vec![]);
-        let map = bidi::screen_map(text);
+        let map = line_map(text);
         let at = map.drawn.iter().position(|c| *c == '\u{200C}').expect("the joiner is drawn");
         let glyphs = &out.galley.rows[0].glyphs;
         assert_eq!(glyphs.len(), map.screen_len());
@@ -2876,17 +3032,19 @@ mod tests {
         let out = field.press(Key::End);
         assert_eq!(cursor_of(&out).0, 5);
 
-        // Starts right to left: Home is the start of the text, at the right; End its end, at the left.
+        // Starts right to left: Home is the start of the text, at the right; End its end, after the
+        // Latin word that ends it and is drawn at the left end.
         let word = "\u{639}\u{644}\u{64A} ab";
         let Some((mut field, _)) = Field::arabic_with(word) else { return };
         let out = field.press(Key::Home);
-        let map = bidi::screen_map(word);
+        let map = line_map(word);
         assert_eq!(field.caret().map(|c| c.l), Some(0));
         assert_eq!(cursor_of(&out).0, first(&map.screen_positions(0)));
-        assert_eq!(cursor_of(&out).0, 3, "the right edge of the Arabic word, which is on the left here");
+        assert_eq!(cursor_of(&out).0, 6, "the right edge of the Arabic word, the right end of the line");
         let out = field.press(Key::End);
         assert_eq!(field.caret().map(|c| c.l), Some(6));
         assert_eq!(cursor_of(&out).0, first(&map.screen_positions(6)));
+        assert_eq!(cursor_of(&out).0, 2, "after the b");
         // Shift keeps the other end of the selection.
         field.press(Key::Home);
         let out = field.press_with(Key::End, Modifiers::SHIFT);
@@ -3083,7 +3241,7 @@ mod tests {
                         buffer.as_str()
                     );
                 }
-                assert_eq!(map.shaper, bidi::visual(buffer.as_str()));
+                assert_eq!(map.shaper, line_map(buffer.as_str()).shaper);
             }
         }
     }
@@ -3097,8 +3255,13 @@ mod tests {
             if seed % 3 == 0 {
                 field.char_limit = Some(12);
             }
+            // Half the runs start with a line that reads right to left.
+            if seed % 2 == 1 {
+                field.text = ALI_ABC.to_owned();
+            }
             field.frame(vec![]);
             let mut dice = Dice(seed);
+            let mut rtl_lines = 0_usize;
             let keys = [Key::Backspace, Key::Delete, Key::ArrowLeft, Key::ArrowRight, Key::Home, Key::End, Key::ArrowLeft, Key::ArrowRight];
             let modifiers = [Modifiers::NONE, Modifiers::NONE, Modifiers::SHIFT, Modifiers::CTRL, Modifiers::COMMAND | Modifiers::SHIFT];
             for step in 0..1200 {
@@ -3122,8 +3285,16 @@ mod tests {
                 if dice.next(25) == 0 {
                     field.time += 2.0;
                 }
+                // Now and then the line is made to start right to left, from outside, as an owner may set it.
+                if dice.next(40) == 0 {
+                    field.text.insert(0, '\u{639}');
+                }
                 let out = field.frame(events);
-                let map = bidi::screen_map(&field.text);
+                let map = line_map(&field.text);
+                if bidi::first_strong_rtl(&field.text) == Some(true) && bidi::has_rtl(&field.text) {
+                    rtl_lines += 1;
+                    assert_eq!(field.map().as_ref(), Some(&map), "step {step}: a line that reads right to left is laid out so: {:?}", field.text);
+                }
                 let glyphs = out.galley.rows.first().map_or(0, |row| row.glyphs.len());
                 assert_eq!(glyphs, map.screen_len(), "step {step}: one glyph per character in {:?}", field.text);
                 assert_aligned(&out, &field.text);
@@ -3135,6 +3306,7 @@ mod tests {
                     assert!(map.screen_positions(caret.l).contains(&caret.v), "step {step}: {caret:?} in {:?}", field.text);
                 }
             }
+            assert!(rtl_lines > 50, "seed {seed:#x}: only {rtl_lines} frames had a line that reads right to left");
         }
     }
 
