@@ -168,6 +168,24 @@ pub struct LineEditor {
     /// horizontal scale (%), and what they were.
     pub extras: Extras,
     extras0: Extras,
+    /// A read-only copy of the document to ask what rows the page will lay a draft out in (see [`DraftProbe`]).
+    probe: Option<DraftProbe>,
+}
+
+/// [`pdfcraft_engine::TextDraftProbe`], shared by the copies of the editor the frame makes.
+#[derive(Clone)]
+struct DraftProbe(std::rc::Rc<pdfcraft_engine::TextDraftProbe>);
+
+impl std::fmt::Debug for DraftProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DraftProbe")
+    }
+}
+
+impl PartialEq for DraftProbe {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -969,6 +987,7 @@ fn open_editor(
         look0: look_of(l),
         extras: Extras::default(),
         extras0: Extras::default(),
+        probe: doc.text_draft_probe(page, block).map(|probe| DraftProbe(std::rc::Rc::new(probe))),
     });
 }
 
@@ -1548,6 +1567,16 @@ fn text_field<'t>(text: &'t mut String, ed: LineEditor, scale: f32, width: f32, 
     let rtl = pdfcraft_engine::rtl_base(text);
     // Lines break where the page will break them (`wrap`), measured in the font it writes a block in.
     let measure = line_measure(&ed, scale);
+    // Once the paragraph has changed, the rows the page will lay it out in are asked of the engine (the rewrite Apply
+    // runs), for text of either direction: that is where the page breaks it, in whatever fonts it is set in.
+    let engine_rows = ed.probe.is_some() && wrap.is_finite() && !is_pristine(&ed, text);
+    let rows = ed.probe.clone().map(|probe| {
+        let style = ed.style();
+        move |_: &egui::Context, text: &str| {
+            probe.0.rows(text, &style).map(|rows| rows.iter().map(|row| row.split_whitespace().count()).collect::<Vec<usize>>())
+        }
+    });
+    let key = format!("{:?}{}", ed.style(), scale.to_bits());
     let field = widgets::BidiEdit::multiline(text)
         .id(egui::Id::new("edit-text-line-input"))
         .font(font)
@@ -1558,9 +1587,15 @@ fn text_field<'t>(text: &'t mut String, ed: LineEditor, scale: f32, width: f32, 
         .desired_rows(1)
         .wrap_at(wrap)
         .forced_rtl(Some(rtl))
+        .wrap_ltr(engine_rows)
+        .wrap_key(key)
         .layout(move |ui, map, ctx| editor_galley(ui, &ed, ctx, map, scale));
-    match measure {
+    let field = match measure {
         Some(measure) => field.measure(measure),
+        None => field,
+    };
+    match rows {
+        Some(rows) => field.row_words(rows),
         None => field,
     }
 }
@@ -1742,6 +1777,7 @@ mod tests {
             look0: look_of(&block),
             extras: Extras::default(),
             extras0: Extras::default(),
+            probe: None,
         };
         (app, ed)
     }
@@ -1801,6 +1837,7 @@ mod tests {
             look0: look_of(&block),
             extras: Extras::default(),
             extras0: Extras::default(),
+            probe: None,
         };
         (app, ed)
     }

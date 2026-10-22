@@ -224,6 +224,39 @@ fn typed_arabic_in_the_edit_text_box_is_applied_and_marked_in_typing_order() {
     assert!(!saved_streams_with(&h, &actual_text(kitab)).is_empty(), "retyped text is marked in typing order");
 }
 
+/// The editor breaks a retyped Arabic paragraph into the rows the page will have after Apply (the rewrite measures the words
+/// shaped, in the first row's font and size): the rows the editor paints are the page's, read the other way round.
+#[test]
+fn the_edit_text_box_breaks_arabic_lines_where_apply_writes_them() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        return;
+    }
+    let first = "سلام عليكم ورحمة الله وبركاته مع أطيب التحيات من الجميع هنا اليوم وفي كل مكان";
+    let second = "هذا نص عربي طويل يكتب في حقل ضيق ليلتف على عدة أسطر ويبقى مطابقا لما تكتبه الصفحة عند التطبيق";
+    for zoom in ["100", "150", "300"] {
+        let mut h = harness(zoom);
+        assert!(write(&mut h, first), "the engine writes the Arabic paragraph");
+        h.run_steps(3);
+        assert!(block(&h).rows.len() >= 2, "the paragraph has several rows at {zoom}%");
+        open_editor(&mut h);
+        h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        h.event(egui::Event::Text(second.into()));
+        h.run_steps(4);
+        let galleys = painted_galleys(&h);
+        let (_, galley) =
+            galleys.iter().find(|(_, g)| g.job.text.contains('\u{647}') && g.job.text.contains('\n')).expect("the editor paints the draft");
+        let rows: Vec<String> =
+            galley.rows.iter().map(|r| r.glyphs.iter().map(|g| g.chr).collect::<String>().trim().chars().rev().collect()).collect();
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+        h.run_steps(4);
+        let b = block(&h);
+        let lines = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0);
+        let page: Vec<String> = b.rows.iter().map(|row| row.iter().map(|i| lines[*i].text.clone()).collect::<Vec<_>>().join(" ")).collect();
+        assert!(page.len() >= 3, "the retyped paragraph wraps at {zoom}%: {page:?}");
+        assert_eq!(rows, page, "the editor's rows are the page's at {zoom}%");
+    }
+}
+
 /// Latin typed into a block that holds Arabic reads in its own direction inside the right-to-left row, and
 /// Escape leaves the page as it was.
 #[test]

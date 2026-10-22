@@ -46,6 +46,14 @@
 //! text of either kind. [`BidiEdit::wrap_at`], [`BidiEdit::measure`] and [`BidiEdit::forced_rtl`] say
 //! where lines break, how they are measured and which way paragraphs read when the owner knows better,
 //! and [`BidiEdit::show_mapped`] hands back the map with [`BidiOutput::logical_range`].
+//!
+//! A text box saved in other fonts than it is typed in (a page's) wraps where the page will: [`BidiEdit::wrap_ltr`]
+//! makes the field wrap left-to-right text itself too, [`BidiEdit::measure_in`] measures a line knowing its paragraph
+//! (the page's widths) or [`BidiEdit::row_words`] takes the rows the page lays the text out in, [`BidiEdit::wrap_rules`]
+//! keeps a long word whole and ends words at spaces only if the page does, and [`BidiEdit::wrap_key`] says what else
+//! the owner's wrapping depends on. A row the field wrapped keeps the space the break replaced, which a page does not
+//! write: [`RowSlot::break_lead`] and [`RowSlot::break_trail`] tell a hook how wide it is, and [`RowAlign`] sets the line
+//! without it against an edge or in the middle.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -77,10 +85,19 @@ struct Wrap {
     forced_rtl: Option<bool>,
     /// How wide a line is, when the field's owner knows better than the field's own font does.
     measure: Option<Measure>,
+    /// Where else than at its width a line breaks (see [`bidi::WrapRules`]).
+    rules: bidi::WrapRules,
+    /// How many words each row of a text has, when the field's owner knows (see [`BidiEdit::row_words`]).
+    rows: Option<RowWords>,
+    /// What the owner's way of wrapping depends on besides the text and the width (see [`BidiEdit::wrap_key`]).
+    key: u64,
 }
 
+/// The number of words on each row of a text, in order, as the field's owner lays it out.
+type RowWords = Rc<dyn Fn(&egui::Context, &str) -> Option<Vec<usize>>>;
+
 /// The width of a line of text in logical order, as the field's owner lays it out.
-type Measure = Rc<dyn Fn(&egui::Context, &str) -> f32>;
+type Measure = Rc<dyn Fn(&egui::Context, bidi::Candidate<'_>) -> f32>;
 
 /// The width of a tab's indentation in spaces, as egui takes it.
 const TAB_SIZE: usize = 4;
@@ -96,18 +113,30 @@ const MAX_WRAPPED_CHARS: usize = 50_000;
 impl Wrap {
     /// The map of `text` wrapped at the current width.
     fn map(&self, text: &str) -> ScreenMap {
-        let width = self.width.round().max(1.0);
+        // The field's own font is measured against the whole pixels egui lays a row out in; an owner that
+        // measures lines itself is held to the width it gave, to the digit.
+        let width = if self.measure.is_some() { self.width.max(1.0) } else { self.width.round().max(1.0) };
         let mut spent = 0_usize;
-        bidi::wrapped_screen_map(text, self.neutral_rtl, self.forced_rtl, |line: &str| {
-            spent = spent.saturating_add(line.len());
+        // Rows the owner has laid out (the page's own lines): a line fits while it has no more words than its row.
+        let plan = self
+            .rows
+            .as_ref()
+            .filter(|_| self.width.is_finite())
+            .and_then(|rows| rows(&self.ctx, text))
+            .and_then(|rows| bidi::RowPlan::new(text, &rows, self.rules.spaces_only));
+        bidi::wrapped_screen_map_with(text, self.neutral_rtl, self.forced_rtl, self.rules, |candidate| {
+            spent = spent.saturating_add(candidate.line.len());
             if !self.width.is_finite() || spent > WRAP_BUDGET {
                 return true;
             }
+            if let Some(plan) = &plan {
+                return plan.fits(&candidate);
+            }
             let wide = match &self.measure {
-                Some(measure) => measure(&self.ctx, line),
+                Some(measure) => measure(&self.ctx, candidate),
                 // The widest extent of its glyphs, as egui measures a row against the wrap width.
                 None => self.ctx.fonts_mut(|f| {
-                    let galley = f.layout_no_wrap(line.to_owned(), self.font.clone(), Color32::WHITE);
+                    let galley = f.layout_no_wrap(candidate.line.to_owned(), self.font.clone(), Color32::WHITE);
                     galley.rows.first().map_or(0.0, |row| row.glyphs.iter().map(Glyph::max_x).fold(0.0, f32::max))
                 }),
             };
@@ -159,6 +188,8 @@ struct KeptMap {
     width: u32,
     neutral_rtl: bool,
     forced_rtl: Option<bool>,
+    /// [`Wrap::key`].
+    key: u64,
     map: Arc<ScreenMap>,
 }
 
@@ -166,7 +197,12 @@ struct KeptMap {
 fn seed_cache(cache: &SharedCache, kept: KeptMap, text: &str) {
     let Ok(mut cache) = cache.try_borrow_mut() else { return };
     let Some(wrap) = &cache.wrap else { return };
-    if kept.width == wrap.width.to_bits() && kept.neutral_rtl == wrap.neutral_rtl && kept.forced_rtl == wrap.forced_rtl && kept.text == text {
+    if kept.width == wrap.width.to_bits()
+        && kept.neutral_rtl == wrap.neutral_rtl
+        && kept.forced_rtl == wrap.forced_rtl
+        && kept.key == wrap.key
+        && kept.text == text
+    {
         cache.width = Some(kept.width);
         cache.text = kept.text;
         cache.map = Some(kept.map);
@@ -182,6 +218,7 @@ fn kept_map(cache: &SharedCache) -> Option<KeptMap> {
         width: wrap.width.to_bits(),
         neutral_rtl: wrap.neutral_rtl,
         forced_rtl: wrap.forced_rtl,
+        key: wrap.key,
         map: Arc::clone(map),
     })
 }
@@ -827,6 +864,14 @@ struct Settings {
     measure: Option<Measure>,
     /// The direction of every paragraph of a multi-line text, if the owner decides it.
     forced_rtl: Option<bool>,
+    /// A multi-line text without right-to-left script is wrapped by the field too, not by egui.
+    wrap_ltr: bool,
+    /// The rows the owner lays a multi-line text out in, as their number of words.
+    rows: Option<RowWords>,
+    /// What the owner's way of wrapping depends on besides the text and the width.
+    wrap_key: u64,
+    /// Where else than at its width a multi-line text breaks its lines.
+    rules: bidi::WrapRules,
 }
 
 impl Settings {
@@ -1052,7 +1097,53 @@ impl<'t> BidiEdit<'t> {
     /// answer must depend on the line alone (and what the owner keeps fixed): the field keeps the
     /// wrapping it made of a text for as long as the text and the width stay the same.
     pub fn measure(mut self, measure: impl Fn(&egui::Context, &str) -> f32 + 'static) -> Self {
+        self.s.measure = Some(Rc::new(move |ctx: &egui::Context, candidate: bidi::Candidate<'_>| measure(ctx, candidate.line)));
+        self
+    }
+
+    /// [`Self::measure`] for an owner that measures a line knowing the paragraph it is in ([`bidi::Candidate`]):
+    /// a page that sets an Arabic paragraph word by word measures the Latin line it begins with so too. The
+    /// unit is the owner's, the same as of [`Self::wrap_at`]'s width (which is compared with the answer to the
+    /// digit, not rounded to whole pixels).
+    pub fn measure_in(mut self, measure: impl Fn(&egui::Context, bidi::Candidate<'_>) -> f32 + 'static) -> Self {
         self.s.measure = Some(Rc::new(measure));
+        self
+    }
+
+    /// Where else than at the width a multi-line text breaks its lines ([`bidi::WrapRules`]).
+    pub fn wrap_rules(mut self, rules: bidi::WrapRules) -> Self {
+        self.s.rules = rules;
+        self
+    }
+
+    /// Break a multi-line text into the rows its owner has laid it out in: `rows` gives, for the whole text, how many words
+    /// (stretches between whitespace) each row has, in order (`None`: the owner does not know, and the field wraps the
+    /// text as it would without this). The rows must cover the words of every paragraph (the text between two `\n`),
+    /// an empty one with no row of its own; otherwise they are not used. The answer must depend on the text alone, and
+    /// on what [`Self::wrap_key`] says. It is not asked while the text is not wrapped ([`Self::wrap_at`] at infinity).
+    /// Used with [`Self::wrap_ltr`] for text without right-to-left script.
+    pub fn row_words(mut self, rows: impl Fn(&egui::Context, &str) -> Option<Vec<usize>> + 'static) -> Self {
+        self.s.rows = Some(Rc::new(rows));
+        self
+    }
+
+    /// Say what the owner's wrapping ([`Self::measure`], [`Self::row_words`]) depends on besides the text and the width: the
+    /// field keeps the wrapping it made of a text until the key changes, and then keeps the caret and the selection at the
+    /// same places of the text.
+    pub fn wrap_key(mut self, key: impl std::hash::Hash) -> Self {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        self.s.wrap_key = hasher.finish();
+        self
+    }
+
+    /// Wrap a multi-line text without right-to-left script itself too (`true`), at [`Self::wrap_at`]'s width
+    /// and by [`Self::measure`]'s widths, instead of leaving it to egui, which breaks lines by the field's own
+    /// font at the width it has. The field then shows the lines the text will be written in, the way it does
+    /// for right-to-left script: a text box saved in another font than the one it is typed in.
+    pub fn wrap_ltr(mut self, wrap: bool) -> Self {
+        self.s.wrap_ltr = wrap;
         self
     }
 
@@ -1082,7 +1173,7 @@ impl<'t> BidiEdit<'t> {
         let id = s.resolve_id(ui);
         restore_deferred(ui, id);
         let too_long = multiline && text.chars().nth(MAX_WRAPPED_CHARS).is_some();
-        if s.password || too_long || !wants_reordering(ui, id, text) {
+        if s.password || too_long || !(multiline && s.wrap_ltr || wants_reordering(ui, id, text)) {
             forget_caret(ui.ctx(), id);
             // A password is masked by egui itself.
             let hook = hook.as_mut().filter(|_| !s.password);
@@ -1329,6 +1420,12 @@ pub struct RowSlot {
     pub rtl: bool,
     /// The last row that draws anything.
     pub last: bool,
+    /// The width of the space at the left end of the row that the line break replaced: a line the field wrapped
+    /// keeps the space after its last word, which a page that wraps at spaces does not write (a right-to-left
+    /// line has it at its left end). Zero where there is none.
+    pub break_lead: f32,
+    /// The same at the right end of the row (a left-to-right line).
+    pub break_trail: f32,
 }
 
 impl LayoutCtx<'_> {
@@ -1407,8 +1504,15 @@ impl LayoutCtx<'_> {
 
     /// The field's text with its rows aligned as `align` says, whichever way a paragraph reads: the
     /// layout of a text box whose alignment is a property of the text (see [`RowAlign`]).
+    #[cfg_attr(not(test), expect(dead_code, reason = "for hooks that do not build their own sections"))]
     pub fn layout_aligned(&self, ui: &Ui, map: &ScreenMap, align: RowAlign) -> Arc<Galley> {
         let galley = self.lay_out(ui, map, self.job(map));
+        self.place_aligned(ui, galley, map, align)
+    }
+
+    /// `galley` with its rows aligned as `align` says (see [`Self::layout_aligned`]), for a hook that lays the
+    /// text out in a job of its own.
+    pub fn place_aligned(&self, ui: &Ui, galley: Arc<Galley>, map: &ScreenMap, align: RowAlign) -> Arc<Galley> {
         self.place_rows_with(ui, galley, map, |row| Some(align.offset(row)))
     }
 }
@@ -1433,14 +1537,16 @@ pub enum RowAlign {
 impl RowAlign {
     /// The distance from the left edge of the galley to the left edge of `row` (see [`LayoutCtx::place_rows_with`]).
     fn offset(self, row: RowSlot) -> f32 {
-        // Negative for a row wider than the galley; the spaces it ends with then hang over the edge.
-        let room = row.field_width - row.width;
+        // What is set against an edge is the line as a page writes it, which lacks the space a wrap break replaced
+        // (at the row's right end, or its left one for a right-to-left line): that space hangs over the edge. Negative
+        // for a row wider than the galley.
+        let flush_right = row.field_width - row.width + row.break_trail;
         match self {
-            Self::Left => 0.0,
-            Self::Center => room / 2.0,
-            Self::Right => room,
-            Self::Justify if row.rtl && row.last => room,
-            Self::Justify => 0.0,
+            Self::Left => -row.break_lead,
+            Self::Center => (row.field_width - (row.width - row.break_lead - row.break_trail)) / 2.0 - row.break_lead,
+            Self::Right => flush_right,
+            Self::Justify if row.rtl && row.last => flush_right,
+            Self::Justify => -row.break_lead,
         }
     }
 }
@@ -1487,17 +1593,27 @@ fn place_rows_at(
     // it without them), which hang over the edge: a row set against an edge is not pushed back for them.
     let widest = galley.rows.iter().map(|placed| ink_width(&placed.row)).fold(0.0, f32::max);
     let hang = |row: &egui::epaint::text::Row| row.glyphs.iter().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
+    let hang_end = |row: &egui::epaint::text::Row| row.glyphs.iter().rev().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum::<f32>();
     let width = if width.is_finite() { width.floor().max(widest) } else { widest };
     let last = galley.rows.iter().rposition(|placed| !placed.row.glyphs.is_empty());
     // The place of each row, and how far it may hang over the left edge: the spaces it starts with (the ones a
     // right-to-left line keeps after its last word), so that what is read ends at the right edge.
-    let moves: Vec<Option<(f32, f32)>> = galley
+    let wrapped = map.rows_ended_by_wrap();
+    let space_at = |glyph: Option<&Glyph>| glyph.filter(|g| g.chr == ' ').map_or(0.0, |g| g.advance_width);
+    let moves: Vec<Option<(f32, f32, f32)>> = galley
         .rows
         .iter()
         .enumerate()
         .map(|(index, placed)| {
-            let slot = RowSlot { index, width: placed.row.size.x, field_width: width, rtl: map.row_is_rtl(index), last: last == Some(index) };
-            x(slot).filter(|at| at.is_finite()).map(|at| (at, hang(&placed.row)))
+            let rtl = map.row_is_rtl(index);
+            let broken = wrapped.get(index).copied().unwrap_or(false);
+            let (break_lead, break_trail) = match (broken, rtl) {
+                (false, _) => (0.0, 0.0),
+                (true, true) => (space_at(placed.row.glyphs.first()), 0.0),
+                (true, false) => (0.0, space_at(placed.row.glyphs.last())),
+            };
+            let slot = RowSlot { index, width: placed.row.size.x, field_width: width, rtl, last: last == Some(index), break_lead, break_trail };
+            x(slot).filter(|at| at.is_finite()).map(|at| (at, hang(&placed.row), hang_end(&placed.row)))
         })
         .collect();
     if moves.iter().all(Option::is_none) {
@@ -1507,10 +1623,10 @@ fn place_rows_at(
     let snap = |x: f32| if pixels_per_point > 0.0 && pixels_per_point.is_finite() { (x * pixels_per_point).round() / pixels_per_point } else { x };
     let mut bounds = egui::Rect::NOTHING;
     for (placed, at) in inner.rows.iter_mut().zip(moves) {
-        if let Some((at, hang)) = at {
-            // Inside the galley on both sides, but for the spaces the row starts with.
-            let at = at.min(width - placed.row.size.x);
-            placed.pos.x = snap((inner.rect.min.x + at).max(inner.rect.min.x - hang));
+        if let Some((at, hang, hang_end)) = at {
+            // Inside the galley on both sides, but for the spaces the row starts with and those it ends with.
+            let at = at.min(width - placed.row.size.x + hang_end);
+            placed.pos.x = snap(inner.rect.min.x + at).max(inner.rect.min.x - hang);
         }
         bounds |= placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2());
     }
@@ -1622,12 +1738,20 @@ fn show_reordered(
             neutral_rtl: crate::rtl::mirrored(),
             forced_rtl: s.forced_rtl,
             measure: s.measure.clone(),
+            rules: s.rules,
+            rows: s.rows.clone(),
+            key: s.wrap_key,
         });
     }
-    if let Some(kept) = ctx.data(|d| d.get_temp::<KeptMap>(id)) {
+    let kept_before = ctx.data(|d| d.get_temp::<KeptMap>(id));
+    if let Some(kept) = kept_before.clone() {
         seed_cache(&cache, kept, text);
     }
     let map = map_of(&cache, text);
+    // The map the text had last frame, if only the owner's way of wrapping has changed since.
+    let rewrapped_from: Option<Arc<ScreenMap>> = kept_before
+        .filter(|kept| kept.text == *text && Some(kept.width) == wrap_width.map(f32::to_bits) && kept.key != s.wrap_key)
+        .map(|kept| kept.map);
 
     // The cursor egui starts from, in screen order, and the caret it stands for.
     let mut known: Option<Caret> = ctx.data(|d| d.get_temp(id));
@@ -1636,14 +1760,20 @@ fn show_reordered(
     let mut stored = kept;
     let used: Option<WrapUsed> = ctx.data(|d| d.get_temp(id));
     if let (Some(width), Some(WrapUsed(old)), Some(was), Some(range)) = (wrap_width, used, known, stored)
-        && old != width.to_bits()
+        && (old != width.to_bits() || rewrapped_from.is_some())
     {
-        // The field was wrapped at another width: the cursor egui kept is a screen position of
-        // that wrapping, so it is put where the same logical places are drawn now.
+        // The field was wrapped at another width (or the owner now wraps it another way): the cursor egui kept is a
+        // screen position of that wrapping, so it is put where the same logical places are drawn now.
         let (before, after) = (f32::from_bits(old), width);
-        set_wrap_width(&cache, before);
-        let old_map = map_of(&cache, text);
-        set_wrap_width(&cache, after);
+        let old_map = match rewrapped_from {
+            Some(map) if old == width.to_bits() => map,
+            _ => {
+                set_wrap_width(&cache, before);
+                let old_map = map_of(&cache, text);
+                set_wrap_width(&cache, after);
+                old_map
+            }
+        };
         let to_logical = |index: usize, caret: Option<Caret>| logical_for(&old_map, index.min(old_map.screen_len()), caret);
         let (primary, secondary) = (to_logical(range.primary.index.0, Some(was)), to_logical(range.secondary.index.0, None));
         let screen = |l: usize| first(&map.screen_positions(l)).min(map.screen_len());
@@ -3642,6 +3772,17 @@ mod tests {
         row.glyphs.iter().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum()
     }
 
+    /// The width of the spaces a row ends with.
+    fn trailing_spaces(row: &egui::epaint::text::Row) -> f32 {
+        row.glyphs.iter().rev().take_while(|g| g.chr == ' ').map(|g| g.advance_width).sum()
+    }
+
+    /// The width of the one space at the start (`start`) or the end of a row, if it has one.
+    fn spaces_of_one(row: &egui::epaint::text::Row, start: bool) -> f32 {
+        let glyph = if start { row.glyphs.first() } else { row.glyphs.last() };
+        glyph.filter(|g| g.chr == ' ').map_or(0.0, |g| g.advance_width)
+    }
+
     /// Rows of an Arabic paragraph at `width`, as `(left, width)` in the text area.
     fn rows_at(out: &BidiOutput) -> Vec<(f32, f32)> {
         out.out.galley.rows.iter().map(|placed| (placed.pos.x, placed.row.size.x)).collect()
@@ -3671,16 +3812,27 @@ mod tests {
                     assert!((out.out.galley.rect.width() - width).abs() < 0.5, "{align:?}: {:?}", out.out.galley.rect);
                     let last = rows.len() - 1;
                     let leads: Vec<f32> = out.out.galley.rows.iter().map(|placed| leading_spaces(&placed.row)).collect();
+                    let trails: Vec<f32> = out.out.galley.rows.iter().map(|placed| trailing_spaces(&placed.row)).collect();
+                    let wrapped = out.map.rows_ended_by_wrap();
                     for (i, (x, w)) in rows.iter().copied().enumerate() {
-                        let expected = match align {
-                            RowAlign::Left => 0.0,
-                            RowAlign::Center => (width - w) / 2.0,
-                            // A row that does not fit with the space it keeps at its left end hangs over the edge by it (below).
-                            RowAlign::Right => width - w,
-                            RowAlign::Justify if arabic && i == last => width - w,
-                            RowAlign::Justify => 0.0,
+                        // What is set against an edge or centred is the line without the space a wrap replaced, which is at
+                        // the left end of a right-to-left row (and hangs over the left edge) and at the right end of the other.
+                        let broken = wrapped.get(i).copied().unwrap_or(false);
+                        let (lead, trail) = match (broken, arabic) {
+                            (false, _) => (0.0, 0.0),
+                            (true, true) => (spaces_of_one(&out.out.galley.rows[i].row, true), 0.0),
+                            (true, false) => (0.0, spaces_of_one(&out.out.galley.rows[i].row, false)),
                         };
-                        let expected = expected.min(width - w).max(-leads[i]);
+                        let hang = -lead;
+                        let expected = match align {
+                            RowAlign::Left => hang,
+                            RowAlign::Center => (width - (w - lead - trail)) / 2.0 - lead,
+                            // A row that does not fit with the space it keeps at its left end hangs over the edge by it (below).
+                            RowAlign::Right => width - w + trail,
+                            RowAlign::Justify if arabic && i == last => width - w,
+                            RowAlign::Justify => hang,
+                        };
+                        let expected = expected.min(width - w + trails[i]).max(-leads[i]);
                         assert!(
                             (x - expected).abs() <= tolerance,
                             "{align:?} row {i} of {text:?}: at {x}, wanted {expected} (width {w} in {width}, {ppp} px per point)"
@@ -3728,7 +3880,8 @@ mod tests {
                     );
                     // A click on the first glyph of the first row puts the caret next to it.
                     let first_row = &out.out.galley.rows[0];
-                    let glyph = first_row.glyphs[0];
+                    let first_ink = first_row.glyphs.iter().position(|g| g.chr != ' ').expect("a letter");
+                    let glyph = first_row.glyphs[first_ink];
                     let at = Pos2::new(
                         origin.x - out.out.galley.rect.left() + first_row.pos.x + glyph.pos.x + 1.0,
                         origin.y + first_row.pos.y + first_row.row.size.y / 2.0,
@@ -3737,9 +3890,9 @@ mod tests {
                     let (map, range) = (&clicked.map, clicked.logical_range().expect("a cursor"));
                     assert_eq!(range.start, range.end, "{what}: a click selects nothing");
                     assert!(
-                        map.logical_positions(0).contains(&range.start),
-                        "{what}: the click left the caret at {range:?}, not next to the first glyph: {:?}",
-                        map.logical_positions(0)
+                        map.logical_positions(first_ink).contains(&range.start),
+                        "{what}: the click left the caret at {range:?}, not next to the first letter: {:?}",
+                        map.logical_positions(first_ink)
                     );
                     assert_eq!(rig.text, PARAGRAPH);
                 }
@@ -3810,6 +3963,135 @@ mod tests {
         }
         assert!(rows(&measured) > rows(&own));
         assert_eq!(rig.text, PARAGRAPH);
+    }
+
+    /// Ten units to a letter, in whatever unit the owner counts: the width of a line is its letters (not its spaces).
+    fn ten_a_letter(_: &egui::Context, c: bidi::Candidate<'_>) -> f32 {
+        c.line.chars().filter(|c| *c != ' ').count() as f32 * 10.0
+    }
+
+    #[test]
+    fn a_left_to_right_field_wraps_itself_by_the_owners_measure_when_asked() {
+        let text = "aa bb cc dd ee ff gg";
+        let mut rig = Rig::new(latin_fonts(), 1.0, true, 300.0, 16.0, text);
+        // Left to egui, the field is a plain one: the map is the text, wrapped by the font at the width it has.
+        let plain = rig.frame(vec![], &|edit| edit.wrap_at(65.0).measure_in(ten_a_letter));
+        assert_eq!(plain.map.shaper, text);
+        // Asked to wrap Latin too, it breaks where its owner measures: six units to a letter, 65 to a line.
+        let own = rig.frame(vec![], &|edit| edit.wrap_ltr(true).wrap_at(65.0).measure_in(ten_a_letter));
+        assert_eq!(own.map.shaper, "aa bb cc \ndd ee ff \ngg");
+        assert_eq!(own.out.galley.rows.len(), 3);
+        assert_eq!(own.map.rows_ended_by_wrap(), [true, true]);
+        assert_eq!(rig.text, text, "the text never gains a break");
+        // The width is compared to the digit, not rounded to pixels: 60 holds six letters, 59.9 five.
+        for (width, first) in [(60.0, "aa bb cc "), (59.9, "aa bb ")] {
+            let out = rig.frame(vec![], &move |edit| edit.wrap_ltr(true).wrap_at(width).measure_in(ten_a_letter));
+            assert_eq!(out.map.shaper.split('\n').next().map(str::len), Some(first.len()), "{width}: {:?}", out.map.shaper);
+        }
+        // The measure is told the paragraph a line is in.
+        let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+        let record = Rc::clone(&seen);
+        rig.text = "aa bb cc\nxx yy".into();
+        rig.frame(vec![], &move |edit| {
+            let record = Rc::clone(&record);
+            edit.wrap_ltr(true).wrap_at(25.0).measure_in(move |_, c| {
+                record.borrow_mut().push(c.paragraph.to_owned());
+                c.line.len() as f32 * 10.0
+            })
+        });
+        let paragraphs = seen.borrow();
+        assert!(paragraphs.iter().all(|p| p == "aa bb cc" || p == "xx yy") && paragraphs.iter().any(|p| p == "xx yy"), "{paragraphs:?}");
+    }
+
+    #[test]
+    fn typing_into_a_field_that_wraps_left_to_right_text_itself_edits_the_text_not_the_breaks() {
+        let mut rig = Rig::new(latin_fonts(), 1.0, true, 300.0, 16.0, "aa bb cc dd");
+        let build: Build<'_> = &|edit| edit.wrap_ltr(true).wrap_at(45.0).measure_in(ten_a_letter);
+        let out = rig.frame(vec![], build);
+        assert_eq!(out.map.shaper, "aa bb \ncc dd");
+        // Typing at the end, a character at a time, and Backspace over the wrap.
+        rig.frame(vec![Event::Text(" ee".into())], build);
+        assert_eq!(rig.text, "aa bb cc dd ee");
+        let out = rig.frame(vec![], build);
+        assert_eq!(out.map.shaper, "aa bb \ncc dd \nee");
+        for _ in 0..3 {
+            rig.frame(
+                vec![Event::Key {
+                    key: Key::Backspace,
+                    physical_key: Some(Key::Backspace),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                build,
+            );
+        }
+        assert_eq!(rig.text, "aa bb cc dd");
+        let out = rig.frame(vec![], build);
+        assert_eq!(out.map.shaper, "aa bb \ncc dd");
+        assert_eq!(out.logical_range(), Some(11..11));
+        assert_rows_aligned(&out.out, &out.map, &rig.text);
+    }
+
+    #[test]
+    fn a_wrapped_row_is_set_against_an_edge_without_the_space_the_wrap_replaced() {
+        let text = "aa bb cc dd ee ff gg hh";
+        let mut rig = Rig::new(latin_fonts(), 1.0, true, 200.0, 16.0, text);
+        // Ten units to a letter, but the glyphs are the font's: rows break at 70 units, five letters.
+        for align in [RowAlign::Left, RowAlign::Center, RowAlign::Right] {
+            let out = rig.frame(vec![], &move |edit| {
+                edit.wrap_ltr(true).wrap_at(65.0).measure_in(ten_a_letter).layout(move |ui, map, ctx| ctx.layout_aligned(ui, map, align))
+            });
+            assert!(out.map.rows_ended_by_wrap().iter().any(|wrapped| *wrapped), "the text wraps");
+            for (i, placed) in out.out.galley.rows.iter().enumerate() {
+                let ink: Vec<_> = placed.row.glyphs.iter().filter(|g| g.chr != ' ').collect();
+                let (first, last) =
+                    (ink.iter().map(|g| g.pos.x).fold(f32::MAX, f32::min), ink.iter().map(|g| g.pos.x + g.advance_width).fold(f32::MIN, f32::max));
+                let (left, right) = (placed.pos.x + first, placed.pos.x + last);
+                match align {
+                    RowAlign::Left => assert!(left.abs() <= 1.0, "row {i}: {left}"),
+                    RowAlign::Right => assert!((right - 200.0).abs() <= 1.0, "row {i}: {right}"),
+                    _ => assert!(
+                        ((left) - (200.0 - right)).abs() <= 2.0,
+                        "row {i}: {left}..{right} at {} + {} in {:?}",
+                        placed.pos.x,
+                        placed.row.size.x,
+                        out.out.galley.rect
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_space_a_wrap_replaced_is_told_to_the_hook_at_the_end_of_a_row_that_reads_that_way() {
+        let Some(mut rig) = Rig::arabic(1.0, true, 200.0, 16.0, "\u{633}\u{644}\u{627}\u{645} \u{639}\u{644}\u{64A}\u{643}\u{645} ab cd ef") else {
+            return;
+        };
+        let slots: Rc<RefCell<Vec<RowSlot>>> = Rc::default();
+        let record = Rc::clone(&slots);
+        rig.frame(vec![], &move |edit| {
+            let record = Rc::clone(&record);
+            edit.wrap_at(70.0).measure_in(ten_a_letter).layout(move |ui, map, ctx| {
+                let galley = ctx.lay_out(ui, map, ctx.job(map));
+                ctx.place_rows_with(ui, galley, map, |slot| {
+                    record.borrow_mut().push(slot);
+                    None
+                })
+            })
+        });
+        let slots = slots.borrow();
+        let wrapped: Vec<&RowSlot> = slots.iter().filter(|s| s.break_lead > 0.0 || s.break_trail > 0.0).collect();
+        assert!(!wrapped.is_empty(), "{slots:?}");
+        for slot in wrapped {
+            // A left-to-right row has the space at its right end, a right-to-left one at its left end; never both.
+            assert!(
+                if slot.rtl { slot.break_lead > 0.0 && slot.break_trail == 0.0 } else { slot.break_trail > 0.0 && slot.break_lead == 0.0 },
+                "{slot:?}"
+            );
+        }
+        // The last row is no row a wrap ended.
+        assert!(slots.last().is_some_and(|s| s.break_lead == 0.0 && s.break_trail == 0.0), "{slots:?}");
     }
 
     #[test]

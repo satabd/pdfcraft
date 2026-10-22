@@ -192,6 +192,43 @@ pub fn screen_map(text: &str) -> ScreenMap {
 /// than a line is broken between characters. It is called for the same text many times over; the
 /// caller bounds its cost.
 pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, forced_rtl: Option<bool>, mut fits: impl FnMut(&str) -> bool) -> ScreenMap {
+    wrapped_screen_map_with(text, neutral_rtl, forced_rtl, WrapRules::default(), |candidate| fits(candidate.line))
+}
+
+/// How a field decides where its lines break, beyond how wide they may be (see [`wrapped_screen_map_with`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WrapRules {
+    /// A word wider than a line stays whole on a line of its own, as a page that wraps at spaces only
+    /// writes it; by default it is broken between characters so that it stays inside the field.
+    pub whole_words: bool,
+    /// Only the space (U+0020) ends a word; by default any whitespace does (a tab, a no-break space, ...).
+    pub spaces_only: bool,
+}
+
+/// A line [`wrapped_screen_map_with`] asks `fits` about.
+#[derive(Clone, Copy, Debug)]
+pub struct Candidate<'a> {
+    /// The line so far, in logical order: from the start of its paragraph or of the line to the end of
+    /// the last word that may go on it, without the spaces after that word.
+    pub line: &'a str,
+    /// The paragraph the line belongs to (without its separator), in logical order.
+    pub paragraph: &'a str,
+    /// Where the paragraph begins in the whole text, in bytes.
+    pub offset: usize,
+    /// Where the line begins in the paragraph, in bytes.
+    pub start: usize,
+}
+
+/// [`wrapped_screen_map`] for a text whose owner has rules of its own for the lines (see [`WrapRules`]) and
+/// measures a line knowing the paragraph it is in (a page measures an Arabic paragraph word by word, and by
+/// the face of the paragraph's script, whatever the line holds).
+pub fn wrapped_screen_map_with(
+    text: &str,
+    neutral_rtl: bool,
+    forced_rtl: Option<bool>,
+    rules: WrapRules,
+    mut fits: impl FnMut(Candidate<'_>) -> bool,
+) -> ScreenMap {
     let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
     let count = offsets.len();
     let mut map = ScreenMap {
@@ -226,7 +263,17 @@ pub fn wrapped_screen_map(text: &str, neutral_rtl: bool, forced_rtl: Option<bool
             continue;
         }
         inherited = rtl_para;
-        let rows = if content.is_empty() { vec![content.clone()] } else { break_rows(text, content.clone(), &mut fits) };
+        let paragraph = text.get(content.clone()).unwrap_or_default();
+        let rows = if content.is_empty() {
+            vec![content.clone()]
+        } else {
+            // The line is a slice of the paragraph, which is a slice of the text: its place is the difference of their addresses.
+            let base = paragraph.as_ptr() as usize;
+            break_rows(text, content.clone(), rules, &mut |line: &str| {
+                let start = (line.as_ptr() as usize).checked_sub(base).filter(|start| *start <= paragraph.len()).unwrap_or(0);
+                fits(Candidate { line, paragraph, offset: content.start, start })
+            })
+        };
         for (k, row) in rows.into_iter().enumerate() {
             if k > 0 {
                 map.shown.push(VIRTUAL);
@@ -294,8 +341,8 @@ impl ScreenMap {
 /// many words as `fits` accepts per line, a word too wide for any line split between characters.
 /// The spaces after a word stay on its line, and those before the first word are on the first, so
 /// the lines cover `range` exactly. Always at least one line.
-fn break_rows(text: &str, range: Range<usize>, fits: &mut impl FnMut(&str) -> bool) -> Vec<Range<usize>> {
-    let words = words(text, range.clone());
+fn break_rows(text: &str, range: Range<usize>, rules: WrapRules, fits: &mut impl FnMut(&str) -> bool) -> Vec<Range<usize>> {
+    let words = words(text, range.clone(), rules.spaces_only);
     if words.is_empty() {
         return vec![range];
     }
@@ -316,7 +363,7 @@ fn break_rows(text: &str, range: Range<usize>, fits: &mut impl FnMut(&str) -> bo
         }
         // The word starts a line.
         loop {
-            if fits(text.get(start..word.end).unwrap_or_default()) {
+            if rules.whole_words || fits(text.get(start..word.end).unwrap_or_default()) {
                 row_end = chunk_end;
                 filled = true;
                 break;
@@ -439,6 +486,13 @@ impl ScreenMap {
         self.row_rtl.get(row).copied().unwrap_or(false)
     }
 
+    /// For each row but the last, whether it ends in a line break the wrapping made (rather than in a
+    /// line separator of the text): the space a wrapped line keeps after its last word is the one the
+    /// break replaced.
+    pub fn rows_ended_by_wrap(&self) -> Vec<bool> {
+        self.drawn.iter().zip(&self.shown).filter(|(c, _)| **c == '\n').map(|(_, shown)| *shown == VIRTUAL).collect()
+    }
+
     /// The logical index of each character of [`Self::shaper`] (so `shaper.chars().count()` entries):
     /// what a caller that lays the text out piece by piece (a style per character of the stored
     /// text) needs to know about the text egui is given. [`VIRTUAL`] for the line break a wrapped
@@ -538,7 +592,7 @@ pub fn visual_auto(text: &str) -> Cow<'_, str> {
 fn break_lines(text: &str, range: Range<usize>, fits: &mut impl FnMut(&str) -> bool) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let mut current: Option<Range<usize>> = None;
-    for word in words(text, range.clone()) {
+    for word in words(text, range.clone(), false) {
         if let Some(line) = current.as_mut() {
             if fits(text.get(line.start..word.end).unwrap_or_default()) {
                 line.end = word.end;
@@ -576,13 +630,86 @@ fn fitting_prefix(text: &str, range: Range<usize>, fits: &mut impl FnMut(&str) -
     end
 }
 
-/// The byte ranges of the whitespace-separated words of `range` in `text`.
-fn words(text: &str, range: Range<usize>) -> Vec<Range<usize>> {
+/// The rows a text's owner has laid it out in, to break the paragraphs of a field where the owner did (see
+/// [`RowPlan::new`] and [`RowPlan::fits`]).
+pub struct RowPlan {
+    /// Where each paragraph (the text between two `\n`) begins in the text.
+    starts: Vec<usize>,
+    /// The number of words on each row of each paragraph.
+    rows: Vec<Vec<usize>>,
+    spaces_only: bool,
+    /// The last (paragraph, line start) asked about and the number of words before it.
+    seen: std::cell::Cell<(usize, usize, usize)>,
+}
+
+impl RowPlan {
+    /// The plan for `text` from the number of words on each of its rows in order, if they cover the words of each
+    /// paragraph exactly (a paragraph without words has no row of its own, or one with none).
+    pub fn new(text: &str, rows: &[usize], spaces_only: bool) -> Option<Self> {
+        let mut left = rows.iter().copied().peekable();
+        let (mut starts, mut plan) = (Vec::new(), Vec::new());
+        let mut offset = 0_usize;
+        for paragraph in text.split('\n') {
+            let total = word_count(paragraph, spaces_only);
+            let mut here = Vec::new();
+            if total == 0 {
+                if left.peek() == Some(&0) {
+                    left.next();
+                }
+            } else {
+                let mut sum = 0_usize;
+                while sum < total {
+                    let n = left.next().filter(|n| *n > 0)?;
+                    sum = sum.checked_add(n)?;
+                    here.push(n);
+                }
+                if sum != total {
+                    return None;
+                }
+            }
+            starts.push(offset);
+            plan.push(here);
+            offset = offset.checked_add(paragraph.len())?.checked_add(1)?;
+        }
+        left.next().is_none().then_some(Self { starts, rows: plan, spaces_only, seen: std::cell::Cell::new((usize::MAX, 0, 0)) })
+    }
+
+    /// Whether the line fits its row: it has no more words than the row that begins where it does. A line the plan
+    /// knows nothing about fits.
+    pub fn fits(&self, candidate: &Candidate<'_>) -> bool {
+        let Ok(paragraph) = self.starts.binary_search(&candidate.offset) else { return true };
+        let Some(rows) = self.rows.get(paragraph) else { return true };
+        let (seen_paragraph, seen_start, seen_first) = self.seen.get();
+        let first = if (seen_paragraph, seen_start) == (paragraph, candidate.start) {
+            seen_first
+        } else {
+            let first = candidate.paragraph.get(..candidate.start).map_or(0, |before| word_count(before, self.spaces_only));
+            self.seen.set((paragraph, candidate.start, first));
+            first
+        };
+        let mut at = 0_usize;
+        for n in rows {
+            if at == first {
+                return word_count(candidate.line, self.spaces_only) <= *n;
+            }
+            at = at.saturating_add(*n);
+        }
+        true
+    }
+}
+
+/// How many words `text` has: the stretches between whitespace (only the space if `spaces_only`).
+pub fn word_count(text: &str, spaces_only: bool) -> usize {
+    words(text, 0..text.len(), spaces_only).len()
+}
+
+/// The byte ranges of the words of `range` in `text`, which whitespace (only the space if `spaces_only`) separates.
+fn words(text: &str, range: Range<usize>, spaces_only: bool) -> Vec<Range<usize>> {
     let mut words = Vec::new();
     let mut start = None;
     for (at, c) in text.get(range.clone()).unwrap_or_default().char_indices() {
         let at = range.start.saturating_add(at);
-        match (c.is_whitespace(), start) {
+        match (if spaces_only { c == ' ' } else { c.is_whitespace() }, start) {
             (true, Some(s)) => {
                 words.push(s..at);
                 start = None;
@@ -1312,6 +1439,66 @@ mod tests {
         let spaces = wrapped_screen_map("  ab   ", false, None, at_most(9));
         assert_eq!(spaces.shaper, "  ab   ");
         assert_eq!(wrapped_screen_map("   ", false, None, at_most(1)).shaper, "   ");
+    }
+
+    #[test]
+    fn wrap_rules_keep_long_words_whole_and_end_words_at_spaces_only() {
+        let rules = WrapRules { whole_words: true, spaces_only: true };
+        let with = |text: &str, rules: WrapRules, n: usize| {
+            wrapped_screen_map_with(text, false, None, rules, |c| c.line.trim_matches(' ').chars().count() <= n).shaper
+        };
+        // A word wider than a line stays whole on a line of its own, where it is broken by default.
+        assert_eq!(with("ab abcdefgh cd", rules, 3), "ab \nabcdefgh \ncd");
+        assert_eq!(with("ab abcdefgh cd", WrapRules::default(), 3), "ab \nabc\ndef\ngh \ncd");
+        // Only the space ends a word: a no-break space and a tab do not, by default they do.
+        assert_eq!(with("ab c\u{a0}d ef", rules, 4), "ab \nc\u{a0}d \nef");
+        assert_eq!(with("ab c\u{a0}d ef", WrapRules::default(), 4), "ab c\u{a0}\nd ef");
+        assert_eq!(with("a\tb c", rules, 2), "a\tb \nc");
+        // The rules change nothing for text whose words fit.
+        for n in [3, 5, 9] {
+            assert_eq!(with("ab cd ef gh", rules, n), with("ab cd ef gh", WrapRules::default(), n));
+        }
+        // Every character is still drawn once.
+        let map = wrapped_screen_map_with("ab abcdefgh cd", false, None, rules, at_most_in(3));
+        assert_eq!(map.logical_of_screen(0..map.screen_len()), (0..14).collect::<Vec<_>>());
+    }
+
+    /// [`at_most`], for a measure that is given the candidate line.
+    fn at_most_in(n: usize) -> impl FnMut(Candidate<'_>) -> bool {
+        move |c| c.line.trim_matches(' ').chars().count() <= n
+    }
+
+    #[test]
+    fn a_line_is_measured_knowing_its_paragraph() {
+        let text = "one two three\n\nfour five six seven";
+        let mut seen: Vec<(String, String)> = Vec::new();
+        let map = wrapped_screen_map_with(text, false, None, WrapRules::default(), |c| {
+            seen.push((c.line.to_owned(), c.paragraph.to_owned()));
+            // Where the paragraph and the line begin: the line is that part of the text.
+            assert!(text[c.offset..].starts_with(c.paragraph), "{c:?}");
+            assert!(c.paragraph[c.start..].starts_with(c.line), "{c:?}");
+            c.line.chars().count() <= 9
+        });
+        assert_eq!(word_count("  one  two ", false), 2);
+        assert_eq!(word_count("a\u{a0}b c", true), 2);
+        assert_eq!(word_count("a\u{a0}b c", false), 3);
+        assert_eq!(map.shaper, "one two \nthree\n\nfour five \nsix seven");
+        assert!(!seen.is_empty());
+        for (line, paragraph) in &seen {
+            assert!(paragraph == "one two three" || paragraph == "four five six seven", "{paragraph:?}");
+            assert!(paragraph.contains(line.as_str()), "{line:?} is part of {paragraph:?}");
+        }
+        // The paragraph is the one the line is in, without the separator that ends it.
+        assert!(seen.iter().any(|(line, paragraph)| line == "six seven" && paragraph == "four five six seven"));
+    }
+
+    #[test]
+    fn the_rows_a_wrap_ended_are_told_from_those_a_line_break_of_the_text_ended() {
+        let map = wrapped_screen_map("ab cd ef\ngh", false, None, at_most(5));
+        assert_eq!(map.shaper, "ab cd \nef\ngh");
+        assert_eq!(map.rows_ended_by_wrap(), [true, false]);
+        assert!(wrapped_screen_map("abc", false, None, |_| true).rows_ended_by_wrap().is_empty());
+        assert_eq!(ScreenMap::identity("a\nb").rows_ended_by_wrap(), [false], "an identity map draws the text's own break");
     }
 
     #[test]

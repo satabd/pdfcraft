@@ -238,15 +238,44 @@ pub fn lines(t: &AddedText) -> Vec<String> {
     wrapped(t).into_iter().map(|(line, _)| line).collect()
 }
 
+/// How one paragraph of a text item is measured when it is wrapped: the flags that decide which fonts
+/// measure it and in which direction, from the paragraph as a whole.
+struct Paragraph<'a> {
+    t: &'a AddedText,
+    /// Arabic or Hebrew: laid out with the bidirectional algorithm and shaped.
+    rtl_script: bool,
+    thai: bool,
+    /// Its first strong character runs right to left (and it has such script).
+    rtl: bool,
+}
+
+impl<'a> Paragraph<'a> {
+    fn new(t: &'a AddedText, para: &str) -> Self {
+        let rtl_script = para.chars().any(|c| is_arabic(c) || is_hebrew(c));
+        let thai = para.chars().any(is_thai);
+        let rtl = rtl_script && unicode_bidi::get_base_direction(para) == unicode_bidi::Direction::Rtl;
+        Paragraph { t, rtl_script, thai, rtl }
+    }
+
+    /// Whether its lines are measured word by word, with the shaper (Arabic, Hebrew, Thai).
+    fn shaped(&self) -> bool {
+        self.rtl_script || self.thai
+    }
+
+    /// The width of `s`, a word or a space, in the paragraph's fonts.
+    fn measure(&self, s: &str) -> f64 {
+        if self.shaped() { shaped_width(self.t, s, self.rtl) } else { self.t.family.width(s, self.t.size, self.t.bold, self.t.italic) }
+    }
+}
+
 /// [`lines`], each with whether its paragraph runs right to left (its first strong character
 /// does).
 fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
     let width = (t.rect[2] - t.rect[0]).max(t.size);
     let mut out = Vec::new();
     for para in t.text.split('\n') {
-        // Arabic or Hebrew: laid out with the bidirectional algorithm and shaped.
-        let rtl_script = para.chars().any(|c| is_arabic(c) || is_hebrew(c));
-        let thai = para.chars().any(is_thai);
+        let measuring = Paragraph::new(t, para);
+        let (rtl_script, thai, rtl) = (measuring.rtl_script, measuring.thai, measuring.rtl);
         if thai
             && !rtl_script
             && let Ok(lines) = thai_lines(t, para, width)
@@ -254,12 +283,11 @@ fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
             out.extend(lines.into_iter().map(|line| (line, false)));
             continue;
         }
-        let rtl = rtl_script && unicode_bidi::get_base_direction(para) == unicode_bidi::Direction::Rtl;
         // Arabic words are shaped one by one (joining stops at spaces), so a line's width is the
         // sum of its words' and shaping stays linear in the paragraph's length. The space is the
         // paragraph's; a space between Latin words is drawn in the item's font, a few hundredths
         // of an em apart.
-        let measure = |s: &str| if rtl_script || thai { shaped_width(t, s, rtl) } else { t.family.width(s, t.size, t.bold, t.italic) };
+        let measure = |s: &str| measuring.measure(s);
         let space = measure(" ");
         let (mut line, mut line_w) = (String::new(), 0.0);
         for word in para.split(' ') {
@@ -278,6 +306,67 @@ fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
         out.push((line, rtl));
     }
     out
+}
+
+/// What [`lines`] measures when it decides whether a line fits the box: the width, at the item's size, of a
+/// line of one of its paragraphs, in the fonts that write the item (the standard font for Latin, the
+/// craft-fonts faces, shaped, for a paragraph with Arabic or Hebrew, measured word by word as `lines` does).
+///
+/// A text field that wraps a draft where the page will (the Add text box) breaks a line at the first word
+/// that makes `width` exceed the box, as `lines` does. The spaces a paragraph starts with are not counted:
+/// the page drops them. Only the item's style is used, not its text or box.
+pub struct LineMeasure {
+    item: AddedText,
+    /// The widths of words and spaces measured so far, by (shaped, right to left, text).
+    words: std::cell::RefCell<HashMap<(bool, bool, String), f64>>,
+    /// The flags of the paragraph measured last: its text, Arabic or Hebrew in it, Thai in it, its direction.
+    last: std::cell::RefCell<Option<(String, bool, bool, bool)>>,
+}
+
+impl LineMeasure {
+    /// The most words kept: a pasted book does not keep growing the memory.
+    const MAX_WORDS: usize = 8192;
+
+    pub fn new(item: &AddedText) -> Self {
+        LineMeasure { item: AddedText { text: String::new(), ..item.clone() }, words: Default::default(), last: Default::default() }
+    }
+
+    /// The width in points of `line`, which starts a line of `paragraph` (the text between two `\n`) and ends at
+    /// the end of one of its words. This is the width `lines` compares with the box's.
+    pub fn width(&self, paragraph: &str, line: &str) -> f64 {
+        let flags = match self.last.try_borrow_mut() {
+            Ok(mut last) => match last.as_ref() {
+                Some((text, rtl_script, thai, rtl)) if text == paragraph => (*rtl_script, *thai, *rtl),
+                _ => {
+                    let p = Paragraph::new(&self.item, paragraph);
+                    *last = Some((paragraph.to_owned(), p.rtl_script, p.thai, p.rtl));
+                    (p.rtl_script, p.thai, p.rtl)
+                }
+            },
+            // Never held across a call; a re-entrant call just works the flags out again.
+            Err(_) => {
+                let p = Paragraph::new(&self.item, paragraph);
+                (p.rtl_script, p.thai, p.rtl)
+            }
+        };
+        let p = Paragraph { t: &self.item, rtl_script: flags.0, thai: flags.1, rtl: flags.2 };
+        // The page drops the spaces a paragraph begins with: its first word is the first one with letters.
+        let line = line.trim_start_matches(' ');
+        let word = |w: &str| -> f64 {
+            let Ok(mut memo) = self.words.try_borrow_mut() else { return p.measure(w) };
+            if memo.len() >= Self::MAX_WORDS {
+                memo.clear();
+            }
+            *memo.entry((p.shaped(), p.rtl, w.to_owned())).or_insert_with(|| p.measure(w))
+        };
+        if !p.shaped() {
+            return p.measure(line);
+        }
+        let space = word(" ");
+        let mut words = line.split(' ');
+        let first = words.next().map_or(0.0, &word);
+        words.fold(first, |sum, w| sum + space + word(w))
+    }
 }
 
 /// Thai wrapping at shaped cluster boundaries never detaches a tone/vowel mark from its base.
@@ -935,3 +1024,5 @@ fn drop_fonts(doc: &Document, res: &mut Dict, names: &[Vec<u8>]) {
 
 #[cfg(test)]
 mod arabic_tests;
+#[cfg(test)]
+mod measure_tests;

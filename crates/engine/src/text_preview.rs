@@ -32,6 +32,22 @@ impl TextEditPreview {
     }
 }
 
+/// Draft measuring for one paragraph, on a copy of the document (see [`Document::text_draft_probe`]).
+#[derive(Clone)]
+pub struct TextDraftProbe {
+    cos: pdfcraft_cos::Document,
+    page: usize,
+    block: usize,
+}
+
+impl TextDraftProbe {
+    /// The rows the rewrite that applies `text` in `style` lays the paragraph out in (what Apply will write), or `None` if
+    /// it refuses the draft.
+    pub fn rows(&self, text: &str, style: &pdfcraft_edit::BlockStyle) -> Option<Vec<String>> {
+        guard(|| pdfcraft_edit::text::text_edit_layout(&self.cos, self.page, self.block, text, style).ok().map(|layout| layout.rows)).ok().flatten()
+    }
+}
+
 impl Document {
     /// Background for retyping an added text item, without changing its saved content.
     pub fn added_text_preview(&self, page: usize, index: usize) -> Result<TextEditPreview, String> {
@@ -59,6 +75,12 @@ impl Document {
             let editor = self.editor.as_ref().ok_or("the document can't be read")?;
             pdfcraft_edit::text::text_edit_layout(&editor.cos, page, block, text, style).map_err(|e| e.to_string())
         })?
+    }
+
+    /// An owned, read-only copy of the document for measuring drafts of paragraph `block` of `page` where a borrow of the
+    /// document cannot go (a closure an editor keeps for the frame). Nothing in it changes the document.
+    pub fn text_draft_probe(&self, page: usize, block: usize) -> Option<TextDraftProbe> {
+        self.editor.as_ref().map(|editor| TextDraftProbe { cos: editor.cos.clone(), page, block })
     }
 
     /// Embedded source faces for a text editor, bounded and validated as sfnt programs.

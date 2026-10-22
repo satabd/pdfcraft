@@ -150,6 +150,9 @@ pub struct TextEditLayout {
     pub source_rect: [f64; 4],
     pub draft_rect: Option<[f64; 4]>,
     pub overflow: bool,
+    /// The text of each row of the paragraph as the rewrite lays it out, top to bottom: where the page breaks the draft
+    /// into lines (a row of several runs is one row).
+    pub rows: Vec<String>,
 }
 
 pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, style: &BlockStyle) -> Result<TextEditLayout, EditError> {
@@ -159,7 +162,8 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
     let original = group_blocks(&lines);
     let source = original.get(block).ok_or(EditError::Invalid("text block does not exist".into()))?;
     if text == source.editor_text && *style == BlockStyle::default() {
-        return Ok(TextEditLayout { source_rect: source.rect, draft_rect: Some(source.rect), overflow: false });
+        let rows = source.rows.iter().map(|row| row.iter().filter_map(|i| lines.get(*i)).map(|l| l.text.as_str()).collect::<String>()).collect();
+        return Ok(TextEditLayout { source_rect: source.rect, draft_rect: Some(source.rect), overflow: false, rows });
     }
     // Subtract the untouched runs by value, rather than by operator offsets: a rewrite may
     // split BT/ET or add font resources. A multiset also handles coincident repeated text.
@@ -174,6 +178,8 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
     let mut draft = doc.clone();
     rewrite_block_from(&mut draft, page, lines, block, Some(text), style, MAX_TYPE3_GLYPHS)?;
     let mut rect: Option<[f64; 4]> = None;
+    // The runs the rewrite wrote, in order; those on one baseline are one row.
+    let mut rows: Vec<(f64, String)> = Vec::new();
     for line in text_lines(&draft, page)? {
         if let Some(count) = untouched.get_mut(&key(&line))
             && *count > 0
@@ -182,10 +188,15 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
             continue;
         }
         rect = Some(rect.map_or(line.rect, |r| [r[0].min(line.rect[0]), r[1].min(line.rect[1]), r[2].max(line.rect[2]), r[3].max(line.rect[3])]));
+        match rows.last_mut() {
+            Some((baseline, row)) if (*baseline - line.origin_baseline()).abs() <= line.size.abs() * 0.25 => row.push_str(&line.text),
+            _ => rows.push((line.origin_baseline(), line.text.clone())),
+        }
     }
+    let rows = rows.into_iter().map(|(_, row)| row).collect();
     let overflow = rect
         .is_some_and(|r| r[0] < source.rect[0] - 0.5 || r[1] < source.rect[1] - 0.5 || r[2] > source.rect[2] + 0.5 || r[3] > source.rect[3] + 0.5);
-    Ok(TextEditLayout { source_rect: source.rect, draft_rect: rect, overflow })
+    Ok(TextEditLayout { source_rect: source.rect, draft_rect: rect, overflow, rows })
 }
 
 /// Text and graphics state captured for rewriting.

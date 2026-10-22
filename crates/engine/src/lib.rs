@@ -41,7 +41,7 @@ pub mod xfa;
 
 pub use signature_image::{ImageSignaturePreview, SignatureImage};
 pub use signature_scan::{PhotoRect, ScanError, SignaturePhoto, Turn};
-pub use text_preview::TextEditPreview;
+pub use text_preview::{TextDraftProbe, TextEditPreview};
 
 pub use pdfcraft_organize::{BoxSpec, FieldConflicts, PageBox, SplitBy, Transition, TransitionSpec, split_ranges};
 
@@ -51,7 +51,9 @@ pub use pdfcraft_organize::view::{InitialView, Layout as InitialLayout, Magnific
 
 pub use pdfcraft_cos::Algorithm;
 pub use pdfcraft_create::{CONVERTIBLE, CreateError, ImageResolution, SourceKind, decode_text, source_kind};
-pub use pdfcraft_edit::added::{text_rect as added_text_rect, text_width as added_text_width};
+pub use pdfcraft_edit::added::{
+    LineMeasure as AddedLineMeasure, lines as added_text_lines, text_rect as added_text_rect, text_width as added_text_width,
+};
 /// Whether a block of text reads right to left as a whole (more right-to-left letters than left-to-right ones), the rule
 /// Edit text writes a block back by.
 pub use pdfcraft_edit::bidi::rtl_base;
