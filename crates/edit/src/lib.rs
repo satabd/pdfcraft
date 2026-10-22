@@ -931,6 +931,10 @@ mod stamped_shaped_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod text_baseline_tests;
+#[cfg(test)]
+mod text_justify_tests;
+#[cfg(test)]
 mod text_layout_tests;
 #[cfg(test)]
 mod text_shaped_tests;

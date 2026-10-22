@@ -7,8 +7,20 @@ use pdfcraft_ui_egui::PdfCraftApp;
 
 /// A three-row Helvetica 12 pt paragraph at (20, 250) of a 220 × 300 pt page (the font is not embedded).
 fn page() -> Vec<u8> {
-    let body =
-        "BT /F1 12 Tf 14.4 TL 20 250 Td (The quick brown fox jumps over) Tj T* (the lazy dog while nine wizards) Tj T* (quickly box jumpers) Tj ET";
+    page_of(
+        "BT /F1 12 Tf 14.4 TL 20 250 Td (The quick brown fox jumps over) Tj T* (the lazy dog while nine wizards) Tj T* (quickly box jumpers) Tj ET",
+    )
+}
+
+/// The same paragraph with the end of its first row blue: two looks, which the styled rewrite writes.
+fn two_looks_page() -> Vec<u8> {
+    page_of(
+        "BT /F1 12 Tf 14.4 TL 20 250 Td (The quick brown fox jumps ) Tj 0 0 1 rg (over) Tj 0 g T* (the lazy dog while nine wizards) Tj T* (quickly box jumpers) Tj ET",
+    )
+}
+
+/// A page of 220 × 300 pt with `body` as its content (the font /F1 is Helvetica, not embedded).
+fn page_of(body: &str) -> Vec<u8> {
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
         "<< /Type /Pages /Kids [4 0 R] /Count 1 /MediaBox [0 0 220 300] >>".to_owned(),
@@ -32,11 +44,15 @@ fn page() -> Vec<u8> {
 }
 
 fn harness(zoom: &str) -> Harness<'static, PdfCraftApp> {
+    harness_of(zoom, page())
+}
+
+fn harness_of(zoom: &str, pdf: Vec<u8>) -> Harness<'static, PdfCraftApp> {
     let zoom = zoom.to_owned();
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
         let mut app = PdfCraftApp::new();
         app.set_option("language", "en").unwrap();
-        app.open_bytes("doc.pdf", None, page()).expect("fixture opens");
+        app.open_bytes("doc.pdf", None, pdf.clone()).expect("fixture opens");
         app.set_option("zoom", &zoom).unwrap();
         app
     });
@@ -226,6 +242,11 @@ fn a_justified_paragraph_is_shown_with_its_spaces_stretched_to_the_pages_rows() 
     }
 }
 
+/// `rows` with the runs of a row joined by one space (`page_rows` puts one between runs the rewrite writes without).
+fn spaced(rows: &[String]) -> Vec<String> {
+    rows.iter().map(|row| row.split_whitespace().collect::<Vec<_>>().join(" ")).collect()
+}
+
 /// A retyped paragraph with Justify chosen in the Format panel, in the editor; `apply` also applies it.
 fn justified_draft(zoom: &str, apply: bool) -> Harness<'static, PdfCraftApp> {
     let mut h = harness(zoom);
@@ -274,4 +295,85 @@ fn clicks_over_stretched_spaces_land_on_the_letters_they_are_on() {
             assert_eq!(typed, Some(expected), "word {w} of the second row ({zoom}%)");
         }
     }
+}
+
+/// Justify chosen for a retyped paragraph of two looks, which the styled rewrite writes (one look is the single-style
+/// rewrite's): the editor's rows are stretched to the widths the page's lines have after Apply, as for one look, and a
+/// line break ends a row that neither stretches. The paragraph is `first`, a line break and `second`.
+fn justified_two_looks(zoom: &str, first: &str, second: Option<&str>) -> (Harness<'static, PdfCraftApp>, Vec<(f32, f32)>) {
+    let mut h = harness_of(zoom, two_looks_page());
+    open_editor(&mut h);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(egui::Event::Text(first.into()));
+    if let Some(second) = second {
+        h.key_press(Key::Enter);
+        h.event(egui::Event::Text(second.into()));
+    }
+    h.run_steps(4);
+    let natural = editor_ink(&h);
+    h.state_mut().views[0].line_editor.as_mut().expect("the editor is open").look.align = pdfcraft_engine::TextAlign::Justify;
+    h.run_steps(4);
+    (h, natural)
+}
+
+#[test]
+fn a_justified_paragraph_of_two_looks_is_shown_stretched_to_the_pages_rows_after_apply() {
+    for zoom in ["100", "200"] {
+        let (mut h, natural) = justified_two_looks(zoom, LONG, None);
+        let shown = editor_ink(&h);
+        assert_eq!(shown.len(), natural.len(), "the same rows when justified ({zoom}%)");
+        assert!(shown.len() >= 4, "the paragraph wraps ({zoom}%): {:?}", layout_rows(&h));
+        let planned = layout_rows(&h);
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+        h.run_steps(4);
+        let page = page_ink(&h);
+        assert_eq!(spaced(&planned), spaced(&page_rows(&h)), "the rewrite's rows are the page's ({zoom}%)");
+        assert_eq!(page.len(), shown.len(), "as many rows as the editor showed ({zoom}%)");
+        let lines = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0);
+        assert!(lines.iter().any(|l| l.color == [0.0, 0.0, 1.0]), "the blue look is kept: {lines:?}");
+        // Every row but the last runs from the page's left edge of the paragraph to its right edge, in the editor and on the page.
+        for (i, ((left, right), ((page_left, page_right), _))) in shown.iter().zip(&page).enumerate().take(shown.len() - 1) {
+            assert!((right - page_right).abs() <= 1.5, "row {i} ends at {right}, the page's line at {page_right} ({zoom}%)");
+            assert!((left - page_left).abs() <= 1.5, "row {i} begins at {left}, the page's line at {page_left} ({zoom}%)");
+            assert!(natural[i].1 < *right - 1.0, "the stretch is what moved it: row {i} was {:?} ({zoom}%)", natural[i]);
+        }
+        let (last_left, last_right) = shown[shown.len() - 1];
+        let ((_, page_last_right), _) = page[page.len() - 1];
+        assert!((last_right - page_last_right).abs() <= 2.0, "the last row ends where its words do ({zoom}%)");
+        assert!(last_right - last_left < (shown[0].1 - shown[0].0) * 0.95, "and is not stretched ({zoom}%)");
+    }
+}
+
+#[test]
+fn a_justified_row_before_a_line_break_is_shown_unstretched_like_the_page() {
+    const FIRST: &str = "The quick brown fox jumps over the lazy dog while nine wizards quickly box jumpers";
+    const SECOND: &str = "and wrap lines at the edge of this narrow paragraph so that it takes several more rows to end";
+    let (mut h, _) = justified_two_looks("150", FIRST, Some(SECOND));
+    let shown = editor_ink(&h);
+    let planned = layout_rows(&h);
+    let before_break = planned.iter().position(|row| row.ends_with("jumpers")).expect("the row before the break");
+    assert!(before_break >= 2 && planned.len() > before_break + 2, "{planned:?}");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+    h.run_steps(4);
+    let page = page_ink(&h);
+    assert_eq!(spaced(&page_rows(&h)), spaced(&planned), "the rewrite's rows are the page's");
+    assert_eq!(page.len(), shown.len());
+    let full = page[0].0.1;
+    for (i, ((left, right), ((page_left, page_right), _))) in shown.iter().zip(&page).enumerate() {
+        let stretched = i != before_break && i + 1 != shown.len();
+        // (The rows the paragraph had not have their letters fitted to the page's more loosely: the last is a row the source lacked.)
+        let tolerance = if stretched {
+            1.5
+        } else if i == before_break {
+            2.0
+        } else {
+            8.0
+        };
+        assert!((right - page_right).abs() <= tolerance, "row {i} ends at {right}, the page's line at {page_right}");
+        assert!((left - page_left).abs() <= tolerance, "row {i} begins at {left}, the page's line at {page_left}");
+        if stretched {
+            assert!((page_right - full).abs() <= 1.0, "the page's row {i} fills the width");
+        }
+    }
+    assert!(page[before_break].0.1 < full - 3.0, "the page leaves the row before the break short: {page:?}");
 }

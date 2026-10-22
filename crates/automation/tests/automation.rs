@@ -6867,17 +6867,27 @@ fn mixed_visual_region_edit_preview_save_reopen_and_undo_through_tools() {
     // A box to each row (top-left-origin points), and no Arabic to shape in a page face.
     assert_eq!(unchanged["row_boxes"].as_array().unwrap().len(), unchanged["rows"].as_array().unwrap().len());
     assert_eq!(unchanged["shaping_faces"], json!([]));
-    // A paragraph of two looks is rewritten by the styled route, which does not justify: asked for
-    // justified rows, each row box still starts at the paragraph's left edge and is no wider than it.
+    // A paragraph of two looks is rewritten by the styled route, which justifies as the single-style route does: every row
+    // the wrap breaks is stretched to the paragraph's width, so its box spans the source's, and the last row is not stretched.
     let long = "Heading\nBody bold text and some more words that fill the row and wrap";
     let justified = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":long.replace('\n', " "),"align":"justify"}));
     let (boxes, source) = (justified["row_boxes"].as_array().unwrap(), &justified["source_rect"]);
     assert_eq!(boxes.len(), justified["rows"].as_array().unwrap().len(), "{justified}");
-    assert!(boxes.len() >= 2, "{justified}");
+    assert!(boxes.len() >= 4, "{justified}");
     let (left, right) = (source[0].as_f64().unwrap(), source[2].as_f64().unwrap());
-    for b in boxes {
-        assert!((b[0].as_f64().unwrap() - left).abs() < 1.0 && b[2].as_f64().unwrap() <= right + 1.0, "{boxes:?} against {source}");
+    let (last, stretched) = boxes.split_last().unwrap();
+    // (The heading, a single word at 18 pt, is a row of one word, which is not stretched.)
+    assert_eq!(justified["rows"][0], "Heading", "{justified}");
+    assert!(boxes[0][2].as_f64().unwrap() < right - 0.5, "{boxes:?} against {source}");
+    for b in &stretched[1..] {
+        assert!((b[0].as_f64().unwrap() - left).abs() < 0.5 && (b[2].as_f64().unwrap() - right).abs() < 0.5, "{boxes:?} against {source}");
     }
+    assert!((last[0].as_f64().unwrap() - left).abs() < 0.5 && last[2].as_f64().unwrap() < right - 0.5, "{boxes:?} against {source}");
+    // Not justified, the same draft is ragged: the rows are no wider than the paragraph, and not all as wide.
+    let ragged = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":long.replace('\n', " ")}));
+    let ragged = ragged["row_boxes"].as_array().unwrap();
+    assert!(ragged.iter().all(|b| b[2].as_f64().unwrap() <= right + 0.5), "{ragged:?} against {source}");
+    assert!(ragged[..ragged.len() - 1].iter().any(|b| b[2].as_f64().unwrap() < right - 0.5), "{ragged:?} against {source}");
     assert!(a.call("text_edit_layout", &json!({"doc":doc,"page":1,"paragraph":1,"align":"sideways"})).is_err());
     let growing = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":"Heading\nBody bold text\nExtra row\nAnother row"}));
     assert_eq!(growing["overflow"], true);

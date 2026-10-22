@@ -499,18 +499,77 @@ fn formatting_part_of_arabic_text_keeps_the_styled_path_and_a_refusal_changes_no
     assert_eq!(bytes_of(&doc), before);
 }
 
-#[test]
-fn justified_arabic_is_right_aligned_and_uses_no_spacing() {
-    let _face = fake();
+const WORDS: &str = "مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم";
+
+/// What a justified draft wrote: the page's lines (rects in points), `/ActualText` of each line and the generated fonts'
+/// `ToUnicode` maps, for the draft in `style`.
+fn written(typed: &str, style: &BlockStyle) -> (Document, Vec<text::TextLine>) {
     let mut doc = page();
-    let typed = "مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم";
-    let style = BlockStyle { width: Some(100.0), align: Some(Align::Justify), char_spacing: Some(2.0), ..Default::default() };
-    text::rewrite_block(&mut doc, 0, 0, Some(typed), &style).expect("justified");
-    assert!(ops(&doc).iter().all(|o| !o.is("TJ")));
-    assert!(ops(&doc).iter().filter(|o| o.is("Tw") || o.is("Tc")).all(|o| o.num(0) == Some(0.0)), "{:?}", ops(&doc));
+    text::rewrite_block(&mut doc, 0, 0, Some(typed), style).expect("writes");
     let lines = text::text_lines(&reopen(&doc), 0).expect("lines");
-    assert!(lines.len() >= 3);
-    assert!(lines.iter().all(|l| (l.rect[2] - lines[0].rect[2]).abs() < 0.5));
+    (doc, lines)
+}
+
+#[test]
+fn justified_arabic_fills_every_row_it_breaks_with_adjustments_after_its_spaces() {
+    let _face = fake();
+    let style = BlockStyle { width: Some(100.0), align: Some(Align::Justify), char_spacing: Some(2.0), ..Default::default() };
+    let (doc, lines) = written(WORDS, &style);
+    assert!(lines.len() >= 3, "{:?}", lines.iter().map(|l| l.rect).collect::<Vec<_>>());
+    let (last, rows) = lines.split_last().expect("a last row");
+    // The box is 100 pt wide from x = 300: the rows the wrap broke fill it from edge to edge.
+    for l in rows {
+        assert!((l.rect[0] - 300.0).abs() < 0.5 && (l.rect[2] - 400.0).abs() < 0.5, "{:?}: {:?}", l.text, l.rect);
+    }
+    // The last row is as the page left it unjustified: right-to-left text ends at the right edge.
+    assert!((last.rect[2] - 400.0).abs() < 0.5 && last.rect[0] > 300.5, "{:?}", last.rect);
+    let ops = ops(&doc);
+    // Word spacing does not reach the generated fonts' codes, nor does character spacing belong to joined letters.
+    assert!(ops.iter().any(|o| o.is("TJ")));
+    assert!(ops.iter().filter(|o| o.is("Tw") || o.is("Tc")).all(|o| o.num(0) == Some(0.0)), "{ops:?}");
+    // What the text says is what it said unjustified: the same lines in typing order, the same glyph maps.
+    let (plain, plain_lines) = written(WORDS, &BlockStyle { width: Some(100.0), ..Default::default() });
+    assert_eq!(actual_texts(&doc), actual_texts(&plain));
+    assert_eq!(lines.iter().map(|l| &l.text).collect::<Vec<_>>(), plain_lines.iter().map(|l| &l.text).collect::<Vec<_>>());
+    let maps = |doc: &Document| arabic_fonts(doc).iter().map(|(_, f)| to_unicode(doc, f)).collect::<Vec<_>>();
+    assert_eq!(maps(&doc), maps(&plain));
+    // (An unjustified paragraph is ragged: the rows end at the right edge but begin where their width puts them.)
+    assert!(plain_lines.iter().any(|l| l.rect[0] > 300.5));
+}
+
+#[test]
+fn a_justified_arabic_row_of_one_word_or_before_a_line_break_is_not_stretched() {
+    let _face = fake();
+    let style = BlockStyle { width: Some(100.0), align: Some(Align::Justify), ..Default::default() };
+    // One word of twelve letters (72 pt) fills most of a row, and the next, of eight, does not fit after it.
+    let (doc, lines) = written("ببببببببببببب ببببببب مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم", &style);
+    assert!(lines.len() >= 3, "{:?}", lines.iter().map(|l| l.rect).collect::<Vec<_>>());
+    let first = lines.first().expect("a first row");
+    assert!(!actual_texts(&doc).first().expect("a span").contains(' '), "{:?}", actual_texts(&doc));
+    assert!(first.rect[2] - first.rect[0] < 99.0 && (first.rect[2] - 400.0).abs() < 0.5, "a single word keeps its width: {:?}", first.rect);
+    // A line break ends a row that the wrap did not break: it keeps its width too.
+    let (doc, lines) = written("مرحبا بالعالم\nمرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم", &style);
+    assert!(lines.len() >= 3, "{:?}", lines.iter().map(|l| l.rect).collect::<Vec<_>>());
+    assert_eq!(actual_texts(&doc).first().map(String::as_str), Some("مرحبا بالعالم"));
+    let first = lines.first().expect("a first row");
+    assert!(first.rect[2] - first.rect[0] < 90.0 && (first.rect[2] - 400.0).abs() < 0.5, "{:?}", first.rect);
+    // The rows the wrap broke after it still fill the width.
+    assert!(
+        lines[1..lines.len() - 1].iter().all(|l| (l.rect[0] - 300.0).abs() < 0.5 && (l.rect[2] - 400.0).abs() < 0.5),
+        "{:?}",
+        lines.iter().map(|l| l.rect).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_justified_arabic_row_with_latin_words_in_it_is_stretched_to_the_width_too() {
+    let _face = fake();
+    let style = BlockStyle { width: Some(120.0), align: Some(Align::Justify), ..Default::default() };
+    let (_, lines) = written("مرحبا hello world بالعالم مرحبا by the way بالعالم مرحبا the end بالعالم", &style);
+    assert!(lines.len() >= 3, "{:?}", lines.iter().map(|l| l.rect).collect::<Vec<_>>());
+    for l in &lines[..lines.len() - 1] {
+        assert!((l.rect[0] - 300.0).abs() < 0.5 && (l.rect[2] - 420.0).abs() < 0.5, "{:?}: {:?}", l.text, l.rect);
+    }
 }
 
 #[test]
@@ -696,4 +755,22 @@ fn the_real_face_round_trips_typed_text_by_block_and_line() {
             }
         }
     }
+}
+
+#[test]
+fn the_real_face_justifies_a_wrapped_paragraph_to_its_width() {
+    if !real_face() {
+        return;
+    }
+    let style = BlockStyle { width: Some(120.0), align: Some(Align::Justify), ..Default::default() };
+    let typed = "هذا نص عربي طويل يكتب في حقل ضيق ليلتف على عدة أسطر ويبقى مطابقا لما تكتبه الصفحة وهذا سطر آخر";
+    let (doc, lines) = written(typed, &style);
+    assert!(lines.len() >= 4, "{:?}", lines.iter().map(|l| l.rect).collect::<Vec<_>>());
+    for l in &lines[..lines.len() - 1] {
+        assert!((l.rect[0] - 300.0).abs() < 0.6 && (l.rect[2] - 420.0).abs() < 0.6, "{:?}: {:?}", l.text, l.rect);
+    }
+    let last = lines.last().expect("a last row");
+    assert!((last.rect[2] - 420.0).abs() < 0.6 && last.rect[0] > 300.6, "{:?}", last.rect);
+    // What the page says is the typed text, as the unjustified paragraph says it.
+    assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text.split_whitespace().collect::<Vec<_>>().join(" "), typed);
 }

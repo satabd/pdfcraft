@@ -2252,8 +2252,15 @@ fn paragraph_separator(c: char) -> bool {
 /// Greedy word wrapping to `width` with `advance` giving a string's width. Each `\n` starts a
 /// new line. A row may also end inside a word of Chinese or Japanese text ([`crate::linebreak`]);
 /// those pieces join without a space.
+#[cfg(test)]
 fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<String> {
-    let mut out = Vec::new();
+    wrap_rows(text, width, advance).into_iter().map(|(line, _)| line).collect()
+}
+
+/// [`wrap`] with whether each line ends its paragraph: it is the last, or a `\n` follows it. A justified text stretches
+/// the other lines, those the wrap broke.
+fn wrap_rows(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
     for row in text.split('\n') {
         let mut line = String::new();
         let start = out.len();
@@ -2265,7 +2272,7 @@ fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<String> {
                     (false, _) => format!("{line}{piece}"),
                 };
                 if !line.is_empty() && advance(&candidate) > width {
-                    out.push(std::mem::take(&mut line));
+                    out.push((std::mem::take(&mut line), false));
                     line = piece.to_string();
                 } else {
                     line = candidate;
@@ -2273,7 +2280,7 @@ fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<String> {
             }
         }
         if !line.is_empty() || out.len() == start {
-            out.push(line);
+            out.push((line, true));
         }
     }
     out
@@ -2593,10 +2600,12 @@ fn rewrite_block_from(
         width
     };
     let right_edge = if anchored_right { right_edge } else { width };
-    let wrapped = match &measure {
-        Some(measure) => wrap(&text, width + 0.5, |s| measure.approx(s) * o_state.scale * k),
-        None => wrap(&text, width + 0.5, advance),
+    let wrapped_rows = match &measure {
+        Some(measure) => wrap_rows(&text, width + 0.5, |s| measure.approx(s) * o_state.scale * k),
+        None => wrap_rows(&text, width + 0.5, advance),
     };
+    // Whether each line ends its paragraph (a justified text leaves those unstretched).
+    let (wrapped, ends): (Vec<String>, Vec<bool>) = wrapped_rows.into_iter().unzip();
     let mut substituted = None;
     let new_font = !reuse || shaped;
     let (show_font, encode): (String, Encoder) = if let Some(m) = metrics.clone().filter(|_| reuse) {
@@ -2667,20 +2676,21 @@ fn rewrite_block_from(
         match align {
             Some(crate::added::Align::Center) => free / 2.0,
             // A right-to-left line anchored at its right edge may start left of the old box.
-            Some(crate::added::Align::Right) if anchored_right => (right_edge - advance(line)) / k,
+            // (`anchored_right` is only so for right-to-left text, a justified one among it.)
+            Some(crate::added::Align::Right | crate::added::Align::Justify) if anchored_right => (right_edge - advance(line)) / k,
             Some(crate::added::Align::Right) => free,
-            // A justified right-to-left paragraph ends its last line at the right edge.
+            // A justified right-to-left paragraph ends the lines it does not stretch (its last) at the right edge.
             Some(crate::added::Align::Justify) if rtl => free,
             _ => 0.0,
         }
     };
-    // Justify: each line but the last fills the width. Word spacing reaches only single-byte code 32
-    // (ISO 32000-1 §9.3.3), so where a space is shown with another code (a composite font, a
-    // generated Type 3 font, a subset without a space) the extra space follows each space as a
-    // TJ adjustment instead, and code 32, which may then be a letter, gets none.
-    // (Shaped Arabic isn't stretched: word spacing doesn't reach its generated fonts' spaces, and a
-    // justified right-to-left paragraph is right-aligned, see `offset`.)
-    let justify = align == Some(crate::added::Align::Justify) && !shaped;
+    // Justify: each line the wrap broke fills the width (the last of a paragraph, or one before a line break, does not).
+    // Word spacing reaches only single-byte code 32 (ISO 32000-1 §9.3.3), so where a space is shown with another code (a
+    // composite font, a generated Type 3 font, a subset without a space) the extra space follows each space as a TJ
+    // adjustment instead, and code 32, which may then be a letter, gets none. Shaped Arabic is always stretched that way:
+    // its glyphs are generated Type 3 codes (the planner's own `TJ` adjustments, see `ShapedPlan::line_ops_stretched`).
+    // (A justified right-to-left line that is not stretched is right-aligned, see `offset`.)
+    let justify = align == Some(crate::added::Align::Justify);
     let word_spacing_reaches_spaces = match metrics.as_ref().filter(|_| reuse) {
         Some(m) => m.encode(" ").is_some_and(|b| m.codes(&b).iter().all(|(c, len)| m.is_space(*c, *len))),
         None => type3.is_none(),
@@ -2690,18 +2700,19 @@ fn rewrite_block_from(
     let mut underlines: Vec<(f64, f64, f64)> = Vec::new(); // (x0, x1, y) in text space
     // Shaped Arabic: every line is laid out and every font made now, before the document is changed;
     // the Latin pieces of a line use the font the paragraph would use for them.
-    let shaped_plan = if shaped {
-        let latin_ops = |s: &str| -> Result<Vec<Op>, EditError> {
-            match &metrics {
-                Some(m) if reuse => source_show(m, s, size, space, 0.0, 0.0),
-                _ => {
-                    if s.chars().any(|c| !is_win_ansi_char(c) && c != '?') {
-                        return Err(text_shaped::unsupported_with_arabic(s));
-                    }
-                    Ok(vec![Op::new("Tj", vec![Object::String(PdfString::literal(pdfcraft_fonts::win_ansi(s)))])])
+    // (The Latin pieces of a line: the paragraph's own font where it has them, Helvetica otherwise.)
+    let latin_ops = |s: &str| -> Result<Vec<Op>, EditError> {
+        match &metrics {
+            Some(m) if reuse => source_show(m, s, size, space, 0.0, 0.0),
+            _ => {
+                if s.chars().any(|c| !is_win_ansi_char(c) && c != '?') {
+                    return Err(text_shaped::unsupported_with_arabic(s));
                 }
+                Ok(vec![Op::new("Tj", vec![Object::String(PdfString::literal(pdfcraft_fonts::win_ansi(s)))])])
             }
-        };
+        }
+    };
+    let shaped_plan = if shaped {
         let latin = text_shaped::LatinShow { font: &shown_font, show: &latin_ops };
         let plan = text_shaped::plan(doc, &mut fonts_res, &wrapped, rtl, max_glyphs, &latin)?;
         substituted = Some(format!("{} Type3", plan.family()));
@@ -2710,16 +2721,20 @@ fn rewrite_block_from(
         None
     };
     for (i, line) in wrapped.iter().enumerate() {
-        let spaces = line.matches(' ').count();
-        let tw =
-            if justify && i + 1 < wrapped.len() && spaces > 0 { (width - advance(line)).max(0.0) / k / o_state.scale / spaces as f64 } else { 0.0 };
-        // A stretched line fills the width from the left edge.
-        let dx = if tw > 0.0 { 0.0 } else { offset(line) };
+        // The spaces between words a stretch widens (a shaped line says how many it draws).
+        let spaces = shaped_plan.as_ref().map_or_else(|| line.matches(' ').count(), |plan| plan.gaps(i));
+        let tw = if justify && !ends.get(i).copied().unwrap_or(true) && spaces > 0 {
+            (width - advance(line)).max(0.0) / k / o_state.scale / spaces as f64
+        } else {
+            0.0
+        };
+        // A stretched line fills the width: from the left edge, or back from the right edge a right-to-left line is anchored at.
+        let dx = if tw > 0.0 { (right_edge - width) / k } else { offset(line) };
         if i > 0 || dx != 0.0 {
             block_ops.push(Op::new("Td", vec![n(dx - x), n(if i > 0 { -lead } else { 0.0 })]));
         }
         x = dx;
-        let stretch = if word_spacing_reaches_spaces { 0.0 } else { tw };
+        let stretch = if word_spacing_reaches_spaces && shaped_plan.is_none() { 0.0 } else { tw };
         let tw = tw - stretch;
         if tw != tw_set {
             block_ops.push(Op::new("Tw", vec![n(tw)]));
@@ -2728,7 +2743,11 @@ fn rewrite_block_from(
         // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
         // (Shaped Arabic is laid out already: one span per line, in drawing order.)
         if let Some(plan) = &shaped_plan {
-            block_ops.extend(plan.line_ops(i, size, &mut shown_font));
+            if stretch > 0.0 {
+                block_ops.extend(plan.line_ops_stretched(i, size, &mut shown_font, stretch, &latin_ops)?);
+            } else {
+                block_ops.extend(plan.line_ops(i, size, &mut shown_font));
+            }
         }
         let visual = if shaped_plan.is_some() { String::new() } else { crate::bidi::to_visual(line) };
         // Stretched without word spacing: shown up to and including each space, then moved on.

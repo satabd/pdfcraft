@@ -13,7 +13,10 @@
 //! between the shaped runs, in the same span.
 //!
 //! The paragraph's text state keeps no character or word spacing here (spacing would pull joined
-//! letters apart), and a justified right-to-left paragraph is right-aligned instead.
+//! letters apart; word spacing reaches only a single-byte code 32, which these fonts' codes are not). A justified
+//! paragraph is stretched by `TJ` adjustments after its spaces instead ([`ShapedPlan::line_ops_stretched`]); the
+//! rows it does not stretch (the last, one before a line break, one with a single word) of a right-to-left paragraph
+//! are right-aligned.
 
 use pdfcraft_content::Op;
 use pdfcraft_cos::{Dict, Document};
@@ -86,6 +89,22 @@ fn to_op(op: TextOp) -> Op {
     Op { op: op.operator, operands: op.operands, inline: None, span: 0..0 }
 }
 
+/// `show`, in the planner's own operator and error types; an error of `show`'s is kept in `failure`.
+fn adapted<'a>(
+    show: &'a dyn Fn(&str) -> Result<Vec<Op>, EditError>,
+    failure: &'a std::cell::RefCell<Option<EditError>>,
+) -> impl Fn(&str) -> Result<Vec<TextOp>, ShapedTextError> + 'a {
+    move |s: &str| {
+        show(s).map(|ops| ops.iter().map(to_text_op).collect()).map_err(|e| {
+            let message = e.to_string();
+            if let Ok(mut slot) = failure.try_borrow_mut() {
+                *slot = Some(e);
+            }
+            ShapedTextError(message)
+        })
+    }
+}
+
 /// Lay out `lines` (in typing order, in a paragraph that runs `rtl` or not), read every outline
 /// and add the fonts to `doc` and `fonts_res`. Everything that can fail does so before `doc` is
 /// touched. `max_glyphs` is the most glyphs one generated font holds (tests lower it).
@@ -99,17 +118,10 @@ pub(crate) fn plan(
 ) -> Result<ShapedPlan, EditError> {
     // An error of the writer's own is kept as it is; the planner's is turned into an `EditError`.
     let failure: std::cell::RefCell<Option<EditError>> = std::cell::RefCell::new(None);
-    let show = |s: &str| -> Result<Vec<TextOp>, ShapedTextError> {
-        (latin.show)(s).map(|ops| ops.iter().map(to_text_op).collect()).map_err(|e| {
-            let message = e.to_string();
-            if let Ok(mut slot) = failure.try_borrow_mut() {
-                *slot = Some(e);
-            }
-            ShapedTextError(message)
-        })
-    };
+    let show = adapted(latin.show, &failure);
     let fonts = PlanFonts { max_glyphs, name_prefix: FONT_PREFIX, font_name: Some(ARABIC_FONT_NAME) };
     let planned = shaped_text::plan(doc, fonts_res, lines, rtl, fonts, &shaped_text::LatinShow { font: latin.font, show: &show });
+    drop(show);
     match planned {
         Ok(p) => Ok(ShapedPlan(p)),
         Err(e) => Err(failure.into_inner().unwrap_or_else(|| e.into())),
@@ -127,5 +139,28 @@ impl ShapedPlan {
     /// last one used afterwards.
     pub(crate) fn line_ops(&self, i: usize, size: f64, current: &mut String) -> Vec<Op> {
         self.0.line_ops(i, size, current).into_iter().map(to_op).collect()
+    }
+
+    /// How many spaces between words wrapped line `i` draws: the gaps [`Self::line_ops_stretched`] widens.
+    pub(crate) fn gaps(&self, i: usize) -> usize {
+        self.0.gaps(i)
+    }
+
+    /// [`Self::line_ops`] with each gap widened by `gap` (text space units before the horizontal scale, as word spacing is),
+    /// the Latin text of the line shown by `show` word by word.
+    pub(crate) fn line_ops_stretched(
+        &self,
+        i: usize,
+        size: f64,
+        current: &mut String,
+        gap: f64,
+        show: &dyn Fn(&str) -> Result<Vec<Op>, EditError>,
+    ) -> Result<Vec<Op>, EditError> {
+        let failure: std::cell::RefCell<Option<EditError>> = std::cell::RefCell::new(None);
+        let ops = self.0.line_ops_stretched(i, size, current, gap, &adapted(show, &failure));
+        match ops {
+            Ok(ops) => Ok(ops.into_iter().map(to_op).collect()),
+            Err(e) => Err(failure.into_inner().unwrap_or_else(|| e.into())),
+        }
     }
 }

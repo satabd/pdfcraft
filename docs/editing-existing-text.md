@@ -69,15 +69,26 @@ letter's initial, medial and final glyphs to one code, so re-encoding would writ
 forms. `replace_line` (the automation `line` form) shapes the same way. A build without the
 Arabic face says so (`CRAFT_FONTS_DIR`) and changes nothing. Not done yet: Hebrew and Arabic in
 one paragraph, formatting part of the Arabic text or choosing a document font for it
-(refused), justification (a justified right-to-left paragraph is right-aligned; character
-spacing is ignored, since it would pull joined letters apart), at most 4,096 distinct letter
-shapes per edit, and embedding the face as a real font.
+(refused), character spacing (ignored, since it would pull joined letters apart), at most 4,096
+distinct letter shapes per edit, and embedding the face as a real font.
 
-A justified paragraph stretches each row but its last to the paragraph's width by widening its
-spaces. Word spacing (`Tw`) widens only single-byte code 32, so where the font shows a space with
-another code (a composite font, the generated Type 3 fallback) each space is followed by a `TJ`
-adjustment instead. Justifying a paragraph with several formats in it is not supported yet: it is
-left-aligned.
+A justified paragraph stretches every row the wrap breaks to the paragraph's width by widening the
+spaces between its words, on every route. The last row of a paragraph, a row before a line break
+(`\n`: each line of the draft is a paragraph of its own) and a row of one word are not stretched,
+nor is a row that begins or ends with a space (those spaces are not between words). Word spacing
+(`Tw`) widens only single-byte code 32, so where the font shows a space with another code (a
+composite font, the generated Type 3 fallback, a subset with no space glyph) each space is followed
+by a `TJ` adjustment instead; the styled rewrite (several looks, or a draft with a line break) sets
+`Tw` for a simple font and uses the adjustments for the others, glyph by glyph where it shapes in the
+page's own face. Shaped Arabic in generated Type 3 glyphs is always stretched by `TJ` adjustments
+(its codes are not 32), the planner (`pdfcraft_fonts::shaped_text::ShapedPlan::line_ops_stretched`)
+placing one after every space cluster and after every space of the Latin text between the Arabic,
+which is shown word by word. A right-to-left row keeps its right edge: a stretched one ends at the
+paragraph's right edge, one that is not stretched is right-aligned. `/ActualText` and ToUnicode
+state the text as typed, whatever the spacing. `text_edit_layout` (`row_rects`, automation
+`row_boxes`) reports the stretched rows, which the Edit text box shows. Not done: justifying
+between the characters of Chinese or Japanese text (a row with no ASCII space has nothing to
+widen), and a row that begins or ends with a space.
 
 For headless editing, use `text_font_files` → `text_font_import` → `text_fonts` and pass a
 resource to `text_edit.font_resource`. `text_edit.ranges` holds selected range formatting.

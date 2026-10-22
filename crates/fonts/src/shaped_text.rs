@@ -597,10 +597,11 @@ pub struct PlanFonts<'a> {
 }
 
 enum Run {
-    /// Operators that show Latin text in the Latin font.
-    Latin(Vec<TextOp>),
-    /// Codes of the generated font at this index of `names`.
-    Shaped(usize, Vec<u8>),
+    /// Operators that show Latin text in the Latin font, and the text they show.
+    Latin(Vec<TextOp>, String),
+    /// Codes of the generated font at this index of `names`, and for each code whether it draws a space between words
+    /// (a gap [`ShapedPlan::line_ops_stretched`] widens).
+    Shaped(usize, Vec<u8>, Vec<bool>),
 }
 
 struct PlannedLine {
@@ -619,9 +620,9 @@ pub struct ShapedPlan {
 }
 
 enum Staged {
-    Latin(Vec<TextOp>),
-    /// Indexes into the distinct clusters.
-    Shaped(Vec<usize>),
+    Latin(Vec<TextOp>, String),
+    /// Indexes into the distinct clusters, and whether each is a space.
+    Shaped(Vec<(usize, bool)>),
 }
 
 /// Why a paragraph with more than one script can't be drawn (Arabic is the only script drawn here
@@ -680,7 +681,7 @@ pub fn plan_pieces(
         let mut row = Vec::with_capacity(pieces.len());
         for piece in pieces {
             match piece {
-                Piece::Latin(s) => row.push(Staged::Latin((latin.show)(s)?)),
+                Piece::Latin(s) => row.push(Staged::Latin((latin.show)(s)?, s.clone())),
                 Piece::Shaped(clusters) => {
                     let mut ks = Vec::with_capacity(clusters.len());
                     for c in clusters {
@@ -701,7 +702,7 @@ pub fn plan_pieces(
                                 k
                             }
                         };
-                        ks.push(k);
+                        ks.push((k, c.text == " "));
                     }
                     row.push(Staged::Shaped(ks));
                 }
@@ -741,15 +742,18 @@ pub fn plan_pieces(
         let mut runs: Vec<Run> = Vec::new();
         for item in row {
             match item {
-                Staged::Latin(ops) => runs.push(Run::Latin(ops)),
+                Staged::Latin(ops, text) => runs.push(Run::Latin(ops, text)),
                 Staged::Shaped(ks) => {
-                    for k in ks {
+                    for (k, space) in ks {
                         let font = k / per_font;
                         // Codes start at 1; `k % per_font + 1` is at most 240.
                         let code = u8::try_from(k % per_font + 1).unwrap_or(1);
                         match runs.last_mut() {
-                            Some(Run::Shaped(f, codes)) if *f == font => codes.push(code),
-                            _ => runs.push(Run::Shaped(font, vec![code])),
+                            Some(Run::Shaped(f, codes, spaces)) if *f == font => {
+                                codes.push(code);
+                                spaces.push(space);
+                            }
+                            _ => runs.push(Run::Shaped(font, vec![code], vec![space])),
                         }
                     }
                 }
@@ -772,16 +776,101 @@ impl ShapedPlan {
     /// last one used afterwards. A line with nothing to draw gives no operators.
     pub fn line_ops(&self, i: usize, size: f64, current: &mut String) -> Vec<TextOp> {
         let Some(line) = self.lines.get(i).filter(|l| !l.runs.is_empty()) else { return Vec::new() };
+        let mut ops = vec![Self::span(line)];
+        ops.extend(self.run_ops(line, size, current));
+        ops.push(TextOp::new("EMC", vec![]));
+        ops
+    }
+
+    fn span(line: &PlannedLine) -> TextOp {
         let mut bytes = vec![0xFE, 0xFF];
         for unit in line.logical.encode_utf16() {
             bytes.extend_from_slice(&unit.to_be_bytes());
         }
         let mut properties = Dict::new();
         properties.set(b"ActualText".to_vec(), Object::String(PdfString { bytes, hex: true }));
-        let mut ops = vec![TextOp::new("BDC", vec![Object::name("Span"), Object::Dict(properties)])];
-        ops.extend(self.run_ops(line, size, current));
+        TextOp::new("BDC", vec![Object::name("Span"), Object::Dict(properties)])
+    }
+
+    /// How many spaces between words planned line `i` draws: the gaps [`Self::line_ops_stretched`] widens (a space of
+    /// Latin text, or a shaped space).
+    pub fn gaps(&self, i: usize) -> usize {
+        let Some(line) = self.lines.get(i) else { return 0 };
+        line.runs
+            .iter()
+            .map(|run| match run {
+                Run::Latin(_, text) => text.matches(' ').count(),
+                Run::Shaped(_, _, spaces) => spaces.iter().filter(|s| **s).count(),
+            })
+            .sum()
+    }
+
+    /// [`Self::line_ops`] with every gap (see [`Self::gaps`]) widened by `gap`, in the text space units of a space's
+    /// advance before the horizontal scale (as word spacing is), so a justified line fills its width. Word spacing
+    /// reaches only a single-byte code 32, which these fonts' codes are not, so each gap is a `TJ` adjustment after
+    /// the space: the shaped codes are shown as the strings of a `TJ` array, and Latin text is shown by `show` word by
+    /// word (up to and including each space) followed by the adjustment. A `gap` that is not positive, a `size` that is
+    /// not, or no gap in the line gives the operators of [`Self::line_ops`].
+    pub fn line_ops_stretched(
+        &self,
+        i: usize,
+        size: f64,
+        current: &mut String,
+        gap: f64,
+        show: &dyn Fn(&str) -> Result<Vec<TextOp>, ShapedTextError>,
+    ) -> Result<Vec<TextOp>, ShapedTextError> {
+        let adjustment = -1000.0 * gap / size;
+        if !(gap > 0.0 && size > 0.0 && adjustment.is_finite()) || self.gaps(i) == 0 {
+            return Ok(self.line_ops(i, size, current));
+        }
+        let Some(line) = self.lines.get(i).filter(|l| !l.runs.is_empty()) else { return Ok(Vec::new()) };
+        let mut ops = vec![Self::span(line)];
+        let mut select = |ops: &mut Vec<TextOp>, font: &str| {
+            if current != font {
+                ops.push(TextOp::new("Tf", vec![Object::name(font), number(size)]));
+                *current = font.to_owned();
+            }
+        };
+        for run in &line.runs {
+            match run {
+                Run::Latin(shown, text) => {
+                    select(&mut ops, &self.latin_font);
+                    if text.contains(' ') {
+                        for word in text.split_inclusive(' ') {
+                            ops.extend(show(word)?);
+                            if word.ends_with(' ') {
+                                ops.push(TextOp::new("TJ", vec![Object::Array(vec![number(adjustment)])]));
+                            }
+                        }
+                    } else {
+                        ops.extend(shown.iter().cloned());
+                    }
+                }
+                Run::Shaped(font, codes, spaces) => {
+                    let Some(name) = self.names.get(*font) else { continue };
+                    select(&mut ops, name);
+                    if spaces.iter().any(|s| *s) {
+                        let mut array = Vec::new();
+                        let mut word = Vec::new();
+                        for (code, space) in codes.iter().zip(spaces) {
+                            word.push(*code);
+                            if *space {
+                                array.push(Object::String(PdfString::literal(std::mem::take(&mut word))));
+                                array.push(number(adjustment));
+                            }
+                        }
+                        if !word.is_empty() {
+                            array.push(Object::String(PdfString::literal(word)));
+                        }
+                        ops.push(TextOp::new("TJ", vec![Object::Array(array)]));
+                    } else {
+                        ops.push(TextOp::new("Tj", vec![Object::String(PdfString::literal(codes.clone()))]));
+                    }
+                }
+            }
+        }
         ops.push(TextOp::new("EMC", vec![]));
-        ops
+        Ok(ops)
     }
 
     /// [`Self::line_ops`] without the span: the operators that show planned line `i`, for a caller
@@ -800,11 +889,11 @@ impl ShapedPlan {
         };
         for run in &line.runs {
             match run {
-                Run::Latin(shown) => {
+                Run::Latin(shown, _) => {
                     select(&mut ops, &self.latin_font);
                     ops.extend(shown.iter().cloned());
                 }
-                Run::Shaped(font, codes) => {
+                Run::Shaped(font, codes, _) => {
                     let Some(name) = self.names.get(*font) else { continue };
                     select(&mut ops, name);
                     ops.push(TextOp::new("Tj", vec![Object::String(PdfString::literal(codes.clone()))]));
@@ -859,5 +948,84 @@ mod path_tests {
         assert_eq!(actual_text_bdc("اب"), b"/Span <</ActualText <FEFF06270628>>> BDC\n");
         assert_eq!(actual_text_bdc("a\u{1F600}"), b"/Span <</ActualText <FEFF0061D83DDE00>>> BDC\n");
         assert_eq!(actual_text_bdc(""), b"/Span <</ActualText <FEFF>>> BDC\n");
+    }
+}
+
+#[cfg(test)]
+mod stretch_tests {
+    use super::*;
+
+    /// Each Arabic letter is a cluster of its own, and so is each space (its text is `" "`), as the faces shape them.
+    fn letters(_: ShapedScript, text: &str, _: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
+        Ok(text
+            .chars()
+            .map(|c| ShapedCluster {
+                script: ShapedScript::Arabic,
+                glyphs: vec![(u32::from(c), [0.0, 0.0])],
+                advance: if c == ' ' { 0.25 } else { 0.5 },
+                text: c.to_string(),
+            })
+            .collect())
+    }
+
+    fn box_outline(_: ShapedScript, _: u32) -> Result<GlyphOutline, GlyphError> {
+        Ok(GlyphOutline { contours: vec![vec![[0.0, 0.0], [0.5, 0.0], [0.5, 0.5]]], width: 0.5, bbox: [0.0, 0.0, 0.5, 0.5] })
+    }
+
+    const LETTERS: Shaper = Shaper { shape: letters, has: |_, c| c == ' ', outline: box_outline, arabic_available: || true };
+
+    fn latin(s: &str) -> Result<Vec<TextOp>, ShapedTextError> {
+        Ok(vec![TextOp::new("Tj", vec![Object::String(PdfString::literal(s.as_bytes().to_vec()))])])
+    }
+
+    fn planned(lines: &[&str]) -> ShapedPlan {
+        set_test_shaper(Some(LETTERS));
+        let mut doc = Document::new_empty();
+        let mut fonts = Dict::new();
+        let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
+        let lines: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
+        let plan = plan(&mut doc, &mut fonts, &lines, true, names, &LatinShow { font: "F9", show: &latin }).expect("plans");
+        set_test_shaper(None);
+        plan
+    }
+
+    fn name(op: &TextOp) -> String {
+        String::from_utf8_lossy(&op.operator).into_owned()
+    }
+
+    #[test]
+    fn a_stretched_line_has_an_adjustment_after_every_space() {
+        // (Arabic letters, a space, a Latin word, a space, more Arabic: three gaps would be two spaces and the Latin's own.)
+        let plan = planned(&["\u{627}\u{628} \u{627}\u{628} \u{627}", "\u{627}\u{628}"]);
+        assert_eq!(plan.gaps(0), 2);
+        assert_eq!(plan.gaps(1), 0);
+        assert_eq!(plan.gaps(9), 0, "no such line");
+        let mut current = String::new();
+        let ops = plan.line_ops_stretched(0, 10.0, &mut current, 2.0, &latin).expect("stretches");
+        let tj: Vec<&TextOp> = ops.iter().filter(|op| op.operator == b"TJ").collect();
+        assert_eq!(tj.len(), 1, "{ops:?}");
+        // [(ab ) -200 (ab ) -200 (a)]: 2 text units on a 10 point size is 200 thousandths.
+        let Some(Object::Array(items)) = tj[0].operands.first() else { panic!("an array: {:?}", tj[0]) };
+        let adjustments: Vec<f64> = items.iter().filter_map(Object::as_f64).collect();
+        assert_eq!(adjustments, [-200.0, -200.0], "{items:?}");
+        assert_eq!(items.iter().filter(|i| matches!(i, Object::String(_))).count(), 3);
+        // It is the line's span, its font set once, and nothing else but the strings.
+        assert_eq!(name(&ops[0]), "BDC");
+        assert_eq!(name(ops.last().expect("an end")), "EMC");
+        assert_eq!(ops.iter().filter(|op| op.operator == b"Tf").count(), 1);
+    }
+
+    #[test]
+    fn a_line_with_nothing_to_widen_or_no_room_to_widen_it_is_the_plain_line() {
+        let plan = planned(&["\u{627}\u{628} \u{627}\u{628}", "\u{627}\u{628}"]);
+        for (gap, size) in [(0.0, 10.0), (-1.0, 10.0), (f64::NAN, 10.0), (2.0, 0.0), (f64::INFINITY, 10.0)] {
+            let ops = plan.line_ops_stretched(0, size, &mut String::new(), gap, &latin).expect("plain");
+            assert_eq!(ops, plan.line_ops(0, size, &mut String::new()), "gap {gap}, size {size}");
+        }
+        // (A size that is not a number gives the plain line too, though NaN is not equal to itself.)
+        assert_eq!(plan.line_ops_stretched(0, f64::NAN, &mut String::new(), 2.0, &latin).expect("plain").len(), 4);
+        assert!(plan.line_ops_stretched(9, 10.0, &mut String::new(), 2.0, &latin).expect("no line").is_empty());
+        // A line without a space is the plain line whatever the gap.
+        assert_eq!(plan.line_ops_stretched(1, 10.0, &mut String::new(), 2.0, &latin).expect("plain"), plan.line_ops(1, 10.0, &mut String::new()));
     }
 }

@@ -1484,10 +1484,11 @@ impl RowGeometry {
 }
 
 /// `galley` with the spaces of each row stretched to the width of the row Apply will write: a justified paragraph fills its
-/// width with every row but the last, by widening the spaces. The widths are the rewrite's own (`row_rects` of its layout), so
-/// a paragraph the rewrite does not justify (the styled route that writes a draft with explicit row breaks sets its rows
-/// left-aligned) stays as it is, and so does a draft the rewrite refuses. The caret and clicks follow the letters: the
-/// glyphs after a space move on with it (see [`LayoutCtx::stretch_rows`]).
+/// width with every row the wrap breaks, by widening the spaces. The widths are the rewrite's own (`row_rects` of its layout,
+/// whichever route writes the draft: one look or several, a draft with line breaks, shaped Arabic), so a row the rewrite does
+/// not stretch (one of a single word, or before a line break) is only brought to the width it has on the page, and a draft
+/// the rewrite refuses stays as it is. The caret and clicks follow the letters: the glyphs after a space move on with it (see
+/// [`LayoutCtx::stretch_rows`]).
 fn justify_like_the_page(ed: &LineEditor, ctx: &LayoutCtx<'_>, galley: Arc<egui::Galley>, map: &ScreenMap, scale: f32) -> Arc<egui::Galley> {
     let Some(layout) = ed.layout_of(ctx.text) else { return galley };
     // The rows that draw anything, one to a row of the page.
@@ -1538,8 +1539,9 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &Scre
                 (true, _) => (((geometry.at(slot.index).rect[2] - block.rect[0]) as f32 * scale) - slot.width).min(flush),
                 (false, Some(pdfcraft_engine::TextAlign::Left)) => 0.0,
                 (false, Some(pdfcraft_engine::TextAlign::Center)) => flush / 2.0,
-                // Right-to-left text is right-aligned unless an alignment is asked for (and a justified
-                // row, which a screen cannot stretch, is flush against the edge it starts from).
+                // Right-to-left text is right-aligned unless an alignment is asked for (and a justified row, stretched
+                // above to the width the page writes it at, ends at the edge it fills; one the page does not stretch,
+                // the last, is flush right like the page's).
                 (false, _) => flush,
             })
         });

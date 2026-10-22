@@ -159,7 +159,7 @@ fn the_boxes_of_justified_rows_span_the_paragraph_and_the_last_row_does_not() {
     let doc = text_page(src);
     let block = text::text_blocks(&doc, 0).expect("blocks").remove(0);
     let justified = BlockStyle { align: Some(Align::Justify), ..Default::default() };
-    // (The text without the rows' line breaks: a draft with explicit breaks is written by the styled rewrite, which does not justify.)
+    // (The text without the rows' line breaks: this is the single-style rewrite; `text_justify_tests` has the styled one.)
     let draft = format!("{} and some more words to fill a third row of this text", block.text);
     let l = text::text_edit_layout(&doc, 0, 0, &draft, &justified).expect("layout");
     assert!(l.rows.len() >= 3, "{:?}", l.rows);
@@ -204,4 +204,47 @@ fn a_retyped_arabic_paragraph_in_its_face_keeps_its_right_edge_like_the_single_s
     let left = BlockStyle { align: Some(Align::Left), ..Default::default() };
     let l = text::text_edit_layout(&doc, 0, 0, RETYPED, &left).expect("layout");
     assert!(l.row_rects.iter().all(|r| (r[0] - block.rect[0]).abs() < 0.01), "{:?}", l.row_rects);
+}
+
+#[test]
+fn a_justified_arabic_paragraph_in_its_face_fills_the_width_and_keeps_its_right_edge() {
+    let Some(face) = static_face() else { return };
+    let doc = page_in_the_face(&face, &[SALAM, "\u{643}\u{62A}\u{627}\u{628}"]);
+    let block = text::text_blocks(&doc, 0).expect("blocks").remove(0);
+    let justified = BlockStyle { align: Some(Align::Justify), ..Default::default() };
+    let l = layout(&doc, RETYPED, &justified);
+    assert!(l.rows.len() >= 3, "{:?}", l.rows);
+    assert!(!l.shaping_faces.is_empty(), "shaped in the page's own face");
+    // Every row the wrap breaks runs from the paragraph's left edge to its right edge; the last ends at the right edge.
+    let (last, rows) = l.row_rects.split_last().expect("a last row");
+    for rect in rows {
+        assert!((rect[0] - block.rect[0]).abs() < 0.5 && (rect[2] - block.rect[2]).abs() < 0.5, "{rect:?} against {:?}", block.rect);
+    }
+    assert!((last[2] - block.rect[2]).abs() < 0.5 && last[0] > block.rect[0] + 0.5, "{last:?}");
+    // The page says the same after Apply, and the text it carries is the text typed.
+    let mut applied = doc.clone();
+    text::rewrite_block(&mut applied, 0, 0, Some(RETYPED), &justified).expect("applies");
+    let lines = text::text_lines(&reopen(&applied), 0).expect("lines");
+    assert_eq!(lines.len(), l.row_rects.len());
+    for (line, rect) in lines.iter().zip(&l.row_rects) {
+        assert!(line.rect.iter().zip(rect).all(|(a, b)| (a - b).abs() < 1e-6), "{:?} against {rect:?}", line.rect);
+    }
+    let words = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(words(&text::text_blocks(&applied, 0).expect("blocks")[0].editor_text), words(RETYPED));
+}
+
+#[test]
+fn a_justified_arabic_row_that_wraps_grows_to_the_left_from_its_right_edge() {
+    let Some(face) = static_face() else { return };
+    // One row in the page's face, which grows leftwards when it wraps: the rows it breaks span the room it has, from its right edge.
+    let doc = page_in_the_face(&face, &[SALAM]);
+    let block = text::text_blocks(&doc, 0).expect("blocks").remove(0);
+    let l = layout(&doc, RETYPED, &BlockStyle { align: Some(Align::Justify), ..Default::default() });
+    assert!(l.rows.len() >= 2, "{:?}", l.rows);
+    let (last, rows) = l.row_rects.split_last().expect("a last row");
+    for rect in rows {
+        assert!((rect[2] - block.rect[2]).abs() < 0.5 && rect[0] < block.rect[0] - 1.0, "{rect:?} against {:?}", block.rect);
+        assert!((rect[0] - rows[0][0]).abs() < 0.5, "every stretched row has the same width: {rows:?}");
+    }
+    assert!((last[2] - block.rect[2]).abs() < 0.5, "{last:?}");
 }
