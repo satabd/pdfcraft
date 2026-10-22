@@ -278,8 +278,27 @@ impl PageText {
     }
 
     /// Glyph ranges of the matches a character matcher finds in the page text (words and lines
-    /// separated by one space, original case). Used for pattern search (Search & Redact).
+    /// separated by one space, original case, characters exactly as the glyphs carry them). Used
+    /// where the matched characters themselves matter, such as the addresses of Create links from
+    /// URLs; [`Self::find_with_folded`] is the search for patterns.
     pub fn find_with(&self, matcher: impl Fn(&[char]) -> Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+        self.find_chars(false, matcher)
+    }
+
+    /// [`Self::find_with`] on the page text as search reads it (Search & Redact patterns): Arabic
+    /// harakat, tatweel and direction marks are dropped, presentation forms and ligatures become
+    /// their base letters, and Arabic-Indic and Persian digits become ASCII digits (see
+    /// [`fold_search`]). Case is kept, since a pattern may care about it. Every folded character
+    /// keeps the glyph that drew it, so a match maps back to glyphs: it covers the letters it found
+    /// and the marks between them, and stops after its last letter.
+    ///
+    /// Only the page side is folded. The pattern is matched against folded text, so one written
+    /// with base letters finds vowelled text, and one written with harakat finds nothing.
+    pub fn find_with_folded(&self, matcher: impl Fn(&[char]) -> Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
+        self.find_chars(true, matcher)
+    }
+
+    fn find_chars(&self, fold: bool, matcher: impl Fn(&[char]) -> Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
         let mut chars: Vec<char> = Vec::new();
         // `None` is a word or line separator inserted between glyphs. It is not part of either
         // glyph, so a match that starts or ends on it must not take the neighbouring glyph.
@@ -290,7 +309,10 @@ impl PageText {
                 chars.push(' ');
                 owner.push(None);
             }
-            for c in g.text.chars() {
+            // The folded text keeps no mark of its own, and a ligature gives several characters;
+            // each belongs to this glyph.
+            let text = if fold { std::borrow::Cow::Owned(fold_search(&g.text, true)) } else { std::borrow::Cow::Borrowed(g.text.as_str()) };
+            for c in text.chars() {
                 chars.push(if c.is_whitespace() { ' ' } else { c });
                 owner.push(Some(i));
             }
@@ -2236,6 +2258,86 @@ mod tests {
         let sentence = page_of("ذَهَبَ كَتَبَ الولد");
         assert_eq!(sentence.find_opts("كتب", false, true).len(), 1);
         assert!(sentence.find_opts("كت", false, true).is_empty());
+    }
+
+    /// A matcher that finds every (non-overlapping) occurrence of `needle` in the characters.
+    fn literal(needle: &str) -> impl Fn(&[char]) -> Vec<std::ops::Range<usize>> {
+        let needle: Vec<char> = needle.chars().collect();
+        move |chars: &[char]| {
+            let mut hits = Vec::new();
+            let mut i = 0;
+            while i + needle.len() <= chars.len() && !needle.is_empty() {
+                if chars[i..i + needle.len()] == needle[..] {
+                    hits.push(i..i + needle.len());
+                    i += needle.len();
+                } else {
+                    i += 1;
+                }
+            }
+            hits
+        }
+    }
+
+    /// Search & Redact patterns match the page as search reads it: harakat, presentation forms and
+    /// Arabic-Indic digits reduce to base letters and ASCII digits, and a match maps back to the
+    /// glyphs that drew it.
+    #[test]
+    fn pattern_search_folds_arabic_page_text() {
+        // A pattern written with base letters finds vowelled text; marks that are glyphs of their own
+        // between the letters are covered, a trailing one stays out (as in literal search).
+        let marked = page_of("كَتَبَ");
+        assert_eq!(marked.find_with_folded(literal("كتب")), vec![0..5]);
+        assert!(marked.find_with(literal("كتب")).is_empty(), "the unfolded page has the marks in the way");
+        let fused = logical(&["كَ", "تَ", "بَ"]);
+        assert_eq!(fused.find_with_folded(literal("كتب")), vec![0..3], "exactly the letter glyphs");
+        // The pattern itself is matched against folded text: written with marks it finds nothing.
+        assert!(marked.find_with_folded(literal("كَتَبَ")).is_empty());
+        // Presentation forms, ligatures (one glyph, two letters) and digits.
+        assert_eq!(page_of("\u{FEDB}\u{FE98}\u{FE90}").find_with_folded(literal("كتب")), vec![0..3]);
+        let sentence = logical(&["ما", "\u{FEFB}", " ", "ب"]);
+        assert_eq!(sentence.find_with_folded(literal("لا")), vec![1..2], "the ligature glyph owns both letters");
+        assert_eq!(page_of("\u{661}\u{662}\u{663}").find_with_folded(literal("123")), vec![0..3]);
+        assert_eq!(page_of("\u{6F1}\u{6F2}").find_with_folded(literal("12")), vec![0..2]);
+        // Latin text is unchanged: the same matches as before, with its case.
+        let latin = page_of("Hello World Hello");
+        for needle in ["Hello", "World", "world", "o W"] {
+            assert_eq!(latin.find_with_folded(literal(needle)), latin.find_with(literal(needle)), "{needle}");
+        }
+        assert_eq!(latin.find_with_folded(literal("Hello")), vec![0..5, 12..17]);
+        assert!(latin.find_with_folded(literal("world")).is_empty(), "case is kept");
+        // Words and lines are separated by one space, and a match across them keeps its glyphs.
+        let two_lines = PageText {
+            glyphs: ["ك", "َ", "ت", "ب"].iter().enumerate().map(|(i, t)| g(t, i as f32 * 6.0, 0.0, i as f32 * 6.0 + 6.0)).collect(),
+            line_of: vec![0, 0, 1, 1],
+            space_before: vec![false; 4],
+        };
+        assert_eq!(two_lines.find_with_folded(literal("ك ت")), vec![0..3]);
+    }
+
+    #[test]
+    fn pattern_search_never_panics_on_hostile_text_or_matchers() {
+        let page = logical(&["", "\u{64E}", "\u{202E}", "\u{FDF2}", "ب", "\u{FEFC}", "\0"]);
+        fn one(r: std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
+            Vec::from([r])
+        }
+        type Matcher = fn(&[char]) -> Vec<std::ops::Range<usize>>;
+        let nasty: [Matcher; 5] = [
+            |_| one(0..usize::MAX),
+            // Reversed, which no matcher should return and none may crash on.
+            |_| one(std::ops::Range { start: 5, end: 2 }),
+            |_| one(usize::MAX - 1..usize::MAX),
+            |c| vec![0..c.len(), c.len()..c.len() + 1],
+            |c| one(c.len()..c.len()),
+        ];
+        for matcher in nasty {
+            let hits = page.find_with_folded(matcher);
+            assert!(hits.iter().all(|h| h.start < h.end && h.end <= page.glyphs.len()), "{hits:?}");
+        }
+        let empty = PageText::default();
+        assert!(empty.find_with_folded(|_| one(0..1)).is_empty());
+        // Marks and controls alone fold to nothing, so a match cannot start or end on them.
+        let marks = logical(&["\u{64E}", "\u{64E}"]);
+        assert!(marks.find_with_folded(|c| one(0..c.len())).is_empty());
     }
 
     #[test]

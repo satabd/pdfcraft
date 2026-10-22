@@ -427,3 +427,152 @@ fn a_callouts_arabic_text_is_shaped_inside_its_text_box() {
     assert!((spans[0].path_right() - (tb[2] - 4.0)).abs() < 0.01, "{:?}", spans[0]);
     assert!(content.contains(" l\nS\n") || content.contains("S\n"), "the leader is still drawn: {content}");
 }
+
+// ---- stamp "By" lines and measurement labels ----
+
+/// The dictionary of a stamp added to the first page of the fixture (a dynamic stamp, which has a
+/// "By" line) and read back.
+fn stamp_dict(by: Option<&str>) -> Dict {
+    let mut doc = fixture();
+    let shape = Shape::Stamp { rect: [100.0, 100.0, 260.0, 142.0], stamp: StampKind::DynApproved, by: by.map(str::to_owned) };
+    let mut n = new(0, shape);
+    n.author = "A".into();
+    let index = add_annotation(&mut doc, &n, &meta("stamp")).unwrap();
+    let doc = reopen(&doc);
+    list(&doc, 0)[index].clone()
+}
+
+/// The dictionary of a line annotation with a measurement label (as the measure tools write it).
+fn measured_line(label: &str) -> Dict {
+    let mut doc = fixture();
+    let n = new(0, Shape::Line { from: [100.0, 400.0], to: [300.0, 400.0], start: LineEnding::None, end: LineEnding::None });
+    let index = add_annotation(&mut doc, &n, &meta("measure")).unwrap();
+    let mut d = list(&doc, 0)[index].clone();
+    d.set(b"PCMeasureValue".to_vec(), PdfString::text(label));
+    d
+}
+
+fn rect_of(d: &Dict) -> [f64; 4] {
+    let v: Vec<f64> = d.get(b"Rect").and_then(Object::as_array).unwrap().iter().filter_map(Object::as_f64).collect();
+    [v[0], v[1], v[2], v[3]]
+}
+
+#[test]
+fn an_arabic_by_line_on_a_stamp_is_shaped_centred_and_unmarked() {
+    let _face = Using::shaper(FAKE);
+    for by in ["أحمد", "By أحمد at 2:14 pm, Oct 02, 2026"] {
+        let d = stamp_dict(Some(by));
+        assert_eq!(pdfcraft_fonts::undrawn_mark(&d), None, "{by}: shaped text is not marked");
+        assert_eq!(appearance::undrawable_text(&d), None, "{by}");
+        let (spans, content) = built(&d);
+        assert_eq!(spans.len(), 1, "{by}: {content}");
+        assert_eq!(spans[0].actual, by, "{by}: the span holds the typed text");
+        assert!(spans[0].invisible >= 1, "{by}: text extraction has a glyph to attach the span to");
+        assert!(!content.contains('?'), "{by}: {content}");
+        // The label is still the stamp's own, in bold Helvetica; the By line is centred under it.
+        assert!(content.contains("(APPROVED) Tj"), "{content}");
+        let rect = rect_of(&d);
+        let centre = (rect[0] + rect[2]) / 2.0;
+        // (Only Arabic is measured by its paths; the Latin runs of a mixed line are text.)
+        if by == "أحمد" {
+            assert!(((spans[0].left() + spans[0].path_right()) / 2.0 - centre).abs() < 0.5, "{by}: {:?} around {centre}", spans[0]);
+        } else {
+            assert_eq!(spans[0].latin_text(), "By | at 2:14 pm, Oct 02, 2026");
+        }
+    }
+    // A stamp's line too long for the stamp is shrunk to fit, as Latin text is.
+    let d = stamp_dict(Some(&"أحمد ".repeat(30)));
+    let (spans, _) = built(&d);
+    assert_eq!(spans.len(), 1);
+    let rect = rect_of(&d);
+    assert!(spans[0].left() >= rect[0] && spans[0].path_right() <= rect[2], "{:?} in {rect:?}", spans[0]);
+}
+
+#[test]
+fn latin_by_lines_and_stamps_without_one_are_drawn_as_before() {
+    let _face = Using::shaper(FAKE);
+    for by in [Some("By Ada at 2:14 pm"), None] {
+        let d = stamp_dict(by);
+        let (spans, content) = built(&d);
+        assert!(spans.is_empty(), "{content}");
+        assert_eq!(content.contains("(By Ada at 2:14 pm) Tj"), by.is_some(), "{content}");
+        assert_eq!(appearance::undrawable_text(&d), None);
+    }
+}
+
+#[test]
+fn without_the_face_an_arabic_by_line_is_drawn_with_question_marks_and_marked() {
+    let _face = Using::shaper(NO_FACE);
+    let d = stamp_dict(Some("أحمد"));
+    let (spans, content) = built(&d);
+    assert!(spans.is_empty());
+    assert!(content.contains("(????) Tj"), "{content}");
+    assert_eq!(appearance::undrawable_text(&d).map(|r| r.1), Some('أ'));
+    assert_eq!(pdfcraft_fonts::undrawn_mark(&d), Some('أ'));
+}
+
+#[test]
+fn an_arabic_measurement_label_is_shaped_and_centred() {
+    let _face = Using::shaper(FAKE);
+    let label = "١٢٫٥ سم";
+    let d = measured_line(label);
+    assert_eq!(appearance::undrawable_text(&d), None);
+    let (spans, content) = built(&d);
+    assert_eq!(spans.len(), 1, "{content}");
+    assert_eq!(spans[0].actual, label);
+    assert!(!content.contains('?'), "{content}");
+    let rect = rect_of(&d);
+    let centre = (rect[0] + rect[2]) / 2.0;
+    assert!(((spans[0].left() + spans[0].path_right()) / 2.0 - centre).abs() < 0.5, "{:?} around {centre}", spans[0]);
+    // A Latin label is drawn as before.
+    let d = measured_line("12.5 cm");
+    let (spans, content) = built(&d);
+    assert!(spans.is_empty() && content.contains("(12.5 cm) Tj"), "{content}");
+    // Without the face the label is `?` and the caller marks it, as before.
+    let _none = Using::shaper(NO_FACE);
+    let d = measured_line(label);
+    assert!(appearance::undrawable_text(&d).is_some());
+    assert!(built(&d).1.contains('?'));
+}
+
+#[test]
+fn hostile_labels_never_panic_and_the_mark_agrees_with_the_drawing() {
+    let _face = Using::shaper(FAKE);
+    let long = "ب".repeat(5000);
+    let texts = ["", "\u{064E}\u{064E}", "\u{202E}\u{200F}\u{061C}", "ب\0ا", "ب\u{06E5}ب", "ب日本", "أ\nب\rج", &long, "١٢٫٥ سم", "12 م²"];
+    for text in texts {
+        // A measurement label over 256 characters is not drawn at all.
+        let mut dicts = vec![stamp_dict(Some(text))];
+        if text.chars().count() <= 256 {
+            dicts.push(measured_line(text));
+        }
+        for d in dicts {
+            let (spans, content) = built(&d);
+            let unmarked = appearance::undrawable_text(&d).is_none();
+            assert_eq!(unmarked, !content.contains('?'), "{text:.20}: the mark says whether a `?` was drawn");
+            assert_eq!(
+                unmarked && pdfcraft_fonts::shaped_text::has_arabic(text),
+                !spans.is_empty(),
+                "{text:.20}: Arabic that is not marked is shaped"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_real_arabic_face_draws_a_by_line_and_a_label() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in stamps and measurements");
+        return;
+    }
+    let d = stamp_dict(Some("أحمد"));
+    assert_eq!(pdfcraft_fonts::undrawn_mark(&d), None);
+    let (spans, _) = built(&d);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].actual, "أحمد");
+    let d = measured_line("١٢٫٥ سم");
+    assert_eq!(appearance::undrawable_text(&d), None);
+    let (spans, _) = built(&d);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].actual, "١٢٫٥ سم");
+}

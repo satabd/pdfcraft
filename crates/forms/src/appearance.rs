@@ -21,8 +21,11 @@
 //! from Type 3 fonts built from the craft-fonts Arabic face, which [`field_appearance_drawn`] adds
 //! to the document. Each line is a `/Span` with `/ActualText` in typing order; a right-to-left
 //! paragraph is right-aligned unless a `/Q` is stated. Nothing is `?`, so no mark or
-//! `/NeedAppearances` follows. Without the face, or for text it can't draw, and in comb fields,
-//! the `?` drawing above is the fallback.
+//! `/NeedAppearances` follows. Without the face, or for text it can't draw, the `?` drawing above is
+//! the fallback. In a comb field every shaped cluster (a joined letter with its marks) fills one
+//! cell, centred in it, in drawing order: the first letter of a right-to-left value is in the
+//! rightmost cell, and the whole value is one `/ActualText` span. A push button's caption is shaped
+//! the same way, centred ([`shaped_caption`]).
 //!
 //! `/MK /R` (0, 90, 180, 270, counterclockwise) lays the content out in the upright box and sets
 //! the appearance `/Matrix` so that box lands on the widget rectangle. Any other value is 0, and
@@ -438,6 +441,62 @@ pub fn list_rows(doc: &Document, f: &Field, w: &Widget) -> ListRows {
     list_rows_of(doc, &f.da, fobj.as_dict(), &wd)
 }
 
+/// How the Latin pieces next to shaped Arabic are shown in `enc`'s font: its bytes in a `Tj`, or
+/// an error naming a character it can't hold.
+fn latin_show(enc: &FontText) -> impl Fn(&str) -> Result<Vec<TextOp>, ShapedTextError> + '_ {
+    move |s| {
+        if let Some(c) = enc.first_unencodable(s) {
+            return Err(ShapedTextError(format!("\"{c}\" can't be drawn next to Arabic text in this field's font")));
+        }
+        Ok(vec![TextOp::new("Tj", vec![Object::String(PdfString::literal(enc.encode(s)))])])
+    }
+}
+
+/// `ops` as content-stream bytes.
+fn text_ops(ops: Vec<TextOp>) -> Vec<u8> {
+    let ops: Vec<Op> = ops.into_iter().map(|o| Op { op: o.operator, operands: o.operands, inline: None, span: 0..0 }).collect();
+    pdfcraft_content::serialize_ops(&ops)
+}
+
+/// A line of shaped Arabic for a caption, planned: [`Caption::width`] is how wide it is drawn and
+/// [`Caption::draw`] its operators.
+pub(crate) struct Caption {
+    plan: shaped_text::ShapedPlan,
+    /// The width in points at the size it was planned for.
+    pub(crate) width: f64,
+}
+
+impl Caption {
+    /// The operators that draw the caption at the current text position in `size`, inside a span
+    /// that holds its text. `current` is the font the text state holds, and the last one used
+    /// afterwards.
+    pub(crate) fn draw(&self, size: f64, current: &mut String) -> Vec<u8> {
+        text_ops(self.plan.line_ops(0, size, current))
+    }
+}
+
+/// `caption` as one shaped line: Arabic from the craft-fonts face in
+/// generated Type 3 fonts (added to `doc` and listed in `fonts` next to `/Helv`, which draws the
+/// Latin letters, digits and punctuation), laid out in the Unicode bidirectional order, in `size`.
+/// `Ok(None)` when it isn't to be shaped (no Arabic in it, no face in the build, over 200,000
+/// bytes); `Err` when it can't be drawn (a character neither font has), and then nothing has been
+/// added to `doc`. Line breaks are spaces.
+pub(crate) fn shaped_caption(doc: &mut Document, fonts: &mut Dict, caption: &str, size: f64) -> Result<Option<Caption>, ShapedTextError> {
+    if !shaped_text::has_arabic(caption) || caption.len() > MAX_SHAPED_BYTES || !(shaped_text::current_shaper().arabic_available)() {
+        return Ok(None);
+    }
+    let line = caption.replace(['\n', '\r', '\t'], " ");
+    let rtl = shaped_text::first_strong_is_rtl(&line);
+    let enc = FontText::WinAnsi;
+    let latin_width = |s: &str| enc.width(s, 1.0);
+    let width = Measure::new(rtl, 1.0, &latin_width).line(&line) * size;
+    let show = latin_show(&enc);
+    let latin = shaped_text::LatinShow { font: "Helv", show: &show };
+    let names = shaped_text::PlanFonts { max_glyphs: shaped_text::GLYPHS_PER_FONT, name_prefix: "PCFmAr", font_name: None };
+    let plan = shaped_text::plan_directed(doc, fonts, &[(line, rtl)], names, &latin)?;
+    Ok(Some(Caption { plan, width: if width.is_finite() { width } else { 0.0 } }))
+}
+
 /// Most bytes of field text laid out and shaped for one appearance: every character becomes a
 /// shaped cluster in memory. A longer value is stored as typed and drawn with `?` and the mark.
 const MAX_SHAPED_BYTES: usize = 200_000;
@@ -461,6 +520,13 @@ fn explicit_quadding(doc: &Document, f: &Field, wd: &Dict) -> Option<i64> {
         next = d.get(b"Parent").and_then(Object::as_ref);
     }
     acroform(doc).and_then(|af| q(&af))
+}
+
+/// One cell of a comb field's shaped value: where it is drawn and what it holds (one cluster, or
+/// one character of Latin text).
+struct CombCell {
+    x: f64,
+    piece: shaped_text::Piece,
 }
 
 /// One piece of text to draw: where, what (line breaks already spaces) and which way its
@@ -494,8 +560,9 @@ pub fn field_appearance_as(doc: &mut Document, f: &Field, w: &Widget, values: &[
 /// face, which are added to `doc` and listed in the appearance's resources next to the field
 /// font. Its `/ActualText` keeps the typed order for copy and search. A paragraph that runs right
 /// to left is right-aligned unless the widget, field or form states a `/Q`. Nothing is `?`, so no
-/// character is reported. A build without the face, text the face can't draw, an Arabic comb
-/// field or a value over 200,000 bytes falls back to the `?` drawing, and is reported.
+/// character is reported. A comb field draws each cluster in a cell of its own, from the right in a
+/// right-to-left value. A build without the face, text the face can't draw or a value over 200,000
+/// bytes falls back to the `?` drawing, and is reported.
 pub fn field_appearance_drawn(doc: &mut Document, f: &Field, w: &Widget, values: &[String], format: bool) -> (Stream, Option<char>) {
     match draw_field(doc, f, w, values, format, true) {
         Ok(drawn) => drawn,
@@ -550,10 +617,8 @@ fn draw_field(
             enc.can_encode(&text)
         }
     };
-    // Arabic is shaped (when the face exists, the text is of a size a person types, and the field
-    // is not a comb, whose cells hold one character each).
+    // Arabic is shaped (when the face exists and the text is of a size a person types).
     let shaping_wanted = allow_shaping
-        && !comb
         && shown.iter().any(|s| shaped_text::has_arabic(s))
         && shown.iter().map(|s| s.len()).sum::<usize>() <= MAX_SHAPED_BYTES
         && (shaped_text::current_shaper().arabic_available)();
@@ -606,6 +671,10 @@ fn draw_field(
         }
     };
     let mut draws: Vec<Draw> = Vec::new();
+    // A comb field's shaped value: its cells from the left, and the value they hold (for the span).
+    let mut comb_cells: Vec<CombCell> = Vec::new();
+    let mut comb_value = String::new();
+    let mut comb_y = 0.0;
     let mut size = da.size;
     match f.kind {
         FieldKind::List => {
@@ -656,7 +725,25 @@ fn draw_field(
                 }
                 // Centre Helvetica's ascent (0.718) and descent (0.207) vertically.
                 let y = (height - 0.925 * size) / 2.0 + 0.207 * size;
-                if comb {
+                if comb && shaped {
+                    let cells = f.max_len.unwrap_or(1).max(1);
+                    let cell = width / cells as f64;
+                    // Each cell holds one cluster of the value's characters that fit, in drawing
+                    // order; a right-to-left value fills the cells from the right.
+                    comb_value = text.chars().take(cells).collect();
+                    let rtl = is_rtl(&comb_value);
+                    let pieces = shaped_text::comb_cells(&comb_value, rtl, &shaped_text::current_shaper())?;
+                    let first = if rtl { cells.saturating_sub(pieces.len()) } else { 0 };
+                    for (i, piece) in pieces.into_iter().take(cells).enumerate() {
+                        let piece_w = match &piece {
+                            shaped_text::Piece::Latin(s) => latin_width(s),
+                            shaped_text::Piece::Shaped(clusters) => clusters.iter().map(shaped_text::cluster_width).sum(),
+                        } * size;
+                        let x = cell * first.saturating_add(i) as f64 + (cell - piece_w) / 2.0;
+                        comb_cells.push(CombCell { x: if x.is_finite() { x } else { 0.0 }, piece });
+                    }
+                    comb_y = y;
+                } else if comb {
                     let cells = f.max_len.unwrap_or(1).max(1);
                     let cell = width / cells as f64;
                     for (i, ch) in text.chars().take(cells).enumerate() {
@@ -679,20 +766,19 @@ fn draw_field(
 
     let mut fonts = Dict::new();
     fonts.set(font_name.clone().into_bytes(), font_obj);
-    // The lines with Arabic in them are drawn shaped; the fonts they need are added to `doc` last,
-    // after everything that can fail.
+    // The lines with Arabic in them (or the cells of a comb field) are drawn shaped; the fonts they
+    // need are added to `doc` last, after everything that can fail.
     let plan = if shaped {
-        let lines: Vec<(String, bool)> = draws.iter().filter(|d| shaped_text::has_arabic(&d.text)).map(|d| (d.text.clone(), d.rtl)).collect();
-        let latin_enc = enc.latin();
-        let show = |s: &str| -> Result<Vec<TextOp>, ShapedTextError> {
-            if let Some(c) = latin_enc.first_unencodable(s) {
-                return Err(ShapedTextError(format!("\"{c}\" can't be drawn next to Arabic text in this field's font")));
-            }
-            Ok(vec![TextOp::new("Tj", vec![Object::String(PdfString::literal(latin_enc.encode(s)))])])
-        };
+        let show = latin_show(enc.latin());
         let latin = shaped_text::LatinShow { font: &font_name, show: &show };
         let names = shaped_text::PlanFonts { max_glyphs: shaped_text::GLYPHS_PER_FONT, name_prefix: "PCFmAr", font_name: None };
-        Some(shaped_text::plan_directed(doc, &mut fonts, &lines, names, &latin)?)
+        if comb {
+            let cells = comb_cells.iter().map(|c| (String::new(), vec![c.piece.clone()])).collect();
+            Some(shaped_text::plan_pieces(doc, &mut fonts, cells, names, &latin)?)
+        } else {
+            let lines: Vec<(String, bool)> = draws.iter().filter(|d| shaped_text::has_arabic(&d.text)).map(|d| (d.text.clone(), d.rtl)).collect();
+            Some(shaped_text::plan_directed(doc, &mut fonts, &lines, names, &latin)?)
+        }
     } else {
         None
     };
@@ -703,17 +789,25 @@ fn draw_field(
     // The font the text state holds after the lines so far.
     let mut current = font_name.clone();
     let mut planned = 0usize;
+    if let Some(plan) = plan.as_ref().filter(|_| comb) {
+        // One span holds the whole value; each cell is positioned on its own.
+        for (i, cell) in comb_cells.iter().enumerate() {
+            body.extend(format!("1 0 0 1 {} {} Tm ", n(cell.x), n(comb_y)).bytes());
+            if i == 0 {
+                body.extend(shaped_text::actual_text_bdc(&comb_value));
+            }
+            body.extend(text_ops(plan.bare_ops(i, size, &mut current)));
+        }
+        if !comb_cells.is_empty() {
+            body.extend_from_slice(b"EMC\n");
+        }
+    }
     for d in &draws {
         body.extend(format!("1 0 0 1 {} {} Tm ", n(d.x), n(d.y)).bytes());
         match &plan {
             Some(plan) if shaped_text::has_arabic(&d.text) => {
-                let ops: Vec<Op> = plan
-                    .line_ops(planned, size, &mut current)
-                    .into_iter()
-                    .map(|o| Op { op: o.operator, operands: o.operands, inline: None, span: 0..0 })
-                    .collect();
+                body.extend(text_ops(plan.line_ops(planned, size, &mut current)));
                 planned += 1;
-                body.extend(pdfcraft_content::serialize_ops(&ops));
             }
             _ => {
                 if unencodable.is_none() {

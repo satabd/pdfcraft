@@ -7234,6 +7234,120 @@ fn arabic_free_text_is_drawn_shaped_flattened_and_kept_through_tools() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A comb field's Arabic value (one cluster per cell, one span for the value) and an Arabic push
+/// button caption are drawn shaped, not `?`: the page shows them, search reads them in the typed
+/// order, nothing is warned about, and saving, reopening and flattening keep them.
+#[test]
+fn arabic_comb_field_and_button_caption_are_drawn_shaped_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in comb fields and buttons");
+        return;
+    }
+    let dir = workdir("comb-button-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "rect": [20, 20, 180, 42], "name": "pin" }));
+    ok(&mut a, "form_set_props", json!({ "doc": doc, "field": "pin", "max_length": 5, "flags": { "comb": true } }));
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+
+    let typed = "مرحبا";
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "pin": typed } }));
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"][0]["value"], typed);
+    let filled = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(filled, empty, "the page shows the comb value");
+    assert!(page_text(&mut a, doc)[0].contains(typed), "{:?}", page_text(&mut a, doc));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": typed }))["matches"].as_array().unwrap().len(), 1);
+
+    let out =
+        ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "button", "caption": "موافق", "rect": [20, 60, 120, 90], "name": "ok" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    assert!(page_text(&mut a, doc)[0].contains("موافق"), "{:?}", page_text(&mut a, doc));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "موافق" }))["matches"].as_array().unwrap().len(), 1);
+    let out = ok(&mut a, "form_set_props", json!({ "doc": doc, "field": "ok", "caption": "إلغاء" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "إلغاء" }))["matches"].as_array().unwrap().len(), 1);
+
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "comb.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "comb.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains(typed));
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+    ok(&mut a, "doc_flatten", json!({ "doc": doc, "comments": false, "fields": true }));
+    assert!(page_text(&mut a, doc)[0].contains(typed));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A dynamic stamp's "By" line with an Arabic author and a measurement's label with an Arabic unit
+/// are drawn shaped (not `?`), searchable in the typed order, and kept through save and reopen.
+#[test]
+fn arabic_stamp_by_line_and_measurement_label_are_drawn_shaped_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in stamps and measurements");
+        return;
+    }
+    let dir = workdir("stamp-measure-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    let out = ok(
+        &mut a,
+        "comment_add",
+        json!({ "doc": doc, "page": 1, "type": "stamp", "stamp": "reviewed", "dynamic": true, "at": [100, 200], "author": "أحمد" }),
+    );
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    let text = page_text(&mut a, doc)[0].clone();
+    assert!(text.contains("REVIEWED") && text.contains("أحمد") && !text.contains('?'), "{text:?}");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "أحمد" }))["matches"].as_array().unwrap().len(), 1);
+
+    ok(&mut a, "measure_scale", json!({ "doc": doc, "page": 1, "points": [[10, 10], [70, 10]], "distance": 6, "unit": "سم", "precision": 1 }));
+    let out = ok(&mut a, "measure_distance", json!({ "doc": doc, "page": 1, "points": [[10, 20], [70, 100]], "author": "Tester" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    let text = page_text(&mut a, doc)[0].clone();
+    assert!(text.contains("سم") && !text.contains('?'), "{text:?}");
+    assert_ne!(a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap(), empty);
+
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "stamped.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "stamped.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains("أحمد") && page_text(&mut a, re)[0].contains("سم"));
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Search & Redact patterns read Arabic-Indic digits as digits: a phone number typed with them is
+/// found by the phone pattern, marked, and removed from the page when applied.
+#[test]
+fn redact_pattern_search_reads_arabic_indic_digits_through_tools() {
+    use pdfcraft_cos::{Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
+    use std::sync::Arc;
+
+    let dir = workdir("redact-arabic-digits");
+    let mut doc = Document::open(Arc::new(fixture(1))).unwrap();
+    // Synthetic glyph codes: A ٥, B ١, C ٢, D ٣, E ٤, F ٦, G ٧ (Arabic-Indic digits) and a hyphen.
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
+                1 begincodespacerange <00> <FF> endcodespacerange 8 beginbfchar \
+                <41> <0665> <42> <0661> <43> <0662> <44> <0663> <45> <0664> <46> <0666> <47> <0667> <2D> <002D> \
+                endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let unicode = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
+    doc.update_dict(ObjRef::new(3, 0), |d| d.set(b"ToUnicode".to_vec(), Object::Ref(unicode))).unwrap();
+    let content = "BT /F1 24 Tf 20 150 Td (AAA-BCD-EAFG) Tj ET";
+    doc.set(ObjRef::new(5, 0), Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    std::fs::write(dir.join("digits.pdf"), write_full(&doc, &SaveOptions::default()).unwrap()).unwrap();
+
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({ "path": "digits.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(page_text(&mut a, id), ["٥٥٥-١٢٣-٤٥٦٧"], "the page holds Arabic-Indic digits");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": id, "query": "555-123-4567" }))["count"], 1, "plain search already reads them as digits");
+    let r = ok(&mut a, "redact_mark", json!({ "doc": id, "pattern": "phone" }));
+    assert_eq!((r["marked"].as_u64(), r["marks_pending"].as_u64()), (Some(1), Some(1)), "{r}");
+    let r = ok(&mut a, "redact_apply", json!({ "doc": id }));
+    assert_eq!(r["applied"].as_u64(), Some(1), "{r}");
+    let text = page_text(&mut a, id)[0].clone();
+    assert!(!text.contains('٥') && !text.contains('٧'), "{text:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The same text box in a build with no Arabic face keeps its text, draws `?`, says so, and
 /// refuses to flatten the `?` into the page.
 #[test]

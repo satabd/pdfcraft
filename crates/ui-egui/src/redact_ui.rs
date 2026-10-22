@@ -316,7 +316,7 @@ impl PdfCraftApp {
             let out = r.render(pdfcraft_render::RenderRequest { page, kind: pdfcraft_render::RequestKind::Text, scale: 1.0, ..Default::default() });
             let Some(text) = out.text else { continue };
             let hits = match d.mode {
-                SearchMode::Patterns => text.find_with(|c| pdfcraft_engine::find_pattern(d.pattern, c)),
+                SearchMode::Patterns => text.find_with_folded(|c| pdfcraft_engine::find_pattern(d.pattern, c)),
                 _ => needles.iter().flat_map(|w| text.find_opts(w, d.case_sensitive, d.whole_words)).collect(),
             };
             for h in hits {

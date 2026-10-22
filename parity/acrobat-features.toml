@@ -1395,7 +1395,7 @@ status = "shipped"
 commands = ["edit.find"]
 tools = ["text_find"]
 evidence = ["crates/ui-egui/tests/ui.rs::find_counts_matches_across_pages", "crates/ui-egui/tests/ui.rs::find_reports_no_matches", "crates/automation/tests/automation.rs::open_inspect_render_and_find", "crates/render/src/text.rs::identity_v_columns_are_searchable_in_reading_order", "crates/render/src/text.rs::arabic_search_ignores_harakat_in_the_query_and_in_the_page", "crates/render/src/text.rs::arabic_presentation_forms_match_their_base_letters", "crates/render/src/text.rs::arabic_indic_and_persian_digits_match_western_digits", "crates/render/src/text.rs::arabic_search_does_not_unify_distinct_letters", "crates/automation/tests/automation.rs::text_find_ignores_arabic_harakat_and_matches_presentation_forms"]
-notes = "Horizontal and WMode 1 vertical text are grouped independently, including a horizontal heading above right-to-left vertical columns. Complex interleaved flows still use a geometric reading-order heuristic. Arabic: the query and the page are folded alike before matching: harakat and other combining marks, tatweel and direction controls are ignored, presentation forms and the lam-alef and Allah ligatures match their base letters, and Arabic-Indic and Persian digits match Western digits; alef variants, alef maksura/yeh and teh marbuta/heh stay distinct, as in Acrobat. Search & Redact patterns (the regex path) do not get this fold yet."
+notes = "Horizontal and WMode 1 vertical text are grouped independently, including a horizontal heading above right-to-left vertical columns. Complex interleaved flows still use a geometric reading-order heuristic. Arabic: the query and the page are folded alike before matching: harakat and other combining marks, tatweel and direction controls are ignored, presentation forms and the lam-alef and Allah ligatures match their base letters, and Arabic-Indic and Persian digits match Western digits; alef variants, alef maksura/yeh and teh marbuta/heh stay distinct, as in Acrobat. Search & Redact patterns get the page-side fold (see protect.redact-patterns); the pattern is matched against folded text."
 
 [[feature]]
 id = "view.find-next-previous"
@@ -3669,7 +3669,7 @@ status = "partial"
 commands = ["comment.freetext"]
 tools = ["comment_add"]
 evidence = ["crates/ui-egui/tests/comments.rs::sticky_note_composer_posts_and_returns_to_select", "crates/annot/src/tests.rs::text_box_text_and_colour_changes_are_drawn", "crates/annot/src/shaped_tests.rs::arabic_text_is_drawn_shaped_and_right_aligned", "crates/annot/src/shaped_tests.rs::long_arabic_text_wraps_on_its_shaped_width", "crates/automation/tests/automation.rs::arabic_free_text_is_drawn_shaped_flattened_and_kept_through_tools"]
-notes = "Helvetica text with colour, size and alignment; /RC (XHTML) and /DS are written and kept in step with edits; per-run formatting (bold/italic spans) is not yet. Arabic text is drawn shaped from the craft-fonts Arab face (as paths inside /Span /ActualText, wrapped on shaped widths, right-aligned when the paragraph is right to left and no /Q is stated; /RC says dir=rtl) and the box is sized on those widths; other scripts the Helvetica lacks still draw ? with the mark. Not yet: Arabic with Hebrew or other scripts in one box, more than 1,500 characters shaped, shaped text in measurement labels and dynamic stamps' By line"
+notes = "Helvetica text with colour, size and alignment; /RC (XHTML) and /DS are written and kept in step with edits; per-run formatting (bold/italic spans) is not yet. Arabic text is drawn shaped from the craft-fonts Arab face (as paths inside /Span /ActualText, wrapped on shaped widths, right-aligned when the paragraph is right to left and no /Q is stated; /RC says dir=rtl) and the box is sized on those widths; other scripts the Helvetica lacks still draw ? with the mark. Not yet: Arabic with Hebrew or other scripts in one box, more than 1,500 characters shaped"
 
 [[feature]]
 id = "comment.callout"
@@ -4100,8 +4100,8 @@ milestone = "M6"
 status = "shipped"
 commands = ["comment.stamp"]
 tools = ["comment_add"]
-evidence = ["crates/annot/src/tests.rs::stamps_draw_their_label_and_by_line", "crates/ui-egui/tests/stamps.rs::choosing_and_placing_stamps", "crates/automation/tests/automation.rs::stamps_through_tools", "crates/engine/src/tests.rs::rubber_stamps_point_left_as_displayed_on_rotated_pages"]
-notes = "Approved, Confidential, Received, Reviewed, Revised with a By author at time, date line (local time). The label is turned with the page's /Rotate so it reads upright as displayed (#1398)"
+evidence = ["crates/annot/src/tests.rs::stamps_draw_their_label_and_by_line", "crates/ui-egui/tests/stamps.rs::choosing_and_placing_stamps", "crates/automation/tests/automation.rs::stamps_through_tools", "crates/engine/src/tests.rs::rubber_stamps_point_left_as_displayed_on_rotated_pages", "crates/annot/src/shaped_tests.rs::an_arabic_by_line_on_a_stamp_is_shaped_centred_and_unmarked", "crates/annot/src/shaped_tests.rs::hostile_labels_never_panic_and_the_mark_agrees_with_the_drawing", "crates/automation/tests/automation.rs::arabic_stamp_by_line_and_measurement_label_are_drawn_shaped_through_tools"]
+notes = "Approved, Confidential, Received, Reviewed, Revised with a By author at time, date line (local time). The label is turned with the page's /Rotate so it reads upright as displayed (#1398). An Arabic author makes the By line shaped (craft-fonts Arab face, as glyph paths with ActualText, centred and shrunk to fit; not marked); the stamp's label stays Latin; other scripts Helvetica lacks still draw ? with the mark"
 
 [[feature]]
 id = "comment.stamps-custom"
@@ -4232,8 +4232,8 @@ milestone = "M12"
 status = "partial"
 commands = ["measure.distance"]
 tools = ["measure_distance"]
-evidence = ["crates/automation/tests/automation.rs::measurements_calibrate_draw_save_reopen_and_export", "crates/measure/src/tests.rs::calibrated_lengths_concave_areas_and_axis_scales", "crates/ui-egui/tests/control.rs::measurement_tools_draw_live_calibrate_save_and_export"]
-notes = "Two-point distance annotations with saved numeric captions and rectilinear scales. Partial: only single-unit decimal formats; compound (ft-in) and fractional formats are not supported (listed as unsupported, data kept), no leader lines or caption placement options, geospatial scales unsupported, and interop with Acrobat-authored measurements (reading theirs, Acrobat reading ours) is untested."
+evidence = ["crates/automation/tests/automation.rs::measurements_calibrate_draw_save_reopen_and_export", "crates/measure/src/tests.rs::calibrated_lengths_concave_areas_and_axis_scales", "crates/ui-egui/tests/control.rs::measurement_tools_draw_live_calibrate_save_and_export", "crates/annot/src/shaped_tests.rs::an_arabic_measurement_label_is_shaped_and_centred", "crates/automation/tests/automation.rs::arabic_stamp_by_line_and_measurement_label_are_drawn_shaped_through_tools"]
+notes = "Two-point distance annotations with saved numeric captions (an Arabic unit or label is drawn shaped, as for perimeter and area) and rectilinear scales. Partial: only single-unit decimal formats; compound (ft-in) and fractional formats are not supported (listed as unsupported, data kept), no leader lines or caption placement options, geospatial scales unsupported, and interop with Acrobat-authored measurements (reading theirs, Acrobat reading ours) is untested."
 
 [[feature]]
 id = "comment.measure-perimeter"
@@ -4416,8 +4416,8 @@ milestone = "M6"
 status = "shipped"
 commands = ["form.fields"]
 tools = ["form_fill", "form_fields"]
-evidence = ["crates/ui-egui/tests/forms.rs::typing_into_a_text_field_and_tabbing_on", "crates/ui-egui/tests/forms.rs::auto_size_fields_shrink_and_wrap_typed_text_to_fit_their_box", "crates/forms/src/tests.rs::text_fields_get_new_appearances", "crates/engine/src/tests.rs::filling_a_form_shows_saves_and_undoes", "crates/automation/tests/automation.rs::orphan_form_fields_through_tools", "crates/forms/src/tests.rs::fields_sharing_a_name_take_the_same_value", "crates/forms/src/shaped_tests.rs::a_text_field_with_arabic_is_drawn_shaped_and_right_aligned", "crates/forms/src/shaped_tests.rs::a_multiline_field_wraps_arabic_into_spans_that_fit", "crates/automation/tests/automation.rs::arabic_form_values_are_drawn_shaped_flattened_and_kept_through_tools"]
-notes = "in-place editor; Enter or clicking away commits, Escape cancels; auto-size (0 Tf) fields shrink, and multiline ones wrap, the text being typed to fit the box, on screen as on the page (the screen measures in the interface font, so its size can be a little smaller than the page's Helvetica fit); fixed sizes are kept and clip, as in Acrobat; no format/keystroke JavaScript yet (M6.4). Arabic values are drawn shaped (joined forms, marks, Latin and digits in UAX #9 order) from Type 3 fonts built from the craft-fonts Arab face, with the typed order in /ActualText, right-aligned when the text runs right to left and no /Q is stated, wrapped for multiline fields, and for combo and list options too; the field is then not marked and /NeedAppearances stays off, so flattening works. Without the face (or for text it cannot draw) the value is kept, drawn as ? and marked as before. Not yet: Arabic in comb fields and button captions (still ?), and Hebrew/Thai in fields; the interactive in-place editor still edits in the interface font"
+evidence = ["crates/ui-egui/tests/forms.rs::typing_into_a_text_field_and_tabbing_on", "crates/ui-egui/tests/forms.rs::auto_size_fields_shrink_and_wrap_typed_text_to_fit_their_box", "crates/forms/src/tests.rs::text_fields_get_new_appearances", "crates/engine/src/tests.rs::filling_a_form_shows_saves_and_undoes", "crates/automation/tests/automation.rs::orphan_form_fields_through_tools", "crates/forms/src/tests.rs::fields_sharing_a_name_take_the_same_value", "crates/forms/src/shaped_tests.rs::a_text_field_with_arabic_is_drawn_shaped_and_right_aligned", "crates/forms/src/shaped_tests.rs::a_multiline_field_wraps_arabic_into_spans_that_fit", "crates/automation/tests/automation.rs::arabic_form_values_are_drawn_shaped_flattened_and_kept_through_tools", "crates/forms/src/shaped_tests.rs::an_arabic_comb_value_draws_one_cluster_per_cell_right_to_left", "crates/forms/src/shaped_tests.rs::a_short_arabic_comb_value_fills_cells_from_the_right", "crates/forms/src/shaped_tests.rs::hostile_comb_values_never_panic", "crates/automation/tests/automation.rs::arabic_comb_field_and_button_caption_are_drawn_shaped_through_tools"]
+notes = "in-place editor; Enter or clicking away commits, Escape cancels; auto-size (0 Tf) fields shrink, and multiline ones wrap, the text being typed to fit the box, on screen as on the page (the screen measures in the interface font, so its size can be a little smaller than the page's Helvetica fit); fixed sizes are kept and clip, as in Acrobat; no format/keystroke JavaScript yet (M6.4). Arabic values are drawn shaped (joined forms, marks, Latin and digits in UAX #9 order) from Type 3 fonts built from the craft-fonts Arab face, with the typed order in /ActualText, right-aligned when the text runs right to left and no /Q is stated, wrapped for multiline fields, and for combo and list options too; the field is then not marked and /NeedAppearances stays off, so flattening works. Without the face (or for text it cannot draw) the value is kept, drawn as ? and marked as before. Comb fields draw one shaped cluster per cell (centred, from the rightmost cell for a right-to-left value, one ActualText span for the value). Not yet: Hebrew/Thai in fields; the interactive in-place editor still edits in the interface font"
 
 [[feature]]
 id = "form.fill-checkbox-radio"
@@ -4824,8 +4824,8 @@ milestone = "M6"
 status = "shipped"
 commands = ["form.add.button"]
 tools = ["form_add_field"]
-evidence = ["crates/forms/src/tests.rs::every_field_type_can_be_added_named_and_drawn"]
-notes = "Button1…; actions arrive with the JavaScript engine"
+evidence = ["crates/forms/src/tests.rs::every_field_type_can_be_added_named_and_drawn", "crates/forms/src/shaped_tests.rs::an_arabic_button_caption_is_shaped_centred_and_unmarked", "crates/automation/tests/automation.rs::arabic_comb_field_and_button_caption_are_drawn_shaped_through_tools"]
+notes = "Button1…; actions arrive with the JavaScript engine. An Arabic caption is shaped with the craft-fonts Arab face (centred, ActualText for copy and search, not marked); other scripts Helvetica lacks still draw ? with the mark"
 
 [[feature]]
 id = "form.add-image-field"
@@ -5608,8 +5608,8 @@ milestone = "M8"
 status = "shipped"
 commands = ["redact.search"]
 tools = ["redact_mark"]
-evidence = ["crates/redact/src/patterns.rs::phone_numbers", "crates/redact/src/patterns.rs::credit_cards_need_a_valid_checksum", "crates/automation/tests/automation.rs::redacting_through_tools"]
-notes = "phone (North American, E.164 with + country code, national with trunk 0), e-mail, credit card (Luhn), SSN, dates (English US forms); text drawn in a font whose built-in encoding we hold no table for (Symbol, ZapfDingbats, MacExpert) has no Unicode mapping, so a pattern search cannot see it -- it is skipped rather than mis-decoded"
+evidence = ["crates/redact/src/patterns.rs::phone_numbers", "crates/redact/src/patterns.rs::credit_cards_need_a_valid_checksum", "crates/automation/tests/automation.rs::redacting_through_tools", "crates/render/src/text.rs::pattern_search_folds_arabic_page_text", "crates/render/src/text.rs::pattern_search_never_panics_on_hostile_text_or_matchers", "crates/automation/tests/automation.rs::redact_pattern_search_reads_arabic_indic_digits_through_tools"]
+notes = "Arabic pages are read as Find reads them (harakat dropped, presentation forms and ligatures reduced to base letters, Arabic-Indic and Persian digits to ASCII, each character keeping its glyph), so a phone number typed in Arabic-Indic digits is found; the pattern is matched against that folded text, and a match stops after its last letter, leaving a trailing mark glyph, as literal search does. phone (North American, E.164 with + country code, national with trunk 0), e-mail, credit card (Luhn), SSN, dates (English US forms); text drawn in a font whose built-in encoding we hold no table for (Symbol, ZapfDingbats, MacExpert) has no Unicode mapping, so a pattern search cannot see it -- it is skipped rather than mis-decoded"
 
 [[feature]]
 id = "protect.redact-pattern-locales"

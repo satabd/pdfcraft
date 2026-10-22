@@ -9,6 +9,9 @@
 //! and form fields: Unicode bidirectional order (UAX #9), joined forms, marks, wrapping on shaped
 //! widths.
 //!
+//! A one-line label (a dynamic stamp's "By" line, a measurement's value) is drawn the same way by
+//! [`centred_line`].
+//!
 //! Text this can't draw (no Arabic face in the build, a character neither font has, more than
 //! [`MAX_SHAPED_CHARS`] characters) is not shaped here: the caller draws it as before, with `?`.
 //! [`drawable`] answers for [`crate::appearance::undrawable_text`], so a shaped annotation is not
@@ -100,6 +103,43 @@ pub(crate) fn drawable(text: &str) -> bool {
             .flat_map(|c| c.glyphs.iter().map(move |(id, _)| (c.script, *id)))
             .all(|key| !seen.insert(key) || (shaper.outline)(key.0, key.1).is_ok()),
     })
+}
+
+/// A label's text on one line: its line breaks are spaces.
+pub(crate) fn one_line(text: &str) -> String {
+    text.replace(['\n', '\r'], " ")
+}
+
+/// Whether a one-line label with `text` is to be drawn shaped, and can be (see [`drawable`]).
+pub(crate) fn drawable_line(text: &str) -> bool {
+    drawable(&one_line(text))
+}
+
+/// The operators that draw `text` shaped on one line, centred on `centre` with its baseline at `y`:
+/// at `size`, or smaller if it would then be wider than `fit` points. The fill colour is the
+/// caller's, and the operators are outside any text object. `None` when the label is not drawn
+/// shaped (see [`wanted`], [`drawable_line`]), so the caller draws it the old way.
+pub(crate) fn centred_line(text: &str, size: f64, centre: f64, y: f64, fit: Option<f64>) -> Option<Vec<u8>> {
+    let text = one_line(text);
+    if !wanted(&text) || !size.is_finite() || size <= 0.0 || !centre.is_finite() || !y.is_finite() {
+        return None;
+    }
+    // Laid out at one point, where the width is the line's width in em; it scales with the size.
+    let mut lines = lay_out(&text, 1.0, f64::MAX).ok()?;
+    let mut line = lines.pop().filter(|_| lines.is_empty())?;
+    let mut size = size;
+    if let Some(fit) = fit
+        && line.width * size > fit
+    {
+        size = fit / line.width;
+        if !(size.is_finite() && size > 0.0) {
+            return None;
+        }
+    }
+    line.width *= size;
+    let mut out = Vec::new();
+    draw_line(&mut out, &line, centre - line.width / 2.0, y, size, &shaped_text::current_shaper()).ok()?;
+    Some(out)
 }
 
 /// A space in invisible text (render mode 3), stretched over `width` points from `x`: paths are not

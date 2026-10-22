@@ -767,7 +767,9 @@ fn form_stream(place: crate::appearance::Placement, content: Vec<u8>, resources:
 /// A push button: background, border, its icon (`/MK /I`, scaled to fit and centred) and its
 /// centred caption (unless the layout is icon only, `/TP 1`). The caption is drawn in Helvetica,
 /// with the first character it can't draw (drawn as `?`), for the caller to mark and report.
-fn button_appearance(doc: &Document, w: &Widget) -> (Stream, Option<char>) {
+/// An Arabic caption is shaped instead (see [`crate::appearance::shaped_caption`], which adds its
+/// fonts to `doc`): nothing is `?`, so none is reported.
+fn button_appearance(doc: &mut Document, w: &Widget) -> (Stream, Option<char>) {
     let (mut c, place) = frame_only(doc, w);
     let (width, height) = (place.layout_w, place.layout_h);
     let wobj = doc.get(w.obj);
@@ -791,15 +793,6 @@ fn button_appearance(doc: &Document, w: &Widget) -> (Stream, Option<char>) {
             xobjects.set(b"Icon".to_vec(), Object::Ref(icon));
         }
     }
-    let mut missing = None;
-    if !icon_only && !caption.is_empty() {
-        missing = pdfcraft_fonts::first_undrawable(&caption);
-        let size = ((height - 4.0) * 0.6).clamp(4.0, 14.0);
-        let tw = helvetica_width(&caption, size);
-        content.extend(format!("BT /Helv {size:.2} Tf 0 g 1 0 0 1 {:.3} {:.3} Tm ", (width - tw) / 2.0, (height - size * 0.7) / 2.0).bytes());
-        content.extend(literal(&win_ansi(&caption)));
-        content.extend_from_slice(b" Tj ET\n");
-    }
     let mut font = Dict::new();
     font.set(b"Type".to_vec(), Object::name("Font"));
     font.set(b"Subtype".to_vec(), Object::name("Type1"));
@@ -807,6 +800,23 @@ fn button_appearance(doc: &Document, w: &Widget) -> (Stream, Option<char>) {
     font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
     let mut fonts = Dict::new();
     fonts.set(b"Helv".to_vec(), Object::Dict(font));
+    let mut missing = None;
+    if !icon_only && !caption.is_empty() {
+        let size = ((height - 4.0) * 0.6).clamp(4.0, 14.0);
+        let y = (height - size * 0.7) / 2.0;
+        // Arabic is shaped; a caption it can't draw (or no face) falls back to the `?` drawing.
+        if let Ok(Some(shaped)) = crate::appearance::shaped_caption(doc, &mut fonts, &caption, size) {
+            content.extend(format!("BT /Helv {size:.2} Tf 0 g 1 0 0 1 {:.3} {y:.3} Tm ", (width - shaped.width) / 2.0).bytes());
+            content.extend(shaped.draw(size, &mut "Helv".to_string()));
+            content.extend_from_slice(b" ET\n");
+        } else {
+            missing = pdfcraft_fonts::first_undrawable(&caption);
+            let tw = helvetica_width(&caption, size);
+            content.extend(format!("BT /Helv {size:.2} Tf 0 g 1 0 0 1 {:.3} {y:.3} Tm ", (width - tw) / 2.0).bytes());
+            content.extend(literal(&win_ansi(&caption)));
+            content.extend_from_slice(b" Tj ET\n");
+        }
+    }
     let mut res = Dict::new();
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     if !xobjects.is_empty() {

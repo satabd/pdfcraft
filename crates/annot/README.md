@@ -24,8 +24,9 @@ Comments (annotations), ISO 32000-2 §12.5. Layer L3, depends on `pdfcraft-cos`,
   flattening refuses to make it permanent. Two refusals (`AnnotError::Undrawable`): a redaction
   mark's overlay text, which becomes page content when applied; and a restyle or resize of a
   comment another program drew with a font that has those characters, whose appearance is kept
-  rather than redrawn with `?` (new text for it is taken). Not shaped: a measurement label and a
-  dynamic stamp's By line (still Helvetica, `?` with the mark).
+  rather than redrawn with `?` (new text for it is taken). A measurement's value label and a
+  dynamic stamp's By line are shaped the same way (`shaped::centred_line`: one line, centred, the
+  stamp's shrunk to fit like Latin text; line breaks in the label are spaces) and are not marked.
 - **Edits:** reply (`/IRT`), set review status (a `/State` reply, as Acrobat's "Set status"
   does), change text, move, resize, restyle, delete (with pop-up and replies).
 

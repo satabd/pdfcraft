@@ -307,6 +307,27 @@ fn width_em(c: &ShapedCluster) -> f64 {
     if em.is_finite() { em } else { 0.0 }
 }
 
+/// A cluster's advance in em, as [`Measure`] counts it and the generated fonts state it.
+pub fn cluster_width(c: &ShapedCluster) -> f64 {
+    width_em(c)
+}
+
+/// `line` as the cells of a comb field hold it: one piece per cell, in drawing order (left to
+/// right) in the paragraph's direction. A shaped cluster (a joined letter with its marks, a
+/// ligature) fills one cell, and so does each character of Latin text. In a paragraph that runs
+/// right to left the first typed letter is the last cell. Joined forms are those of the whole
+/// line, so a letter keeps the shape it has in the word. Widths are the caller's to measure.
+pub fn comb_cells(line: &str, rtl: bool, shaper: &Shaper) -> Result<Vec<Piece>, ShapedTextError> {
+    let mut cells = Vec::new();
+    for piece in shaped_pieces(line, rtl, shaper)? {
+        match piece {
+            Piece::Latin(s) => cells.extend(s.chars().map(|c| Piece::Latin(c.to_string()))),
+            Piece::Shaped(clusters) => cells.extend(clusters.into_iter().map(|c| Piece::Shaped(vec![c]))),
+        }
+    }
+    Ok(cells)
+}
+
 /// Measures lines of shaped text, in text space before the horizontal scale.
 pub struct Measure<'a> {
     shaper: Shaper,
@@ -633,14 +654,29 @@ pub fn plan_directed(
     latin: &LatinShow,
 ) -> Result<ShapedPlan, ShapedTextError> {
     let shaper = current_shaper();
-    let mut keys: Vec<&ShapedCluster> = Vec::new();
-    let mut index: HashMap<ClusterKey, usize> = HashMap::new();
     let mut laid = Vec::with_capacity(lines.len());
     for (line, rtl) in lines {
-        laid.push(shaped_pieces(line, *rtl, &shaper)?);
+        laid.push((line.clone(), shaped_pieces(line, *rtl, &shaper)?));
     }
+    plan_pieces(doc, fonts_res, laid, fonts, latin)
+}
+
+/// [`plan_directed`] for lines already laid out: each is its text in typing order and its pieces
+/// in drawing order (from [`shaped_pieces`], or one cell at a time from [`comb_cells`]). Pieces
+/// with a script other than Arabic are refused; everything that can fail does so before `doc` is
+/// touched.
+pub fn plan_pieces(
+    doc: &mut Document,
+    fonts_res: &mut Dict,
+    laid: Vec<(String, Vec<Piece>)>,
+    fonts: PlanFonts,
+    latin: &LatinShow,
+) -> Result<ShapedPlan, ShapedTextError> {
+    let shaper = current_shaper();
+    let mut keys: Vec<&ShapedCluster> = Vec::new();
+    let mut index: HashMap<ClusterKey, usize> = HashMap::new();
     let mut staged: Vec<Vec<Staged>> = Vec::with_capacity(laid.len());
-    for pieces in &laid {
+    for (_, pieces) in &laid {
         let mut row = Vec::with_capacity(pieces.len());
         for piece in pieces {
             match piece {
@@ -700,8 +736,8 @@ pub fn plan_directed(
         names.push(name);
     }
 
-    let mut planned = Vec::with_capacity(lines.len());
-    for ((line, _), row) in lines.iter().zip(staged) {
+    let mut planned = Vec::with_capacity(laid.len());
+    for ((line, _), row) in laid.iter().zip(staged) {
         let mut runs: Vec<Run> = Vec::new();
         for item in row {
             match item {
@@ -743,6 +779,19 @@ impl ShapedPlan {
         let mut properties = Dict::new();
         properties.set(b"ActualText".to_vec(), Object::String(PdfString { bytes, hex: true }));
         let mut ops = vec![TextOp::new("BDC", vec![Object::name("Span"), Object::Dict(properties)])];
+        ops.extend(self.run_ops(line, size, current));
+        ops.push(TextOp::new("EMC", vec![]));
+        ops
+    }
+
+    /// [`Self::line_ops`] without the span: the operators that show planned line `i`, for a caller
+    /// that wraps several of them (the cells of a comb field) in one span of its own.
+    pub fn bare_ops(&self, i: usize, size: f64, current: &mut String) -> Vec<TextOp> {
+        self.lines.get(i).map(|line| self.run_ops(line, size, current)).unwrap_or_default()
+    }
+
+    fn run_ops(&self, line: &PlannedLine, size: f64, current: &mut String) -> Vec<TextOp> {
+        let mut ops = Vec::new();
         let mut select = |ops: &mut Vec<TextOp>, font: &str| {
             if current != font {
                 ops.push(TextOp::new("Tf", vec![Object::name(font), number(size)]));
@@ -762,7 +811,6 @@ impl ShapedPlan {
                 }
             }
         }
-        ops.push(TextOp::new("EMC", vec![]));
         ops
     }
 }

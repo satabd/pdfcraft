@@ -89,17 +89,17 @@ fn hex16(text: &str) -> String {
 const GREETING: &str = "مرحبا بالعالم";
 
 /// A form with fields drawn in 12 pt Helvetica: `t` (200 × 20), `m` (multiline, 100 × 100),
-/// `c` (combo), `l` (list), `left` (`/Q 0`), `centre` (`/Q 1`), and `grp.kid` under a parent that
-/// states `/Q 0`. `form` is added to the AcroForm dictionary.
+/// `c` (combo), `l` (list), `left` (`/Q 0`), `centre` (`/Q 1`), `comb` (a 5-cell comb, 200 × 20)
+/// and `grp.kid` under a parent that states `/Q 0`. `form` is added to the AcroForm dictionary.
 fn form(form: &str) -> Document {
     let da = "/DA (/Helv 12 Tf 0 g)";
     let opts = format!("/Opt [[(ar) <FEFF{}>] [(en) (English)]]", hex16("بالعالم"));
     let objs: Vec<String> = vec![
         "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(),
-        "<< /Type /Page /Parent 2 0 R /Annots [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 13 0 R] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /Annots [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 13 0 R 15 0 R] >>".into(),
         format!(
-            "<< /Fields [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R /Cour 14 0 R >> >> {form} >>"
+            "<< /Fields [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 15 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R /Cour 14 0 R >> >> {form} >>"
         ),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
         format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (t) {da} /Rect [50 700 250 720] /P 3 0 R >>"),
@@ -111,6 +111,7 @@ fn form(form: &str) -> Document {
         "<< /T (grp) /Q 0 /Kids [13 0 R] >>".into(),
         format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (kid) /Parent 12 0 R {da} /Rect [50 100 250 120] /P 3 0 R >>"),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".into(),
+        format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T (comb) /Ff 16777216 /MaxLen 5 {da} /Rect [50 50 250 70] /P 3 0 R >>"),
     ];
     document(&objs)
 }
@@ -140,6 +141,28 @@ struct Line {
     width: f64,
     latin: Vec<String>,
     fonts: Vec<String>,
+    /// The text of the generated fonts' glyphs shown, read from their `ToUnicode` maps.
+    glyphs: String,
+}
+
+/// Code → text of a generated Type 3 font's `ToUnicode` map (`<01> <0627>` lines).
+fn to_unicode_of(doc: &Document, font: &Dict) -> std::collections::HashMap<u8, String> {
+    let mut map = std::collections::HashMap::new();
+    let Some(r) = font.get(b"ToUnicode") else { return map };
+    let Object::Stream(s) = &*doc.resolve(r) else { return map };
+    let text = String::from_utf8_lossy(&s.decoded().unwrap()).into_owned();
+    for line in text.lines() {
+        let hex: Vec<&str> = line.split(['<', '>']).map(str::trim).filter(|p| !p.is_empty()).collect();
+        if let [code, unicode] = hex[..]
+            && code.len() == 2
+            && unicode.len() >= 4
+            && let Ok(code) = u8::from_str_radix(code, 16)
+        {
+            let units: Vec<u16> = (0..unicode.len() / 4).filter_map(|i| u16::from_str_radix(unicode.get(i * 4..i * 4 + 4)?, 16).ok()).collect();
+            map.insert(code, String::from_utf16_lossy(&units));
+        }
+    }
+    map
 }
 
 fn lines_of(doc: &Document, ops: &[Op], fonts: &Dict) -> Vec<Line> {
@@ -147,7 +170,7 @@ fn lines_of(doc: &Document, ops: &[Op], fonts: &Dict) -> Vec<Line> {
     let (mut font, mut size) = (String::new(), 0.0);
     for op in ops {
         if op.is("Tm") {
-            out.push(Line { x: op.num(4).unwrap(), span: None, width: 0.0, latin: Vec::new(), fonts: Vec::new() });
+            out.push(Line { x: op.num(4).unwrap(), span: None, width: 0.0, latin: Vec::new(), fonts: Vec::new(), glyphs: String::new() });
         } else if op.is("Tf") {
             font = String::from_utf8_lossy(op.name(0).unwrap()).into_owned();
             size = op.num(1).unwrap();
@@ -166,9 +189,11 @@ fn lines_of(doc: &Document, ops: &[Op], fonts: &Dict) -> Vec<Line> {
             if fd.name(b"Subtype") == Some(b"Type3") {
                 let first = fd.get(b"FirstChar").and_then(Object::as_int).unwrap();
                 let widths = fd.get(b"Widths").and_then(Object::as_array).unwrap();
+                let to_unicode = to_unicode_of(doc, fd);
                 for b in bytes {
                     let w = widths.get(usize::from(*b) - first as usize).and_then(Object::as_f64).unwrap();
                     line.width += w / 1000.0 * size;
+                    line.glyphs.push_str(to_unicode.get(b).map_or("", String::as_str));
                 }
             } else {
                 let text: String = bytes.iter().map(|b| char::from(*b)).collect();
@@ -460,9 +485,232 @@ fn the_real_arabic_face_shapes_a_form_field() {
     let rows = lines_of(&doc, &ops, &fonts);
     assert!(rows.len() >= 3);
     assert!(rows.iter().all(|r| r.width <= 96.0 + 0.01));
+    // A comb field and a button caption with the real face: five cells for five letters, one span.
+    set(&mut doc, "comb", "مرحبا");
+    button(&mut doc, "موافق");
+    assert_unmarked(&doc);
+    let (ops, fonts) = appearance_of(&doc, "comb");
+    let cells = lines_of(&doc, &ops, &fonts);
+    assert_eq!(cells.len(), 5, "{cells:?}");
+    assert_eq!(cells.iter().filter_map(|l| l.span.as_deref()).collect::<Vec<_>>(), ["مرحبا"]);
+    assert!(cells.windows(2).all(|w| w[0].x < w[1].x) && cells.iter().all(|l| l.latin.is_empty()));
+    let (ops, fonts) = appearance_of(&doc, "btn");
+    assert_eq!(lines_of(&doc, &ops, &fonts)[0].span.as_deref(), Some("موافق"));
     // Hostile input with the real face: no panic, whatever is drawn.
     for text in ["\u{064E}\u{064E}", "\u{202E}\u{200F}\u{061C}", "ب\0ا", "\u{FDFD}", &"ب".repeat(20_000)] {
         set(&mut doc, "t", text);
+        force(&mut doc, "comb", text);
         let _ = reopen(&doc);
     }
+}
+
+// ---- comb fields ----
+
+/// Store `text` as the value of `name` without the checks `set_value` makes (a value longer than a
+/// comb's cells, as another program may have written it) and redraw the field.
+fn force(doc: &mut Document, name: &str, text: &str) {
+    let obj = field(&fields(doc), name).obj;
+    doc.update_dict(obj, |d| d.set(b"V".to_vec(), PdfString::text(text))).unwrap();
+    redraw_field(doc, name).unwrap();
+}
+
+/// The glyph texts of a comb field's cells from left to right, with the cell each starts in.
+fn comb_cells_of(doc: &Document, name: &str) -> (Vec<(usize, String)>, Vec<Line>) {
+    let (ops, fonts) = appearance_of(doc, name);
+    let lines = lines_of(doc, &ops, &fonts);
+    // 200 pt wide, five cells of 40 pt.
+    let cells = lines.iter().map(|l| ((l.x / 40.0) as usize, l.glyphs.clone())).collect();
+    (cells, lines)
+}
+
+#[test]
+fn an_arabic_comb_value_draws_one_cluster_per_cell_right_to_left() {
+    let _face = Using::shaper(FAKE);
+    let mut doc = form("");
+    set(&mut doc, "comb", "مرحبا");
+    assert_eq!(field(&fields(&doc), "comb").value, ["مرحبا"], "the value is stored as typed");
+    assert_unmarked(&doc);
+    let (ops, fonts) = appearance_of(&doc, "comb");
+    assert!(!fonts_named(&fonts, "PCFmAr").is_empty(), "drawn from generated fonts");
+    let lines = lines_of(&doc, &ops, &fonts);
+    assert_eq!(lines.len(), 5, "{lines:?}");
+    // Left to right the cells hold the letters in drawing order: the first typed letter is in the
+    // rightmost cell.
+    assert_eq!(lines.iter().map(|l| l.glyphs.as_str()).collect::<Vec<_>>(), ["ا", "ب", "ح", "ر", "م"]);
+    for (i, l) in lines.iter().enumerate() {
+        // Centred in its 40 pt cell: a half-em cluster at 12 pt is 6 pt wide.
+        assert!((l.x - (i as f64 * 40.0 + 17.0)).abs() < 0.01, "cell {i}: {l:?}");
+        assert!(l.latin.is_empty(), "no `?` or other Latin text: {l:?}");
+    }
+    // One span for the whole value, in typing order.
+    let spans: Vec<&str> = lines.iter().filter_map(|l| l.span.as_deref()).collect();
+    assert_eq!(spans, ["مرحبا"]);
+    let content = String::from_utf8_lossy(&pdfcraft_content::serialize_ops(&ops)).into_owned();
+    assert_eq!(content.matches("BDC").count(), 1, "{content}");
+    assert_eq!(content.matches("EMC").count(), 2, "the span and the field's own marked content: {content}");
+    // Kept through a save and reopen.
+    let again = reopen(&doc);
+    let (ops, fonts) = appearance_of(&again, "comb");
+    assert_eq!(lines_of(&again, &ops, &fonts).len(), 5);
+    assert_unmarked(&again);
+}
+
+#[test]
+fn a_short_arabic_comb_value_fills_cells_from_the_right() {
+    let _face = Using::shaper(FAKE);
+    let mut doc = form("");
+    set(&mut doc, "comb", "مرح");
+    assert_unmarked(&doc);
+    let (cells, lines) = comb_cells_of(&doc, "comb");
+    assert_eq!(cells, [(2, "ح".to_string()), (3, "ر".to_string()), (4, "م".to_string())]);
+    assert_eq!(lines.iter().filter_map(|l| l.span.as_deref()).collect::<Vec<_>>(), ["مرح"]);
+    // More characters than cells: the first five are kept, as for Latin text.
+    force(&mut doc, "comb", "مرحباب");
+    let (cells, lines) = comb_cells_of(&doc, "comb");
+    assert_eq!(cells.len(), 5);
+    assert_eq!(cells.last(), Some(&(4, "م".to_string())));
+    assert_eq!(lines.iter().filter_map(|l| l.span.as_deref()).collect::<Vec<_>>(), ["مرحبا"]);
+    assert_unmarked(&doc);
+    // Digits and Latin letters in the value fill cells of their own, read left to right.
+    set(&mut doc, "comb", "مر12");
+    assert_unmarked(&doc);
+    let (_, lines) = comb_cells_of(&doc, "comb");
+    assert_eq!(lines.len(), 4);
+    assert_eq!(
+        lines.iter().map(|l| (l.glyphs.as_str(), l.latin.concat())).collect::<Vec<_>>(),
+        [("", "1".to_string()), ("", "2".to_string()), ("ر", String::new()), ("م", String::new())]
+    );
+    assert_eq!(lines.iter().filter_map(|l| l.span.as_deref()).collect::<Vec<_>>(), ["مر12"]);
+}
+
+#[test]
+fn a_latin_comb_value_is_drawn_as_before() {
+    let _face = Using::shaper(FAKE);
+    let mut doc = form("");
+    set(&mut doc, "comb", "ABCDE");
+    assert_unmarked(&doc);
+    let (ops, fonts) = appearance_of(&doc, "comb");
+    assert!(fonts_named(&fonts, "PCFmAr").is_empty(), "plain text adds no fonts");
+    let lines = lines_of(&doc, &ops, &fonts);
+    assert_eq!(lines.len(), 5);
+    for (i, (l, ch)) in lines.iter().zip("ABCDE".chars()).enumerate() {
+        assert_eq!((l.span.clone(), l.latin.clone()), (None, vec![ch.to_string()]));
+        let expected = i as f64 * 40.0 + (40.0 - helvetica_width(&ch.to_string(), 12.0)) / 2.0;
+        assert!((l.x - expected).abs() < 0.01, "cell {i}: {l:?}");
+    }
+    // Unwritten cells stay empty, and the text is left to right from the first cell.
+    set(&mut doc, "comb", "AB");
+    let (_, lines) = comb_cells_of(&doc, "comb");
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].x < 40.0 && lines[1].x < 80.0);
+}
+
+#[test]
+fn hostile_comb_values_never_panic() {
+    let _face = Using::shaper(FAKE);
+    let long: String = "مرحبا ".repeat(3400);
+    let many_shapes: String = "\u{0600}".repeat(5000);
+    let cases: Vec<(&str, String)> = vec![
+        ("lone marks", "\u{064E}\u{064E}\u{0651}".into()),
+        ("controls only", "\u{202E}\u{200F}\u{061C}\u{2067}".into()),
+        ("controls and letters", "\u{202E}ب\u{200F}\u{061C}ا\u{2067}".into()),
+        ("NUL and tab", "ب\0ا\tب".into()),
+        ("20,000 characters", long),
+        ("an outline that is too complex", "ب\u{06E5}ب".into()),
+        ("more than 4,096 shapes", many_shapes),
+        ("Arabic next to CJK", "ب日本".into()),
+        ("marks first", "\u{064E}ب".into()),
+    ];
+    for (what, text) in cases {
+        let mut doc = form("");
+        force(&mut doc, "comb", &text);
+        let again = reopen(&doc);
+        assert_eq!(fields(&again).len(), fields(&doc).len(), "{what}");
+        let (ops, fonts) = appearance_of(&doc, "comb");
+        let lines = lines_of(&doc, &ops, &fonts);
+        assert!(lines.len() <= 5, "{what}: {} cells", lines.len());
+    }
+    // What the face can't draw falls back to `?` in the cells and is reported, as before.
+    for text in ["ب\u{06E5}ب", "ب日本"] {
+        let mut doc = form("");
+        force(&mut doc, "comb", text);
+        assert_eq!(undrawn_fields(&doc).len(), 1, "{text}");
+        let (ops, fonts) = appearance_of(&doc, "comb");
+        assert!(fonts_named(&fonts, "PCFmAr").is_empty());
+        assert!(lines_of(&doc, &ops, &fonts).iter().all(|l| l.span.is_none()));
+    }
+}
+
+#[test]
+fn without_the_arabic_face_a_comb_value_is_kept_marked_and_drawn_with_question_marks() {
+    let _face = Using::shaper(NO_FACE);
+    let mut doc = form("");
+    set(&mut doc, "comb", "مرحبا");
+    assert_eq!(field(&fields(&doc), "comb").value, ["مرحبا"]);
+    assert_eq!(undrawn_fields(&doc), [("comb".to_string(), 'م')]);
+    let (_, lines) = comb_cells_of(&doc, "comb");
+    assert_eq!(lines.iter().map(|l| l.latin.concat()).collect::<Vec<_>>(), ["?"; 5]);
+}
+
+// ---- push-button captions ----
+
+fn button(doc: &mut Document, caption: &str) {
+    add_field(doc, 0, [50.0, 20.0, 200.0, 50.0], &NewField::Button { caption: caption.into() }, Some("btn")).unwrap();
+}
+
+#[test]
+fn an_arabic_button_caption_is_shaped_centred_and_unmarked() {
+    let _face = Using::shaper(FAKE);
+    let mut doc = form("");
+    button(&mut doc, "موافق");
+    assert_unmarked(&doc);
+    let (ops, fonts) = appearance_of(&doc, "btn");
+    assert!(!fonts_named(&fonts, "PCFmAr").is_empty(), "drawn from a generated font");
+    let lines = lines_of(&doc, &ops, &fonts);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].span.as_deref(), Some("موافق"), "the caption in typing order");
+    assert!(lines[0].latin.is_empty(), "no `?`: {:?}", lines[0]);
+    assert_eq!(lines[0].glyphs.chars().rev().collect::<String>(), "موافق");
+    // Centred in the 150 pt button.
+    assert!((lines[0].x + lines[0].width / 2.0 - 75.0).abs() < 0.01, "{:?}", lines[0]);
+    // Through a save, and when the caption is changed with the field's properties.
+    let mut doc = reopen(&doc);
+    assert_eq!(lines_of(&doc, &appearance_of(&doc, "btn").0, &appearance_of(&doc, "btn").1)[0].span.as_deref(), Some("موافق"));
+    set_props(&mut doc, "btn", &FieldProps { caption: Some((0, "إلغاء".into())), ..Default::default() }).unwrap();
+    let (ops, fonts) = appearance_of(&doc, "btn");
+    assert_eq!(lines_of(&doc, &ops, &fonts)[0].span.as_deref(), Some("إلغاء"));
+    assert_unmarked(&doc);
+    // A Latin caption is drawn as before, and a mixed one keeps its Latin letters in Helvetica.
+    set_props(&mut doc, "btn", &FieldProps { caption: Some((0, "OK".into())), ..Default::default() }).unwrap();
+    let (ops, fonts) = appearance_of(&doc, "btn");
+    let lines = lines_of(&doc, &ops, &fonts);
+    assert_eq!((lines[0].span.clone(), lines[0].latin.clone()), (None, vec!["OK".to_string()]));
+    assert!(fonts_named(&fonts, "PCFmAr").is_empty());
+    set_props(&mut doc, "btn", &FieldProps { caption: Some((0, "OK موافق".into())), ..Default::default() }).unwrap();
+    let (ops, fonts) = appearance_of(&doc, "btn");
+    let lines = lines_of(&doc, &ops, &fonts);
+    assert_eq!(lines[0].span.as_deref(), Some("OK موافق"));
+    assert!(lines[0].latin.iter().any(|s| s.contains("OK")));
+    assert_unmarked(&doc);
+}
+
+#[test]
+fn hostile_or_undrawable_button_captions_never_panic() {
+    let _face = Using::shaper(FAKE);
+    let long = "مرحبا ".repeat(3400);
+    for text in ["\u{064E}\u{064E}", "\u{202E}\u{200F}\u{061C}", "ب\0ا", "ب\u{06E5}ب", "ب日本", &long, ""] {
+        let mut doc = form("");
+        button(&mut doc, text);
+        let _ = reopen(&doc);
+    }
+    // The face can't draw it: `?` and the mark, as before.
+    let mut doc = form("");
+    button(&mut doc, "ب日本");
+    assert_eq!(undrawn_fields(&doc).len(), 1);
+    let (ops, fonts) = appearance_of(&doc, "btn");
+    assert!(lines_of(&doc, &ops, &fonts).iter().all(|l| l.span.is_none()));
+    let _no_face = Using::shaper(NO_FACE);
+    let mut doc = form("");
+    button(&mut doc, "موافق");
+    assert_eq!(undrawn_fields(&doc), [("btn".to_string(), 'م')]);
 }

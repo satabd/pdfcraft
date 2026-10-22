@@ -54,9 +54,13 @@ delete_field(&mut doc, "email")?;
   paragraph; auto font size measures the shaped width. Nothing is `?`, so the widget is not marked
   and `/NeedAppearances` is not set (`field_appearance_drawn` now takes `&mut Document` to add
   the fonts). Without the face, for text it can't draw (more than 4,096 distinct shapes,
-  Arabic next to characters the font can't show, Hebrew in the same value, over 200,000 bytes) and
-  in comb fields, the previous behaviour stays: `?`, the mark and `/NeedAppearances`. Button
-  captions still draw Arabic as `?`.
+  Arabic next to characters the font can't show, Hebrew in the same value, over 200,000 bytes) the
+  previous behaviour stays: `?`, the mark and `/NeedAppearances`. A comb field draws one shaped
+  cluster (a joined letter with its marks) per cell, centred like the Latin characters, with the
+  joined forms of the whole value; a right-to-left value fills the cells from the right (the first
+  typed letter in the rightmost cell), and the whole value is one `/ActualText` span. A push
+  button's Arabic caption is shaped and centred through the same planning (`shaped_caption`; its
+  fonts are added to the document, so `button_appearance` takes `&mut Document`).
 - Check boxes and radio buttons switch `/V` and each widget's `/AS`. Widgets with no appearances
   get PdfCraft's own (a drawn check mark or dot; no symbol font needed).
 - Values are validated (options, `MaxLen`, single vs multi-select, NoToggleToOff, read-only) and a

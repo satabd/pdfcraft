@@ -10,7 +10,8 @@
 //! Helvetica font with WinAnsi encoding; line breaking uses [`text_width`], Helvetica's advance
 //! widths (no font program is bundled). Arabic in a text box is drawn shaped instead, as filled
 //! paths from the craft-fonts Arabic face inside `/Span <</ActualText …>> BDC … EMC` (this builder
-//! has no document to add a font to), right-aligned when no `/Q` states an alignment.
+//! has no document to add a font to), right-aligned when no `/Q` states an alignment. A dynamic
+//! stamp's "By" line and a measurement's value label are drawn the same way when they have Arabic.
 
 use pdfcraft_cos::{Dict, Object, PdfString, Stream};
 use pdfcraft_fonts::{first_undrawable, literal, win_ansi};
@@ -326,13 +327,30 @@ pub fn undrawable_text(d: &Dict) -> Option<(&'static str, char)> {
             }
             ("the comment's text", contents)
         }
-        b"Line" | b"PolyLine" | b"Polygon" => ("the measurement label", text(b"PCMeasureValue")?),
-        b"Stamp" if matches!(d.get(b"PCStamp"), Some(Object::Bool(true))) => ("the stamp's \"By\" line", text(b"PCByLine")?),
+        b"Line" | b"PolyLine" | b"Polygon" => return label_undrawable("the measurement label", &text(b"PCMeasureValue")?),
+        b"Stamp" if matches!(d.get(b"PCStamp"), Some(Object::Bool(true))) => {
+            return label_undrawable("the stamp's \"By\" line", &text(b"PCByLine")?);
+        }
         // Drawn in Helvetica when the redaction is applied: refused when it is marked.
         b"Redact" => ("the redaction's overlay text", text(b"OverlayText")?),
         _ => return None,
     };
     Some((what, first_undrawable(&text)?))
+}
+
+/// [`undrawable_text`] for a one-line label: Arabic in it is drawn shaped (when the build has the
+/// Arabic face), so only what the Latin font next to it lacks is reported then.
+fn label_undrawable(what: &'static str, text: &str) -> Option<(&'static str, char)> {
+    if crate::shaped::drawable_line(text) {
+        return None;
+    }
+    let flat = crate::shaped::one_line(text);
+    if crate::shaped::wanted(&flat)
+        && let Some(c) = first_undrawable(&pdfcraft_fonts::shaped_text::latin_of(&flat))
+    {
+        return Some((what, c));
+    }
+    Some((what, first_undrawable(text)?))
 }
 
 /// Draw the normal appearance of an annotation, or `None` if this subtype/variant isn't supported.
@@ -834,13 +852,19 @@ pub fn build(d: &Dict) -> Option<Stream> {
         let value = value.to_text();
         if value.chars().count() <= 256 && matches!(subtype.as_slice(), b"Line" | b"PolyLine" | b"Polygon") {
             let size = 10.0;
-            let x = (rect[0] + rect[2] - text_width(&value, size)) * 0.5;
             let y = rect[3] - 12.0;
             let col = stroke.unwrap_or([0.0, 0.47, 0.84]);
-            out.extend(format!("{}BT /Helv {} Tf {} {} Td ", rg(col), n(size), n(x), n(y)).bytes());
-            // WinAnsi bytes (e.g. 0xB2 for "²") go into the stream as-is, not through UTF-8.
-            out.extend(literal(&win_ansi(&value)));
-            out.extend_from_slice(b" Tj ET\n");
+            // Arabic is drawn shaped, as paths with the label in `/ActualText` (see `shaped`).
+            if let Some(shaped) = crate::shaped::centred_line(&value, size, (rect[0] + rect[2]) * 0.5, y, None) {
+                out.extend(rg(col).bytes());
+                out.extend(shaped);
+            } else {
+                let x = (rect[0] + rect[2] - text_width(&value, size)) * 0.5;
+                out.extend(format!("{}BT /Helv {} Tf {} {} Td ", rg(col), n(size), n(x), n(y)).bytes());
+                // WinAnsi bytes (e.g. 0xB2 for "²") go into the stream as-is, not through UTF-8.
+                out.extend(literal(&win_ansi(&value)));
+                out.extend_from_slice(b" Tj ET\n");
+            }
             let mut font = Dict::new();
             font.set(b"Type".to_vec(), Object::name("Font"));
             font.set(b"Subtype".to_vec(), Object::name("Type1"));
@@ -949,20 +973,33 @@ fn stamp(kind: crate::StampKind, rect: [f64; 4], col: Rgb, by: Option<&str>, opa
     );
     out.extend(literal(&win_ansi(label)));
     out.extend_from_slice(b" Tj\n");
+    // The "By" line is centred under the label. Arabic in it is drawn shaped, as paths with the line
+    // in `/ActualText` (see `shaped`), outside the text object.
+    let mut in_text = true;
     if let Some(b) = by {
-        let mut s = by_h;
-        let bw = text_width(b, s);
-        if bw > text_area.1 - text_area.0 - 4.0 {
-            s *= (text_area.1 - text_area.0 - 4.0) / bw;
+        let avail = text_area.1 - text_area.0 - 4.0;
+        let centre = (text_area.0 + text_area.1) / 2.0;
+        if let Some(shaped) = crate::shaped::centred_line(b, by_h, centre, y0 + h * 0.18, Some(avail)) {
+            out.extend_from_slice(b"ET\n");
+            in_text = false;
+            out.extend(shaped);
+        } else {
+            let mut s = by_h;
+            let bw = text_width(b, s);
+            if bw > avail {
+                s *= avail / bw;
+            }
+            let bw = text_width(b, s);
+            out.extend(
+                format!("/Helv {} Tf\n1 0 0 1 {} {} Tm ", n(s), n(text_area.0 + (text_area.1 - text_area.0 - bw) / 2.0), n(y0 + h * 0.18)).bytes(),
+            );
+            out.extend(literal(&win_ansi(b)));
+            out.extend_from_slice(b" Tj\n");
         }
-        let bw = text_width(b, s);
-        out.extend(
-            format!("/Helv {} Tf\n1 0 0 1 {} {} Tm ", n(s), n(text_area.0 + (text_area.1 - text_area.0 - bw) / 2.0), n(y0 + h * 0.18)).bytes(),
-        );
-        out.extend(literal(&win_ansi(b)));
-        out.extend_from_slice(b" Tj\n");
     }
-    out.extend_from_slice(b"ET\n");
+    if in_text {
+        out.extend_from_slice(b"ET\n");
+    }
     let font = |base: &str| {
         let mut f = Dict::new();
         f.set(b"Type".to_vec(), Object::name("Font"));
