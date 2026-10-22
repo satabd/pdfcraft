@@ -2388,8 +2388,8 @@ milestone = "M7"
 status = "shipped"
 commands = ["edit.header_footer"]
 tools = ["doc_header_footer"]
-evidence = ["crates/ui-egui/tests/ui_group/marks.rs::header_and_footer_dialog_inserts_tokens_and_applies_to_a_subset", "crates/edit/src/tests.rs::header_and_footer_are_drawn_in_display_space_and_wrap_the_original_content", "crates/engine/src/tests.rs::headers_footers_watermarks_and_backgrounds_show_update_and_remove"]
-notes = "Helvetica only (no font choice yet); drawn in display space on rotated pages; artifact-tagged"
+evidence = ["crates/ui-egui/tests/ui_group/marks.rs::header_and_footer_dialog_inserts_tokens_and_applies_to_a_subset", "crates/edit/src/tests.rs::header_and_footer_are_drawn_in_display_space_and_wrap_the_original_content", "crates/engine/src/tests.rs::headers_footers_watermarks_and_backgrounds_show_update_and_remove", "crates/edit/src/stamped_shaped_tests.rs::arabic_in_the_right_slot_is_a_shaped_span_that_ends_at_the_margin", "crates/edit/src/stamped_shaped_tests.rs::left_and_centre_slots_and_lines_without_arabic_keep_their_places", "crates/edit/src/stamped_shaped_tests.rs::shaping_failures_and_hostile_text_leave_the_document_as_it_was", "crates/automation/tests/automation.rs::arabic_header_bates_and_watermark_are_shaped_through_tools_save_and_reopen"]
+notes = "Helvetica only (no font choice yet); drawn in display space on rotated pages; artifact-tagged. Arabic lines (also after token expansion) are shaped with the craft-fonts Arab face: UAX #9 order, joined forms, Type 3 fonts built from the face's outlines (one set for the whole run, in each page's /Font), one /ActualText span per line so copy and search read it as typed, measured as drawn for the left, centre and right slots and underlines; Latin, digits and tokens stay in Helvetica in the same span. Without the face (or for a letter it lacks, or Arabic mixed with Hebrew or other scripts) the text is refused as before and the document is unchanged. Not yet: Hebrew and Thai in marks, a chosen font; the dialog's preview is still drawn in the interface font, not the shaped layout"
 
 [[feature]]
 id = "edit.header-footer-update-remove"
@@ -2448,8 +2448,8 @@ milestone = "M7"
 status = "shipped"
 commands = ["edit.watermark"]
 tools = ["doc_watermark"]
-evidence = ["crates/edit/src/tests.rs::watermarks_rotate_fade_and_can_go_behind", "crates/ui-egui/tests/ui_group/marks.rs::watermark_and_background_dialogs", "crates/automation/tests/automation.rs::headers_watermarks_and_backgrounds_through_tools"]
-notes = "Helvetica; fit-to-page or a size"
+evidence = ["crates/edit/src/tests.rs::watermarks_rotate_fade_and_can_go_behind", "crates/ui-egui/tests/ui_group/marks.rs::watermark_and_background_dialogs", "crates/automation/tests/automation.rs::headers_watermarks_and_backgrounds_through_tools", "crates/edit/src/stamped_shaped_tests.rs::an_arabic_watermark_is_shaped_inside_its_rotation", "crates/automation/tests/automation.rs::arabic_header_bates_and_watermark_are_shaped_through_tools_save_and_reopen"]
+notes = "Helvetica; fit-to-page or a size. Arabic text is shaped with the craft-fonts Arab face (as for headers), centred and sized by its shaped width inside the rotation, one /ActualText span per line; refused without the face"
 
 [[feature]]
 id = "edit.watermark-add-file"
@@ -2532,8 +2532,8 @@ milestone = "M7"
 status = "partial"
 commands = ["edit.bates", "edit.header_footer"]
 tools = ["doc_header_footer"]
-evidence = ["crates/edit/src/tests.rs::tokens_expand"]
-notes = "Bates ▸ Add opens Header & Footer with a Bates number; no multi-file batch yet"
+evidence = ["crates/edit/src/tests.rs::tokens_expand", "crates/edit/src/stamped_shaped_tests.rs::a_bates_number_with_an_arabic_prefix_is_shaped_on_every_page_with_shared_fonts", "crates/automation/tests/automation.rs::arabic_header_bates_and_watermark_are_shaped_through_tools_save_and_reopen"]
+notes = "Bates ▸ Add opens Header & Footer with a Bates number; no multi-file batch yet. An Arabic prefix or suffix is shaped like any Arabic header text (needs the craft-fonts Arab face; refused without it)"
 
 [[feature]]
 id = "edit.bates-multi-file"
@@ -6820,8 +6820,8 @@ milestone = "M10"
 status = "shipped"
 commands = ["create.file"]
 tools = ["doc_create"]
-evidence = ["crates/create/src/tests.rs::text_is_wrapped_and_paginated", "crates/automation/tests/automation.rs::creating_and_reducing_through_tools"]
-notes = "Helvetica 11 pt on US Letter; form feeds start pages"
+evidence = ["crates/create/src/tests.rs::text_is_wrapped_and_paginated", "crates/automation/tests/automation.rs::creating_and_reducing_through_tools", "crates/create/src/text_shaped_tests.rs::an_arabic_paragraph_is_wrapped_on_shaped_widths_right_aligned_and_reads_back", "crates/create/src/text_shaped_tests.rs::generated_reports_keep_arabic_readable_and_escape_the_rest", "crates/automation/tests/automation.rs::arabic_create_from_text_and_comment_summaries_are_shaped_not_escaped"]
+notes = "Helvetica 11 pt on US Letter; form feeds start pages. Arabic is shaped with the craft-fonts Arab face: the paragraph direction comes from its first strong character, right-to-left paragraphs are right-aligned to the text width, lines wrap on shaped widths, one /ActualText span per line; generated reports (comment summaries, compare) keep Arabic shaped instead of writing [U+XXXX] (other characters are still escaped). Without the face Arabic is refused (or escaped in reports). Not yet: Hebrew and Thai, justification, a chosen font"
 
 [[feature]]
 id = "create.from-markdown"

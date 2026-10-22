@@ -6,7 +6,7 @@ use super::*;
 
 /// Three pages: an upright page with content that leaves the graphics state changed (an
 /// unbalanced `cm`), a page rotated 90° and one with inherited, shared resources.
-fn fixture() -> Document {
+pub(crate) fn fixture() -> Document {
     let objs: Vec<String> = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".into(),
         "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 600 800] /Resources 6 0 R >>".into(),
@@ -39,7 +39,7 @@ pub(crate) fn reopen(doc: &Document) -> Document {
 }
 
 /// The decoded content streams of a page, in order.
-fn streams(doc: &Document, page: usize) -> Vec<String> {
+pub(crate) fn streams(doc: &Document, page: usize) -> Vec<String> {
     let p = &pdfcraft_model::pages(doc)[page];
     let c = p.dict.get(b"Contents").cloned();
     let list = match c.map(|c| doc.resolve(&c)).as_deref() {
@@ -50,7 +50,7 @@ fn streams(doc: &Document, page: usize) -> Vec<String> {
     list.iter().map(|o| String::from_utf8_lossy(&stream_bytes(doc, o).unwrap()).into_owned()).collect()
 }
 
-fn cx() -> Context {
+pub(crate) fn cx() -> Context {
     Context { date: (2026, 10, 1) }
 }
 
