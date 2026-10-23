@@ -94,10 +94,10 @@ Arabic face's `wght` 700 instance (harfrust shapes at that location, skrifa give
 outlines there) from Type 3 fonts of its own (`PCEdAr…B`, a `FontName` ending `-Bold` and a
 `FontWeight` of 700, so a later edit reads the run as bold again); the `/ActualText` and the
 ToUnicode maps are what a regular run's would be. A build whose Arabic face has no `wght` axis draws
-bold Arabic regular, as before. Still different: the Edit text box shows bold Arabic in the
-interface's semibold family, whose Arabic letters come from the same face at its default (regular)
-instance, so on the page a bold Arabic word is about an eighth wider than in the box; italic Arabic
-is drawn upright; a line written in several looks reads back as one run (its `/ActualText` span)
+bold Arabic regular, as before. The Edit text box draws bold Arabic at the same instance (its bold
+font is the interface's semibold faces with the Arabic face at `wght` 700, `theme::EDITOR_BOLD`),
+so a bold Arabic word is as wide in the box as on the page. Still different: italic Arabic is
+drawn upright; a line written in several looks reads back as one run (its `/ActualText` span)
 in the look of its leftmost run, so editing it again starts from one look; the rows keep the
 paragraph's first line spacing; past 256 looks in one paragraph the rest take the first.
 

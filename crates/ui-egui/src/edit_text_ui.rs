@@ -383,10 +383,13 @@ fn look_of(b: &pdfcraft_engine::TextBlock) -> pdfcraft_engine::AddedText {
     source_look(&b.base_font, b.size, b.color, b.bold, b.italic)
 }
 
+/// The interface font the Edit text and Add text boxes draw `look` in at `size`. Bold is the interface's semibold
+/// with the Arabic face at the bold instance the page draws bold Arabic at ([`crate::theme::EDITOR_BOLD`]), so a
+/// bold Arabic word is as wide in the box as on the page.
 pub(crate) fn editor_font(look: &pdfcraft_engine::AddedText, size: f32) -> FontId {
     let family = match (look.family, look.bold) {
         (pdfcraft_engine::FontFamily::Courier, _) => FontFamily::Monospace,
-        (_, true) => FontFamily::Name("semibold".into()),
+        (_, true) => FontFamily::Name(crate::theme::EDITOR_BOLD.into()),
         (_, false) => FontFamily::Proportional,
     };
     FontId::new(size, family)
@@ -2296,6 +2299,59 @@ mod tests {
         assert_eq!(drawn(&out.galley).len(), hebrew.chars().count());
         let placed = &out.galley.rows[0];
         assert!((placed.pos.x + placed.row.size.x - rig.width).abs() <= 1.0);
+    }
+
+    /// "bil-alam" (in the world): 2.454 em at the Arabic face's regular instance, 2.760 em at its bold one.
+    const BIL_ALAM: &str = "\u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645}";
+
+    /// The editor of [`styled_editor`] holding `draft` in a bold look (`bold`) or the page's regular one, in a field wide enough for one row.
+    fn bold_rig(draft: &str, bold: bool) -> Option<(Rig, egui::text_edit::TextEditOutput, std::sync::Arc<ScreenMap>)> {
+        let (_app, mut ed) = styled_editor(draft, false);
+        ed.look.bold = bold;
+        let mut rig = Rig::arabic(ed)?;
+        rig.width = 2000.0;
+        let (out, map) = rig.frame(vec![]);
+        Some((rig, out, map))
+    }
+
+    /// A bold Arabic word is drawn in the box at the face's bold instance, as wide as the page draws it (and wider than the
+    /// regular word), while bold Latin is the interface's semibold as before; every drawn character still has a glyph.
+    #[test]
+    fn bold_arabic_in_the_box_is_as_wide_as_the_page_draws_it() {
+        if !pdfcraft_fonts::arabic_bold_available() {
+            eprintln!("skipping: this build's Arabic face has no bold instance (build with CRAFT_FONTS_DIR)");
+            return;
+        }
+        let page_width = |weight: pdfcraft_fonts::Weight| -> f32 {
+            let clusters = pdfcraft_fonts::shape_arabic_at(BIL_ALAM, true, weight).expect("the face shapes the word");
+            // The styled paragraph is 12 pt, drawn at SCALE screen points to the point.
+            (clusters.iter().map(|c| c.advance).sum::<f64>() * 12.0) as f32 * SCALE
+        };
+        let width = |bold: bool| -> f32 {
+            let (_, out, _) = bold_rig(BIL_ALAM, bold).expect("the Arabic face");
+            assert_eq!(out.galley.rows.len(), 1);
+            out.galley.rows[0].row.size.x
+        };
+        let (regular, bold) = (width(false), width(true));
+        let (page_regular, page_bold) = (page_width(pdfcraft_fonts::Weight::Regular), page_width(pdfcraft_fonts::Weight::Bold));
+        assert!(page_bold > page_regular * 1.05, "the page's bold word is wider: {page_bold} against {page_regular}");
+        assert!((regular - page_regular).abs() <= page_regular * 0.02, "regular: the box draws {regular}, the page {page_regular}");
+        assert!(bold > regular * 1.05, "the bold word is wider in the box than the regular one: {bold} against {regular}");
+        assert!((bold - page_bold).abs() <= page_bold * 0.02, "bold: the box draws {bold}, the page {page_bold}");
+
+        // Bold Latin is the interface's semibold, glyph for glyph.
+        let (rig, _, _) = bold_rig(BIL_ALAM, true).expect("the Arabic face");
+        let latin = |font: FontId| rig.ctx.fonts_mut(|f| f.layout_no_wrap("Hello wide world friends".into(), font, Color32::BLACK).size().x);
+        let look = pdfcraft_engine::AddedText { bold: true, ..Default::default() };
+        assert_eq!(latin(editor_font(&look, 36.0)), latin(crate::theme::semibold(36.0)), "bold Latin is unchanged");
+        // The Add text box draws a bold item in the same font (`content_ui::editor`), so its Arabic is the page's width too.
+        let added = rig.ctx.fonts_mut(|f| f.layout_no_wrap(BIL_ALAM.into(), editor_font(&look, 36.0), Color32::BLACK).size().x);
+        assert!((added - page_bold).abs() <= page_bold * 0.02, "Add text: the box draws {added}, the page {page_bold}");
+
+        // At the bold instance (lam-alef ligatures, dotted letters) the box still has a glyph for every character it draws.
+        let phrase = format!("{SALAM} {BIL_ALAM} \u{627}\u{644}\u{633}\u{644}\u{627}\u{645} {ALAYKUM}");
+        let (_, out, map) = bold_rig(&phrase, true).expect("the Arabic face");
+        assert_eq!(drawn(&out.galley), map.drawn.iter().copied().filter(|c| *c != '\n').collect::<Vec<_>>(), "a glyph for every drawn character");
     }
 
     #[test]

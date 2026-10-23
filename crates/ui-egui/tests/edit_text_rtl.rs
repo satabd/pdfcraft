@@ -261,6 +261,58 @@ fn the_edit_text_box_breaks_arabic_lines_where_apply_writes_them() {
     }
 }
 
+/// What the editor and the page make of a paragraph of Arabic written `bold` or not, with a word typed at its end: the width of
+/// the editor's row, of the row the engine lays the draft out as (`text_edit_layout`), and of the page's row after Apply, in
+/// screen points at 150%.
+fn typed_row_widths(bold: bool) -> (f32, f32, f32) {
+    let mut h = harness("150");
+    let style = BlockStyle { bold: Some(bold), ..Default::default() };
+    assert!(h.state_mut().apply_edit(Edit::EditTextBlock { page: 0, block: 0, text: SALAM_ALAYKUM.into(), style }));
+    h.run_steps(3);
+    assert_eq!(block(&h).bold, bold, "the page reads the paragraph back as bold: {bold}");
+    open_editor(&mut h);
+    assert_eq!(h.state().views[0].line_editor.as_ref().expect("the editor is open").look.bold, bold, "the editor's look");
+    let marhaba = "\u{645}\u{631}\u{62D}\u{628}\u{627}";
+    h.event(egui::Event::Text(format!(" {marhaba}")));
+    h.run_steps(4);
+    let (_, galley) = editor_galley(&h, &format!("{marhaba} {SALAM_ALAYKUM_DISPLAYED}"));
+    assert_eq!(galley.rows.len(), 1, "one row");
+    let shown = galley.rows[0].row.size.x;
+    let px_per_pt = h.state().views[0].page_screen_rect(0).expect("on screen").width() / 200.0;
+    let measured = {
+        let state = h.state();
+        let ed = state.views[0].line_editor.as_ref().expect("the editor is open");
+        let layout = state.session.get(state.views[0].id).unwrap().text_edit_layout(0, 0, &ed.text, &ed.style()).expect("the draft is measured");
+        assert_eq!(layout.rows.len(), 1, "the engine lays the draft out in one row: {:?}", layout.rows);
+        let r = layout.row_rects[0];
+        (r[2] - r[0]) as f32 * px_per_pt
+    };
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+    h.run_steps(4);
+    assert!(h.state().views[0].line_editor.is_none(), "applied");
+    let page = page_ink(&h);
+    assert_eq!(page.len(), 1, "one row on the page");
+    (shown, measured, page[0].1 - page[0].0)
+}
+
+/// A paragraph whose Arabic the page draws bold opens in the editor at the Arabic face's bold instance: its row is wider than the
+/// same words regular, and as wide as the row the engine lays out and Apply writes (the box drew bold Arabic at the face's
+/// regular instance before, an eighth narrower than the page).
+#[test]
+fn bold_arabic_is_as_wide_in_the_edit_text_box_as_on_the_page() {
+    if !pdfcraft_fonts::arabic_bold_available() {
+        return;
+    }
+    let (regular, regular_measured, regular_page) = typed_row_widths(false);
+    let (bold, measured, page) = typed_row_widths(true);
+    assert!(page > regular_page * 1.05, "the page's bold row is wider: {page} against {regular_page}");
+    assert!(bold > regular * 1.05, "the editor's bold row is wider than its regular one: {bold} against {regular}");
+    for (weight, shown, measured, page) in [("regular", regular, regular_measured, regular_page), ("bold", bold, measured, page)] {
+        assert!((shown - measured).abs() <= measured * 0.02, "{weight}: the editor's row is {shown} wide, the engine's {measured}");
+        assert!((shown - page).abs() <= page * 0.02, "{weight}: the editor's row is {shown} wide, the page's after Apply {page}");
+    }
+}
+
 /// Latin typed into a block that holds Arabic reads in its own direction inside the right-to-left row, and
 /// Escape leaves the page as it was.
 #[test]
