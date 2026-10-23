@@ -5,6 +5,9 @@
 //! look of its neighbour ([`TextBlock::edited_spans`], the rule the styled rewrite and the editor follow too). A look
 //! never changes inside a stretch of right-to-left script, which is shaped as a whole: the stretch takes the look of
 //! its first letter, as the editor draws it (`shaper_styles` in `pdfcraft-ui-egui`'s `edit_text_ui`).
+//!
+//! A look is bold when its run's font is ([`settled_bold`]: the rule that picks the standard font of its family and
+//! weight for its Latin text), and its Arabic is then drawn at the Arabic face's bold instance ([`LatinLook::weight`]).
 
 use super::*;
 
@@ -125,6 +128,19 @@ pub(super) fn looked_text(block: &TextBlock, lines: &[TextLine], draft: &str, st
     Some(LookedText { text, looks, sources: looks_of_sources })
 }
 
+/// Whether text drawn like a run whose font is bold (`bold`: its name or descriptor says so, see
+/// `pdfcraft_fonts::pdf::Metrics::bold`) is bold as `style` leaves it: a weight asked for wins, then a family asked for
+/// with its weight. The one rule for both halves of a shaped paragraph: it picks the standard font of the family and
+/// weight the Latin text is shown in, and whether the Arabic is drawn at the face's bold instance.
+pub(super) fn settled_bold(bold: bool, style: &BlockStyle) -> bool {
+    style.bold.unwrap_or_else(|| style.family.map_or(bold, |(_, bold, _)| bold))
+}
+
+/// The weight Arabic is drawn at in text that is `bold` or not.
+pub(super) fn weight(bold: bool) -> pdfcraft_fonts::Weight {
+    if bold { pdfcraft_fonts::Weight::Bold } else { pdfcraft_fonts::Weight::Regular }
+}
+
 /// How a look shows the Latin text among its Arabic: in its run's own font where that font has the characters, in the
 /// standard font of its family and weight otherwise.
 pub(super) struct LatinLook {
@@ -136,6 +152,8 @@ pub(super) struct LatinLook {
     pub face: pdfcraft_fonts::Std14,
     /// The look's size in text space.
     pub size: f64,
+    /// The weight its Arabic is drawn at (bold when [`settled_bold`] says so).
+    pub weight: pdfcraft_fonts::Weight,
 }
 
 impl LatinLook {
@@ -171,8 +189,8 @@ impl LatinLook {
         style: &BlockStyle,
         size: f64,
     ) -> Result<(String, Self), EditError> {
-        let (family, bold, italic) = style.family.unwrap_or((source_family(&line.base_font), line.bold, line.italic));
-        let bold = style.bold.unwrap_or(bold);
+        let (family, _, italic) = style.family.unwrap_or((source_family(&line.base_font), line.bold, line.italic));
+        let bold = settled_bold(line.bold, style);
         let face = family.std14(bold, italic);
         let metrics =
             fonts_res.get(line.font.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).map(|d| Metrics::from_dict(doc, &d)).filter(|m| {
@@ -180,7 +198,7 @@ impl LatinLook {
             });
         if let Some(m) = metrics {
             let space = source_space(doc, fonts_res, &m);
-            return Ok((line.font.clone(), LatinLook { metrics: Some(m), space, face, size }));
+            return Ok((line.font.clone(), LatinLook { metrics: Some(m), space, face, size, weight: weight(bold) }));
         }
         if needs_type3(latin) {
             return Err(text_shaped::unsupported_with_arabic(latin));
@@ -193,7 +211,7 @@ impl LatinLook {
         f.set(b"BaseFont".to_vec(), Object::name(base));
         f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
         fonts_res.set(font.clone().into_bytes(), Object::Dict(f));
-        Ok((font, LatinLook { metrics: None, space: 0.33, face, size }))
+        Ok((font, LatinLook { metrics: None, space: 0.33, face, size, weight: weight(bold) }))
     }
 }
 

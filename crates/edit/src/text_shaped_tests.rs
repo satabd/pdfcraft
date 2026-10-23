@@ -29,8 +29,12 @@ fn joins_next_letter(c: char) -> bool {
     is_dual(c) || is_right_joiner(c)
 }
 
+/// The stand-in's bold is a fifth wider than its regular, so a bold word measures wider (as the real face's does).
+const FAKE_BOLD_WIDER: f64 = 1.2;
+
 fn fake_shape(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
-    assert_eq!(script, ShapedScript::Arabic, "only Arabic runs are shaped here");
+    assert!(script.is_arabic(), "only Arabic runs are shaped here");
+    let wider = if script == ShapedScript::ArabicBold { FAKE_BOLD_WIDER } else { 1.0 };
     if text.contains('\u{FDFD}') {
         return Err(GlyphError::Missing);
     }
@@ -46,7 +50,7 @@ fn fake_shape(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedC
             let joined = before.is_some_and(is_dual);
             let id = 0xFEFB + u32::from(joined) * 0x0100_0000;
             let text: String = chars[i..next].iter().collect();
-            out.push(ShapedCluster { script, glyphs: vec![(id, [0.0, 0.0])], advance: 0.6, text });
+            out.push(ShapedCluster { script, glyphs: vec![(id, [0.0, 0.0])], advance: 0.6 * wider, text });
             i = next;
             continue;
         }
@@ -61,7 +65,7 @@ fn fake_shape(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedC
         } else {
             0.4
         };
-        out.push(ShapedCluster { script, glyphs: vec![(u32::from(c) | form << 24, [0.0, 0.0])], advance, text: c.to_string() });
+        out.push(ShapedCluster { script, glyphs: vec![(u32::from(c) | form << 24, [0.0, 0.0])], advance: advance * wider, text: c.to_string() });
         i = next;
     }
     if rtl {
@@ -71,15 +75,15 @@ fn fake_shape(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedC
 }
 
 fn fake_has(script: ShapedScript, c: char) -> bool {
-    script == ShapedScript::Arabic && (c == ' ' || c.is_ascii_punctuation() || crate::added::is_arabic(c))
+    script.is_arabic() && (c == ' ' || c.is_ascii_punctuation() || crate::added::is_arabic(c))
 }
 
-fn fake_outline(_: ShapedScript, id: u32) -> Result<GlyphOutline, GlyphError> {
+fn fake_outline(script: ShapedScript, id: u32) -> Result<GlyphOutline, GlyphError> {
     // One letter whose outline is too complex.
     if id & 0x00FF_FFFF == 0x06E5 {
         return Err(GlyphError::TooComplex);
     }
-    let advance = 0.5;
+    let advance = if script == ShapedScript::ArabicBold { 0.5 * FAKE_BOLD_WIDER } else { 0.5 };
     Ok(GlyphOutline { contours: vec![vec![[0.0, 0.0], [advance, 0.0], [advance, 0.5], [0.0, 0.5]]], width: advance, bbox: [0.0, 0.0, advance, 0.5] })
 }
 

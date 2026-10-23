@@ -64,6 +64,16 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
   harfrust (joining forms, ligatures, mark positions) into clusters for Arabic text written into
   PDFs; the editor draws each cluster as one Type 3 glyph with a ToUnicode entry and per-line ActualText for logical copy/search order. Without the face
   they return `GlyphError::NoFont` and the editor reports a clear error.
+- `Weight` / `shape_arabic_at` / `ShapedScript::ArabicBold` / `arabic_bold_available`: bold
+  Arabic. The face is variable (`wght` 100–900 in craft-fonts' Noto Sans Arabic); bold text is
+  shaped by harfrust at its `wght` 700 instance (`ShaperInstance::from_variations`) and its
+  advances and outlines are read by skrifa at the same location, so `ArabicBold` clusters and
+  glyphs are a face of their own for every cache. A face without a `wght` axis (or one that goes
+  no heavier than its default) has no bold instance: bold is then shaped and drawn regular, its
+  clusters `Arabic`'s. In `shaped_text`, each look has a `Weight` (`shaped_pieces_weighted`,
+  `Measure::weighted`, the `weights` of `plan_looked`); a bold look's clusters go in Type 3 fonts
+  of their own (resource name `<prefix><object number>B`, `FontName` ending `-Bold`, `FontWeight`
+  700). No weight, or all regular, plans byte for byte as before; every other writer passes none.
 - `document_japanese_fonts_for_style`: every `Jpan` face in that order of preference, so the
   editor can use the first one that has all of the replacement's glyphs (the faces differ in
   coverage, e.g. of Cyrillic).

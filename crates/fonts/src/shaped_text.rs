@@ -15,7 +15,10 @@
 //!   the line in typing order;
 //! - [`Measure`]: the width of a line as it will be drawn, for wrapping and alignment;
 //! - lines drawn in several looks (sizes, fill colours, Latin fonts): [`shaped_pieces_looked`], [`Measure::with_looks`],
-//!   [`plan_looked`] and [`ShapedPlan::looked_line_ops`], each piece and run in one look, the text state kept in a [`Pen`].
+//!   [`plan_looked`] and [`ShapedPlan::looked_line_ops`], each piece and run in one look, the text state kept in a [`Pen`];
+//! - bold Arabic: each look has a [`Weight`] ([`shaped_pieces_weighted`], [`Measure::weighted`], [`plan_looked`]), and
+//!   a bold look's Arabic is shaped, measured and drawn at the Arabic face's bold instance (its `wght` axis at 700:
+//!   [`ShapedScript::ArabicBold`]), in Type 3 fonts of its own. A face without a `wght` axis draws it regular.
 //!
 //! Operators are returned as [`TextOp`] (an operator and its operands) because this crate sits
 //! below the content-stream crate; callers turn them into their own operator type.
@@ -26,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use unicode_bidi::{Level, ParagraphBidiInfo};
 
-use crate::{GlyphError, GlyphOutline, ShapedCluster, ShapedScript, shape_arabic, shape_hebrew, shape_thai, shaped_glyph};
+use crate::{GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Weight, shape_arabic_at, shape_hebrew, shape_thai, shaped_glyph};
 
 /// Most glyphs in one Type 3 font: its codes are single bytes, 1–240. A text gets one such font
 /// per 240 distinct glyphs it needs.
@@ -149,7 +152,8 @@ pub enum Piece {
 /// that needs no face. Plain function pointers, so a swap is one value and costs nothing.
 #[derive(Clone, Copy)]
 pub struct Shaper {
-    /// One directional run of a script, clusters in drawing order.
+    /// One directional run of a script, clusters in drawing order. [`ShapedScript::ArabicBold`] asks for bold Arabic,
+    /// whose clusters say which instance drew them (the faces give [`ShapedScript::Arabic`] ones when there is no bold).
     pub shape: fn(ShapedScript, &str, bool) -> Result<Vec<ShapedCluster>, GlyphError>,
     /// Whether the script's face has a glyph for the character.
     pub has: fn(ShapedScript, char) -> bool,
@@ -161,7 +165,7 @@ pub struct Shaper {
 
 fn face_shape(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
     match script {
-        ShapedScript::Arabic => shape_arabic(text, rtl),
+        ShapedScript::Arabic | ShapedScript::ArabicBold => shape_arabic_at(text, rtl, script.weight()),
         ShapedScript::Hebrew => shape_hebrew(text, rtl),
         ShapedScript::Thai => shape_thai(text),
     }
@@ -169,7 +173,7 @@ fn face_shape(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedC
 
 fn face_has(script: ShapedScript, c: char) -> bool {
     match script {
-        ShapedScript::Arabic => crate::arabic_has(c),
+        ShapedScript::Arabic | ShapedScript::ArabicBold => crate::arabic_has(c),
         ShapedScript::Hebrew => crate::hebrew_has(c),
         ShapedScript::Thai => crate::thai_has(c),
     }
@@ -242,7 +246,7 @@ fn thai_error(e: GlyphError, text: &str) -> ShapedTextError {
 /// Why the face of `script` can't show `text`.
 pub fn script_error(script: ShapedScript, e: GlyphError, text: &str) -> ShapedTextError {
     match script {
-        ShapedScript::Arabic => arabic_error(e, text),
+        ShapedScript::Arabic | ShapedScript::ArabicBold => arabic_error(e, text),
         ShapedScript::Hebrew => hebrew_error(e, text),
         ShapedScript::Thai => thai_error(e, text),
     }
@@ -262,6 +266,24 @@ pub fn shaped_pieces(line: &str, rtl: bool, shaper: &Shaper) -> Result<Vec<Piece
 /// piece is drawn in one look, given with it. A look that changes inside a word of a script that joins cuts the
 /// word in two shaped runs; a caller keeps the looks of such a word one (Edit text does).
 pub fn shaped_pieces_looked(line: &str, looks: &[usize], rtl: bool, shaper: &Shaper) -> Result<Vec<(usize, Piece)>, ShapedTextError> {
+    shaped_pieces_weighted(line, looks, &[], rtl, shaper)
+}
+
+/// The weight of look `look` among `weights` (a look past the end has the first's, and no weight at all is regular).
+fn weight_of(weights: &[Weight], look: usize) -> Weight {
+    weights.get(look).or_else(|| weights.first()).copied().unwrap_or_default()
+}
+
+/// [`shaped_pieces_looked`] with each look at a weight: the Arabic of look `i` is shaped at `weights[i]` (a look past
+/// the end at the first's; none at all, regular), so a bold look's clusters are [`ShapedScript::ArabicBold`]'s when the
+/// face has a bold instance. Hebrew and Thai have one weight.
+pub fn shaped_pieces_weighted(
+    line: &str,
+    looks: &[usize],
+    weights: &[Weight],
+    rtl: bool,
+    shaper: &Shaper,
+) -> Result<Vec<(usize, Piece)>, ShapedTextError> {
     // unicode-bidi indexes the first level of a line, so an empty one would panic.
     if line.is_empty() {
         return Ok(Vec::new());
@@ -313,6 +335,7 @@ pub fn shaped_pieces_looked(line: &str, looks: &[usize], rtl: bool, shaper: &Sha
             pieces.push((
                 look,
                 if let Some(script) = script {
+                    let script = script.weighted(weight_of(weights, look));
                     let shaped = (shaper.shape)(script, &s, run_rtl).map_err(|e| script_error(script, e, &s))?;
                     Piece::Shaped(shaped)
                 } else if run_rtl {
@@ -368,6 +391,8 @@ pub struct Measure<'a> {
     rtl: bool,
     /// Each look's size, and the width of Latin text in the font that draws it (at that size).
     looks: Vec<(f64, LatinWidth<'a>)>,
+    /// Each look's weight (see [`shaped_pieces_weighted`]; none: regular).
+    weights: Vec<Weight>,
     /// Widths by line and its looks.
     cache: RefCell<HashMap<MeasureKey, f64>>,
 }
@@ -383,7 +408,17 @@ impl<'a> Measure<'a> {
     /// measured by `looks[i].1` (at that size). A look past the end is measured as look 0, and with no look at all a
     /// line measures nothing.
     pub fn with_looks(rtl: bool, looks: Vec<(f64, LatinWidth<'a>)>) -> Self {
-        Measure { shaper: current_shaper(), rtl, looks, cache: RefCell::new(HashMap::new()) }
+        Measure { shaper: current_shaper(), rtl, looks, weights: Vec::new(), cache: RefCell::new(HashMap::new()) }
+    }
+
+    /// These measures with look `i`'s Arabic at `weights[i]` (a look past the end at the first's; see
+    /// [`shaped_pieces_weighted`]): a bold look is measured at the bold advances. Regular without it.
+    pub fn weighted(mut self, weights: Vec<Weight>) -> Self {
+        self.weights = weights;
+        if let Ok(mut cache) = self.cache.try_borrow_mut() {
+            cache.clear();
+        }
+        self
     }
 
     fn look(&self, look: usize) -> Option<&(f64, LatinWidth<'a>)> {
@@ -414,7 +449,7 @@ impl<'a> Measure<'a> {
             return *w;
         }
         let latin = |look: usize, s: &str| self.look(look).map_or(0.0, |(_, latin)| latin(s));
-        let w = match shaped_pieces_looked(line, looks, self.rtl, &self.shaper) {
+        let w = match shaped_pieces_weighted(line, looks, &self.weights, self.rtl, &self.shaper) {
             Ok(pieces) => pieces
                 .iter()
                 .map(|(look, p)| match p {
@@ -552,10 +587,11 @@ pub fn type3_shaped(
     let cmap = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
     // The face's family when every glyph comes from one script; without the face, the script's
     // name (as Arabic items were always named).
-    let family = match clusters.first().map(|c| c.script).filter(|s| clusters.iter().all(|c| c.script == *s)) {
+    let single = clusters.first().map(|c| c.script).filter(|s| clusters.iter().all(|c| c.script == *s));
+    let family = match single {
         Some(script) => script.font().map_or(
             match script {
-                ShapedScript::Arabic => "Arabic",
+                ShapedScript::Arabic | ShapedScript::ArabicBold => "Arabic",
                 ShapedScript::Hebrew => "Hebrew",
                 ShapedScript::Thai => "Thai",
             },
@@ -563,12 +599,18 @@ pub fn type3_shaped(
         ),
         None => "PdfCraft Shaped Text",
     };
+    // A font of bold glyphs says so (its name and weight), so a reader, a later Edit text among them, sees bold text.
+    let bold = single.is_some_and(|s| s.weight() == Weight::Bold);
     let mut descriptor = Dict::new();
     descriptor.set(b"Type".to_vec(), Object::name("FontDescriptor"));
-    descriptor.set(b"FontName".to_vec(), Object::name(&family.replace(' ', "")));
+    let font_name = family.replace(' ', "");
+    descriptor.set(b"FontName".to_vec(), Object::name(&if bold { format!("{font_name}-Bold") } else { font_name }));
     descriptor.set(b"FontFamily".to_vec(), Object::String(PdfString::literal(family.as_bytes().to_vec())));
     descriptor.set(b"Flags".to_vec(), Object::Int(4));
     descriptor.set(b"ItalicAngle".to_vec(), Object::Int(0));
+    if bold {
+        descriptor.set(b"FontWeight".to_vec(), Object::Int(700));
+    }
     let mut encoding = Dict::new();
     encoding.set(b"Type".to_vec(), Object::name("Encoding"));
     encoding.set(b"Differences".to_vec(), Object::Array(differences));
@@ -791,8 +833,10 @@ pub fn plan_directed(
 }
 
 /// [`plan`] for lines drawn in several looks: each line is its text in typing order with the look of each of its
-/// characters (see [`shaped_pieces_looked`]), and look `i` shows its Latin text with `latins[i]` (a look past the end
-/// with the first). Everything that can fail does so before `doc` is touched.
+/// characters (see [`shaped_pieces_looked`]), look `i` shows its Latin text with `latins[i]` and its Arabic is drawn at
+/// `weights[i]` (a look past the end of either with the first's; no weight at all, regular). A bold look's Arabic is
+/// drawn from Type 3 fonts of its own (the resource name's prefix and object number followed by `B`), built from the
+/// face's bold outlines. Everything that can fail does so before `doc` is touched.
 pub fn plan_looked(
     doc: &mut Document,
     fonts_res: &mut Dict,
@@ -800,11 +844,12 @@ pub fn plan_looked(
     rtl: bool,
     fonts: PlanFonts,
     latins: &[LatinShow],
+    weights: &[Weight],
 ) -> Result<ShapedPlan, ShapedTextError> {
     let shaper = current_shaper();
     let mut laid = Vec::with_capacity(lines.len());
     for (line, looks) in lines {
-        laid.push((line.clone(), shaped_pieces_looked(line, looks, rtl, &shaper)?));
+        laid.push((line.clone(), shaped_pieces_weighted(line, looks, weights, rtl, &shaper)?));
     }
     plan_looked_pieces(doc, fonts_res, laid, fonts, latins)
 }
@@ -848,7 +893,7 @@ fn plan_looked_pieces(
                 Piece::Shaped(clusters) => {
                     let mut ks = Vec::with_capacity(clusters.len());
                     for c in clusters {
-                        if c.script != ShapedScript::Arabic {
+                        if !c.script.is_arabic() {
                             return Err(mixed_scripts_error());
                         }
                         let k = match index.get(&cluster_key(c)) {
@@ -885,19 +930,40 @@ fn plan_looked_pieces(
     }
 
     let per_font = fonts.max_glyphs.clamp(1, GLYPHS_PER_FONT);
+    // Each face instance (regular, bold) has fonts of its own, the one seen first first: a text of one weight is chunked
+    // as it always was.
+    let mut groups: Vec<(ShapedScript, Vec<usize>)> = Vec::new();
+    for (k, c) in keys.iter().enumerate() {
+        match groups.iter_mut().find(|(script, _)| *script == c.script) {
+            Some((_, group)) => group.push(k),
+            None => groups.push((c.script, vec![k])),
+        }
+    }
+    // Each distinct cluster's font (an index into `names`) and code in it.
+    let mut slots: Vec<(usize, u8)> = vec![(0, 1); keys.len()];
     let mut taken: HashSet<Vec<u8>> = fonts_res.iter().map(|(name, _)| name.clone()).collect();
     let mut names = Vec::new();
-    for chunk in keys.chunks(per_font) {
-        let font = type3_shaped(doc, chunk, &outlines, fonts.font_name);
-        let mut name = format!("{}{}", fonts.name_prefix, font.num);
-        let mut suffix = 0usize;
-        while taken.contains(name.as_bytes()) {
-            suffix = suffix.saturating_add(1);
-            name = format!("{}{}_{suffix}", fonts.name_prefix, font.num);
+    for (script, group) in &groups {
+        let weight = if script.weight() == Weight::Bold { "B" } else { "" };
+        for chunk in group.chunks(per_font) {
+            let clusters: Vec<&ShapedCluster> = chunk.iter().filter_map(|k| keys.get(*k).copied()).collect();
+            let font = type3_shaped(doc, &clusters, &outlines, fonts.font_name);
+            let mut name = format!("{}{}{weight}", fonts.name_prefix, font.num);
+            let mut suffix = 0usize;
+            while taken.contains(name.as_bytes()) {
+                suffix = suffix.saturating_add(1);
+                name = format!("{}{}{weight}_{suffix}", fonts.name_prefix, font.num);
+            }
+            taken.insert(name.clone().into_bytes());
+            fonts_res.set(name.clone().into_bytes(), Object::Ref(font));
+            for (i, k) in chunk.iter().enumerate() {
+                // Codes start at 1; a chunk holds at most 240.
+                if let Some(slot) = slots.get_mut(*k) {
+                    *slot = (names.len(), u8::try_from(i.saturating_add(1)).unwrap_or(1));
+                }
+            }
+            names.push(name);
         }
-        taken.insert(name.clone().into_bytes());
-        fonts_res.set(name.clone().into_bytes(), Object::Ref(font));
-        names.push(name);
     }
 
     let mut planned = Vec::with_capacity(laid.len());
@@ -908,9 +974,7 @@ fn plan_looked_pieces(
                 Staged::Latin(look, ops, text) => runs.push(Run::Latin(look, ops, text)),
                 Staged::Shaped(look, ks) => {
                     for (k, space) in ks {
-                        let font = k / per_font;
-                        // Codes start at 1; `k % per_font + 1` is at most 240.
-                        let code = u8::try_from(k % per_font + 1).unwrap_or(1);
+                        let Some(&(font, code)) = slots.get(k) else { continue };
                         match runs.last_mut() {
                             Some(Run::Shaped(l, f, codes, spaces)) if *f == font && *l == look => {
                                 codes.push(code);
@@ -1227,7 +1291,7 @@ mod stretch_tests {
         let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
         let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|(l, looks)| ((*l).to_owned(), looks.clone())).collect();
         let latins = [LatinShow { font: "F9", show: &latin }, LatinShow { font: "F8", show: &latin }];
-        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins).expect("plans");
+        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins, &[]).expect("plans");
         set_test_shaper(None);
         plan
     }
@@ -1280,5 +1344,177 @@ mod stretch_tests {
             })
             .collect();
         assert_eq!(adjustments, [-100.0, -200.0], "{ops:?}");
+    }
+}
+
+#[cfg(test)]
+mod weight_tests {
+    use super::*;
+
+    /// Each letter a cluster of its own; a bold one (asked for as [`ShapedScript::ArabicBold`]) a fifth wider.
+    fn weighted_letters(script: ShapedScript, text: &str, _: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
+        let wider = if script == ShapedScript::ArabicBold { 1.2 } else { 1.0 };
+        Ok(text
+            .chars()
+            .map(|c| ShapedCluster { script, glyphs: vec![(u32::from(c), [0.0, 0.0])], advance: 0.5 * wider, text: c.to_string() })
+            .collect())
+    }
+
+    /// The faces without a bold instance: bold is asked for and regular comes back.
+    fn regular_only(script: ShapedScript, text: &str, rtl: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
+        weighted_letters(script.weighted(Weight::Regular), text, rtl)
+    }
+
+    fn outline(script: ShapedScript, _: u32) -> Result<GlyphOutline, GlyphError> {
+        let w = if script == ShapedScript::ArabicBold { 0.6 } else { 0.5 };
+        Ok(GlyphOutline { contours: vec![vec![[0.0, 0.0], [w, 0.0], [w, 0.5]]], width: w, bbox: [0.0, 0.0, w, 0.5] })
+    }
+
+    const WEIGHTED: Shaper = Shaper { shape: weighted_letters, has: |_, c| c == ' ', outline, arabic_available: || true };
+    const REGULAR_ONLY: Shaper = Shaper { shape: regular_only, has: |_, c| c == ' ', outline, arabic_available: || true };
+
+    fn latin(s: &str) -> Result<Vec<TextOp>, ShapedTextError> {
+        Ok(vec![TextOp::new("Tj", vec![Object::String(PdfString::literal(s.as_bytes().to_vec()))])])
+    }
+
+    /// `lines` planned with `shaper` at `weights`: the document, its font resources, the plan and line 0's operators.
+    fn planned(shaper: Shaper, lines: &[(&str, Vec<usize>)], weights: &[Weight]) -> (Document, Dict, Vec<TextOp>) {
+        set_test_shaper(Some(shaper));
+        let mut doc = Document::new_empty();
+        let mut fonts = Dict::new();
+        let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
+        let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|(l, looks)| ((*l).to_owned(), looks.clone())).collect();
+        let latins = [LatinShow { font: "F9", show: &latin }, LatinShow { font: "F8", show: &latin }];
+        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins, weights).expect("plans");
+        set_test_shaper(None);
+        let looks = [RunLook { size: 10.0, fill: &[] }, RunLook { size: 10.0, fill: &[] }];
+        let ops = plan.looked_line_ops(0, &looks, &mut Pen::default());
+        (doc, fonts, ops)
+    }
+
+    /// The decoded bytes of the stream `o` is (or refers to).
+    fn decoded(doc: &Document, o: &Object) -> Option<Vec<u8>> {
+        match &*doc.resolve(o) {
+            Object::Stream(s) => s.decoded().ok(),
+            _ => None,
+        }
+    }
+
+    fn font_names(fonts: &Dict) -> Vec<String> {
+        fonts.iter().map(|(name, _)| String::from_utf8_lossy(name).into_owned()).collect()
+    }
+
+    /// The fonts selected by the line's `Tf`s, in order, each with the string it shows next.
+    fn shown(ops: &[TextOp]) -> Vec<(String, Vec<u8>)> {
+        let mut font = String::new();
+        let mut out = Vec::new();
+        for op in ops {
+            match (op.operator.as_slice(), op.operands.first()) {
+                (b"Tf", Some(Object::Name(name))) => font = String::from_utf8_lossy(name).into_owned(),
+                (b"Tj", Some(Object::String(s))) => out.push((font.clone(), s.bytes.clone())),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_bold_look_is_drawn_from_fonts_of_its_own() {
+        // The first word in look 0 (regular), the second in look 1 (bold); right to left, the second is drawn first.
+        let line = ("\u{627}\u{628} \u{628}\u{627}", vec![0, 0, 0, 1, 1]);
+        let (doc, fonts, ops) = planned(WEIGHTED, std::slice::from_ref(&line), &[Weight::Regular, Weight::Bold]);
+        let names = font_names(&fonts);
+        assert_eq!(names.len(), 2, "{names:?}");
+        let bold: Vec<&String> = names.iter().filter(|n| n.ends_with('B')).collect();
+        assert_eq!(bold.len(), 1, "one font of bold glyphs, its name marked: {names:?}");
+        // The bold word is shown in the bold font, the regular word (and its space) in the other.
+        let drawn = shown(&ops);
+        assert_eq!(drawn.len(), 2, "{ops:?}");
+        assert_eq!(&drawn[0].0, bold[0]);
+        assert!(!drawn[1].0.ends_with('B'));
+        // The bold font says it is bold, and draws the bold outlines at the bold advances.
+        let font = |name: &str| doc.resolve(fonts.get(name.as_bytes()).expect("a font")).as_dict().cloned().expect("a dict");
+        let descriptor = |name: &str| doc.resolve(font(name).get(b"FontDescriptor").expect("a descriptor")).as_dict().cloned().expect("a dict");
+        let regular_name = names.iter().find(|n| !n.ends_with('B')).expect("a regular font");
+        assert_eq!(descriptor(bold[0]).get(b"FontWeight").and_then(Object::as_f64), Some(700.0));
+        assert!(descriptor(bold[0]).name(b"FontName").is_some_and(|n| n.ends_with(b"-Bold")));
+        assert_eq!(descriptor(regular_name).get(b"FontWeight"), None);
+        let widths = |name: &str| match font(name).get(b"Widths") {
+            Some(Object::Array(w)) => w.iter().filter_map(Object::as_f64).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        assert_eq!(widths(bold[0]), [600.0, 600.0]);
+        assert_eq!(widths(regular_name), [500.0, 500.0, 500.0]);
+        let procs = |name: &str| -> Vec<Vec<u8>> {
+            let Some(Object::Dict(procs)) = font(name).get(b"CharProcs").cloned() else { return Vec::new() };
+            procs.iter().filter_map(|(_, p)| decoded(&doc, p)).collect()
+        };
+        let (heavy, light) = (procs(bold[0]), procs(regular_name));
+        assert!(heavy.iter().all(|p| !light.contains(p)), "{heavy:?} {light:?}");
+        // Measured at the bold advances too.
+        let zero = |_: &str| 0.0;
+        set_test_shaper(Some(WEIGHTED));
+        let measure = Measure::with_looks(true, vec![(10.0, &zero), (10.0, &zero)]);
+        let regular_width = measure.line_looked(line.0, &line.1);
+        let measure = measure.weighted(vec![Weight::Regular, Weight::Bold]);
+        let bold_width = measure.line_looked(line.0, &line.1);
+        let all_bold = Measure::new(true, 10.0, &zero).weighted(vec![Weight::Bold]).line(line.0);
+        set_test_shaper(None);
+        assert!(
+            (regular_width - 25.0).abs() < 1e-9 && (bold_width - 27.0).abs() < 1e-9 && (all_bold - 30.0).abs() < 1e-9,
+            "{regular_width} {bold_width} {all_bold}"
+        );
+    }
+
+    #[test]
+    fn regular_is_planned_as_before_and_bold_without_a_bold_instance_too() {
+        let lines = [("\u{627}\u{628} \u{628}\u{627}", vec![0, 0, 0, 1, 1]), ("\u{628}", vec![1])];
+        let bytes = |(doc, fonts, ops): (Document, Dict, Vec<TextOp>)| {
+            let objects: Vec<String> = doc.object_numbers().into_iter().map(|n| format!("{n} {:?}", doc.try_get(n).ok())).collect();
+            (objects, font_names(&fonts), format!("{ops:?}"))
+        };
+        // No weight, all regular, and bold that the faces can't draw (no `wght` axis) are one plan.
+        let before = bytes(planned(WEIGHTED, &lines, &[]));
+        assert_eq!(bytes(planned(WEIGHTED, &lines, &[Weight::Regular, Weight::Regular])), before);
+        assert_eq!(bytes(planned(REGULAR_ONLY, &lines, &[Weight::Regular, Weight::Bold])), before);
+        assert_eq!(bytes(planned(REGULAR_ONLY, &lines, &[Weight::Bold])), before);
+        // (And bold that can be drawn is another.)
+        assert_ne!(bytes(planned(WEIGHTED, &lines, &[Weight::Regular, Weight::Bold])), before);
+    }
+
+    #[test]
+    fn the_real_face_draws_a_bold_word_wider_from_other_glyph_procedures() {
+        if crate::document_arabic_font().is_none() {
+            eprintln!("skipping the bold plan check: built without a craft-fonts Arab face (set CRAFT_FONTS_DIR)");
+            return;
+        }
+        let word = "بالعالم";
+        let plan_at = |weight: Weight| {
+            let mut doc = Document::new_empty();
+            let mut fonts = Dict::new();
+            let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
+            plan_looked(&mut doc, &mut fonts, &[(word.to_owned(), Vec::new())], true, names, &[LatinShow { font: "F9", show: &latin }], &[weight])
+                .expect("plans");
+            let (name, font) = fonts.iter().next().map(|(n, f)| (String::from_utf8_lossy(n).into_owned(), f.clone())).expect("a font");
+            let font = doc.resolve(&font).as_dict().cloned().expect("a dict");
+            let widths: f64 = match font.get(b"Widths") {
+                Some(Object::Array(w)) => w.iter().filter_map(Object::as_f64).sum(),
+                _ => 0.0,
+            };
+            let Some(Object::Dict(procs)) = font.get(b"CharProcs").cloned() else { panic!("glyph procedures") };
+            let procs: Vec<Vec<u8>> = procs.iter().filter_map(|(_, p)| decoded(&doc, p)).collect();
+            (name, widths, procs)
+        };
+        let (regular_name, regular_widths, regular_procs) = plan_at(Weight::Regular);
+        let (bold_name, bold_widths, bold_procs) = plan_at(Weight::Bold);
+        assert!(!regular_name.ends_with('B') && bold_name.ends_with('B'), "{regular_name} {bold_name}");
+        assert!(bold_widths > regular_widths * 1.02, "{bold_widths} against {regular_widths}");
+        assert_eq!(bold_procs.len(), regular_procs.len());
+        assert!(bold_procs.iter().zip(&regular_procs).all(|(b, r)| b != r));
+        let zero = |_: &str| 0.0;
+        let (light, heavy) = (Measure::new(true, 1.0, &zero).line(word), Measure::new(true, 1.0, &zero).weighted(vec![Weight::Bold]).line(word));
+        // (A line measures every cluster; a font's widths count each distinct one once.)
+        let at = |weight| crate::shape_arabic_at(word, true, weight).expect("shapes").iter().map(cluster_width).sum::<f64>();
+        assert!((light - at(Weight::Regular)).abs() < 1e-9 && (heavy - at(Weight::Bold)).abs() < 1e-9 && heavy > light * 1.02, "{light} {heavy}");
     }
 }

@@ -269,3 +269,39 @@ fn a_font_name_the_page_already_uses_is_not_reused() {
     assert_ne!(second, first);
     assert!(second.starts_with(b"PCAr"), "{}", String::from_utf8_lossy(&second));
 }
+
+#[test]
+fn a_bold_item_draws_its_arabic_at_the_faces_bold_instance() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("built without a craft-fonts Arabic face: the bold Add text check needs CRAFT_FONTS_DIR");
+        return;
+    }
+    let drawn = |bold: bool| {
+        let t = AddedText { text: "بالعالم".into(), bold, ..item() };
+        let mut doc = Document::new_empty();
+        let (mut fonts, mut out) = (Dict::new(), Vec::new());
+        draw_shaped(&mut doc, &t, &Dict::new(), &mut fonts, &mut out).expect("draws");
+        let font = fonts.iter().find(|(name, _)| name.starts_with(b"PCAr")).and_then(|(_, f)| doc.dict(f)).expect("a generated font");
+        let weight = font.get(b"FontDescriptor").and_then(|d| doc.dict(d)).and_then(|d| d.get(b"FontWeight").and_then(Object::as_f64));
+        let procs: Vec<Vec<u8>> = match font.get(b"CharProcs") {
+            Some(Object::Dict(procs)) => procs
+                .iter()
+                .filter_map(|(_, p)| match &*doc.resolve(p) {
+                    Object::Stream(s) => s.decoded().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        (shaped_width(&t, &t.text, true), weight, procs, String::from_utf8_lossy(&out).into_owned())
+    };
+    let (regular_width, regular_weight, regular_procs, regular_out) = drawn(false);
+    let (bold_width, bold_weight, bold_procs, bold_out) = drawn(true);
+    assert!(bold_width > regular_width * 1.02, "{bold_width} against {regular_width}");
+    assert_eq!((regular_weight, bold_weight), (None, Some(700.0)));
+    assert_eq!(bold_procs.len(), regular_procs.len());
+    assert!(bold_procs.iter().zip(&regular_procs).all(|(b, r)| b != r));
+    // The text is the same: the span holds the typed line either way.
+    let span = |out: &str| out.lines().find(|l| l.contains("ActualText")).map(str::to_owned);
+    assert_eq!(span(&bold_out), span(&regular_out));
+}

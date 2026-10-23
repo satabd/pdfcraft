@@ -85,11 +85,21 @@ paragraph wraps, a one-row paragraph of several runs grows and keeps its right e
 line does, and Justify widens every gap of a line by the same distance, a `TJ` adjustment in the
 size of the run it follows. Every line is still one `/Span` with `/ActualText` in typing order,
 and the ToUnicode maps give the letters back. A paragraph in one look is written byte for byte
-as before. Still different: the Arabic face has one weight, so the Arabic letters of a bold run
-are drawn regular (their size and colour kept); a line written in several looks reads back as one
-run (its `/ActualText` span) in the look of its leftmost run, so editing it again starts from one
-look; the rows keep the paragraph's first line spacing; past 256 looks in one paragraph the rest
-take the first.
+as before. A bold look's Arabic is bold: a look is bold when its run's font is (its name says
+Bold, Black, Heavy, Semibold or Demi, or its descriptor has ForceBold or a FontWeight of 600 or
+more) unless a weight or family is asked for, the rule that picks the standard font of the family
+and weight for its Latin text (`text_looks::settled_bold`); a whole bold paragraph, and a bold
+line on the line form, are bold too. Its Arabic is shaped, measured and drawn at the craft-fonts
+Arabic face's `wght` 700 instance (harfrust shapes at that location, skrifa gives the advances and
+outlines there) from Type 3 fonts of its own (`PCEdAr…B`, a `FontName` ending `-Bold` and a
+`FontWeight` of 700, so a later edit reads the run as bold again); the `/ActualText` and the
+ToUnicode maps are what a regular run's would be. A build whose Arabic face has no `wght` axis draws
+bold Arabic regular, as before. Still different: the Edit text box shows bold Arabic in the
+interface's semibold family, whose Arabic letters come from the same face at its default (regular)
+instance, so on the page a bold Arabic word is about an eighth wider than in the box; italic Arabic
+is drawn upright; a line written in several looks reads back as one run (its `/ActualText` span)
+in the look of its leftmost run, so editing it again starts from one look; the rows keep the
+paragraph's first line spacing; past 256 looks in one paragraph the rest take the first.
 
 A justified paragraph stretches every row the wrap breaks to the paragraph's width by widening the
 spaces between its words, on every route. The last row of a paragraph, a row before a line break

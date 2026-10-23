@@ -12,6 +12,8 @@
 //! line are drawn with the paragraph's own font when it has them and with Helvetica otherwise,
 //! between the shaped runs, in the same span. In a paragraph of several looks (sizes, colours, fonts) each line is drawn as
 //! runs of one look, each character in the look of the stored character it came from (`text_looks`, [`plan_looked`]).
+//! A bold paragraph, or a bold look, has its Arabic drawn at the face's bold instance (`wght` 700), from Type 3 fonts of
+//! its own (`PCEdAr…B`); a build whose face has no `wght` axis draws it regular.
 //!
 //! The paragraph's text state keeps no character or word spacing here (spacing would pull joined
 //! letters apart; word spacing reaches only a single-byte code 32, which these fonts' codes are not). A justified
@@ -70,6 +72,7 @@ pub(crate) fn unsupported_with_arabic(latin: &str) -> EditError {
     ))
 }
 
+pub(crate) use pdfcraft_fonts::Weight;
 pub(crate) use shaped_text::{LatinWidth, Measure};
 
 /// The operators that show Latin text in a font, or why the font can't.
@@ -111,7 +114,7 @@ fn adapted<'a>(
 
 /// Lay out `lines` (in typing order, in a paragraph that runs `rtl` or not), read every outline
 /// and add the fonts to `doc` and `fonts_res`. Everything that can fail does so before `doc` is
-/// touched. `max_glyphs` is the most glyphs one generated font holds (tests lower it).
+/// touched. `max_glyphs` is the most glyphs one generated font holds (tests lower it). The Arabic is drawn at `weight`.
 pub(crate) fn plan(
     doc: &mut Document,
     fonts_res: &mut Dict,
@@ -119,13 +122,15 @@ pub(crate) fn plan(
     rtl: bool,
     max_glyphs: usize,
     latin: &LatinShow,
+    weight: Weight,
 ) -> Result<ShapedPlan, EditError> {
     let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|line| (line.clone(), Vec::new())).collect();
-    plan_looked(doc, fonts_res, &lines, rtl, max_glyphs, std::slice::from_ref(latin))
+    plan_looked(doc, fonts_res, &lines, rtl, max_glyphs, std::slice::from_ref(latin), &[weight])
 }
 
 /// [`plan`] for a paragraph of several looks: each line with the look of each of its characters (an index into
-/// `latins`, which shows the Latin text of each look; see [`shaped_text::shaped_pieces_looked`]).
+/// `latins`, which shows the Latin text of each look, and into `weights`, the weight its Arabic is drawn at; see
+/// [`shaped_text::shaped_pieces_weighted`]).
 pub(crate) fn plan_looked(
     doc: &mut Document,
     fonts_res: &mut Dict,
@@ -133,6 +138,7 @@ pub(crate) fn plan_looked(
     rtl: bool,
     max_glyphs: usize,
     latins: &[LatinShow],
+    weights: &[Weight],
 ) -> Result<ShapedPlan, EditError> {
     // An error of the writer's own is kept as it is; the planner's is turned into an `EditError`.
     let failure: std::cell::RefCell<Option<EditError>> = std::cell::RefCell::new(None);
@@ -140,7 +146,7 @@ pub(crate) fn plan_looked(
     let planner: Vec<shaped_text::LatinShow> =
         latins.iter().zip(&shows).map(|(latin, show)| shaped_text::LatinShow { font: latin.font, show }).collect();
     let fonts = PlanFonts { max_glyphs, name_prefix: FONT_PREFIX, font_name: Some(ARABIC_FONT_NAME) };
-    let planned = shaped_text::plan_looked(doc, fonts_res, lines, rtl, fonts, &planner);
+    let planned = shaped_text::plan_looked(doc, fonts_res, lines, rtl, fonts, &planner, weights);
     drop(planner);
     drop(shows);
     match planned {

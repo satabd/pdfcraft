@@ -16,7 +16,7 @@ use pdfcraft_fonts::{GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Std1
 // The shaped-text layout is shared with the other writers (forms, annotations) and lives in
 // `pdfcraft_fonts::shaped_text`; Add text and Edit text use it under their old names.
 pub(crate) use pdfcraft_fonts::shaped_text::{
-    ClusterKey, GLYPHS_PER_FONT, Piece, Shaper, cluster_key, is_arabic, is_bidi_control, is_hebrew, shaped_pieces, type3_shaped,
+    ClusterKey, GLYPHS_PER_FONT, Piece, Shaper, cluster_key, is_arabic, is_bidi_control, is_hebrew, type3_shaped,
 };
 
 use crate::{EditError, MarkKind, check, contents, matrix_number, n, page_list, place_tagged};
@@ -448,9 +448,12 @@ fn shaped_arabic(c: char) -> bool {
 }
 
 /// A line of a shaped-text item in drawing order (the Unicode bidirectional algorithm, UAX #9), and
-/// its width at the item's size. `rtl` is its paragraph's direction.
+/// its width at the item's size. `rtl` is its paragraph's direction. A bold item's Arabic is shaped at
+/// the face's bold instance (its outlines and advances), as its Latin text is in the bold standard font.
 fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f64), EditError> {
-    let pieces = shaped_pieces(line, rtl, &Shaper::FACES)?;
+    let weight = if t.bold { pdfcraft_fonts::Weight::Bold } else { pdfcraft_fonts::Weight::Regular };
+    let pieces: Vec<Piece> =
+        shaped_text::shaped_pieces_weighted(line, &[], &[weight], rtl, &Shaper::FACES)?.into_iter().map(|(_, piece)| piece).collect();
     let width = pieces
         .iter()
         .map(|p| match p {
