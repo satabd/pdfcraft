@@ -644,6 +644,8 @@ fn added_galley(
             let ink = row.trim_end_matches('\n').trim_matches(' ');
             let count = ink.chars().count();
             let mut format = base.clone();
+            // An italic item is skewed by egui; the Arabic is then re-sheared below as the page slants it (Latin keeps the skew).
+            format.italics = style.italic;
             format.line_height = Some(pitch).filter(|p| p.is_finite() && *p > 0.0).or(format.line_height);
             // The spacing goes between the letters of the ink (epaint puts it before every glyph but the first of the
             // row): what follows the ink (the space a wrap leaves) keeps the font's own advance, so the ink ends where
@@ -676,7 +678,10 @@ fn added_galley(
         }
     }
     let galley = ctx.lay_out(ui, map, job);
-    ctx.place_aligned(ui, galley, map, align)
+    let galley = ctx.place_aligned(ui, galley, map, align);
+    // The page slants an italic item's Arabic by 12° (a synthesized oblique, the face has no italic); egui's own skew
+    // is a quarter of the height, so the joined letters are re-sheared once they are placed.
+    if style.italic { crate::edit_text_ui::slant_joined_rows(galley) } else { galley }
 }
 
 /// Where the editor puts the rows of the text: the alignment the saved text will have.
@@ -1123,6 +1128,70 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// For each inked glyph of the first row of the Add text box showing `item` that `keep` takes: how far right the top of its
+    /// quad sits of its bottom, and its height (screen points).
+    fn leans(fonts: egui::FontDefinitions, item: &AddedText, keep: impl Fn(char) -> bool) -> Vec<(f32, f32)> {
+        let ctx = egui::Context::default();
+        ctx.set_os(egui::os::OperatingSystem::Nix);
+        ctx.set_fonts(fonts);
+        let mut leans = Vec::new();
+        // The fonts take effect from the second frame.
+        for _ in 0..2 {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(4000.0, 2000.0))), ..Default::default() };
+            let mut text = item.text.clone();
+            let frame = ctx.run_ui(raw, |ui| {
+                let font = crate::edit_text_ui::editor_font(item, item.size as f32);
+                let style = item.clone();
+                let out = text_field(&mut text, item, item.rect, font)
+                    .desired_width(item.rect[2] as f32)
+                    .layout(move |ui, map, ctx| added_galley(ui, map, ctx, &style, 1.0, row_align(style.align)))
+                    .show_mapped(ui);
+                let Some(placed) = out.out.galley.rows.first() else { return };
+                let vertices = &placed.row.visuals.mesh.vertices;
+                leans = placed
+                    .row
+                    .glyphs
+                    .iter()
+                    .filter(|g| keep(g.chr) && !g.uv_rect.is_nothing())
+                    .filter_map(|g| match vertices.get(g.first_vertex as usize..g.first_vertex as usize + 4) {
+                        Some([top_left, _, bottom_left, _]) => Some((top_left.pos.x - bottom_left.pos.x, bottom_left.pos.y - top_left.pos.y)),
+                        _ => None,
+                    })
+                    .collect();
+            });
+            frame.drop_without_applying_deltas();
+        }
+        leans
+    }
+
+    /// An italic Add text item's Arabic is sheared in the box as the page slants it (12° about the baseline: the top of a
+    /// letter sits right of its bottom by tan 12° of its height); a regular item's is upright; Latin italic is egui's skew
+    /// (a quarter of the height).
+    #[test]
+    fn italic_arabic_in_the_add_text_box_is_slanted_as_the_page_draws_it() {
+        let Some(fonts) = crate::bidi::arabic_test_fonts() else {
+            eprintln!("skipping: no Arabic face for the interface (build with CRAFT_FONTS_DIR or set PDFCRAFT_TEST_ARABIC_FONT)");
+            return;
+        };
+        let item =
+            |text: &str, italic: bool| AddedText { rect: [0.0, 0.0, 600.0, 80.0], text: text.into(), size: 40.0, italic, ..AddedText::default() };
+        let arabic = "\u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645}";
+        let upright = leans(fonts.clone(), &item(arabic, false), crate::bidi::is_joining_script);
+        let italic = leans(fonts.clone(), &item(arabic, true), crate::bidi::is_joining_script);
+        assert!(!upright.is_empty() && upright.len() == italic.len(), "{upright:?} {italic:?}");
+        assert!(upright.iter().all(|(lean, _)| lean.abs() < 1e-3), "regular: {upright:?}");
+        let tan = (12.0f32).to_radians().tan();
+        let &(lean, height) = italic.iter().max_by(|a, b| a.1.total_cmp(&b.1)).expect("a glyph");
+        assert!(height > 10.0 && (lean - tan * height).abs() < 0.01 * height, "lean {lean} for height {height}: {italic:?}");
+        assert!(italic.iter().all(|(lean, height)| (lean - tan * height).abs() < 0.01 * height.max(1.0)), "{italic:?}");
+        // Latin in the same italic item keeps egui's skew, and upright Latin stays upright.
+        let mixed = format!("{arabic} Hello");
+        let latin = leans(fonts.clone(), &item(&mixed, true), |c| c.is_ascii_alphabetic());
+        assert!(!latin.is_empty() && latin.iter().all(|(lean, height)| (lean - 0.25 * height).abs() < 1e-3), "{latin:?}");
+        let latin = leans(fonts, &item(&mixed, false), |c| c.is_ascii_alphabetic());
+        assert!(!latin.is_empty() && latin.iter().all(|(lean, _)| lean.abs() < 1e-3), "{latin:?}");
     }
 
     #[test]

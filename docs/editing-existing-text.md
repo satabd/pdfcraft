@@ -115,7 +115,8 @@ upright glyphs are drawn from Type 3 fonts of their own (`PCEdAr…I`, `…BI` w
 (`[0.001 0 0.0002126 0.001 0 0]`), with an `ItalicAngle` of −12, the Italic flag and a `FontName` ending `-Italic` (or
 `-BoldItalic`), so a later edit reads the run as italic again. The glyph procedures, widths, measure, `/ActualText` and ToUnicode
 maps are the upright run's. The Edit text box shows the slant: it shears the vertices of an italic look's Arabic glyphs by the
-same 12° about the baseline (its Latin rows are drawn as before). Still different: a line that keeps one span (above) reads back as one run in the look of its
+same 12° about the baseline (its Latin rows are drawn as before), and the Add text box does the same for an italic item (egui's
+own skew taken off the interface face's Arabic glyphs first; Latin, Hebrew and Thai in the box keep egui's skew). Still different: a line that keeps one span (above) reads back as one run in the look of its
 leftmost run, so editing it again starts from one look for that line; a look whose spans read
 alike (the same generated font, size and colour, only the Latin font differing) reads back as the
 look of the first; past 256 looks in one paragraph the rest take the first.

@@ -1597,7 +1597,7 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &Scre
             glyph.line_height = ascent + descent;
         }
         widgets::shift_glyph_vertices(row, &dy);
-        slant_joined_glyphs(row, ascent);
+        slant_joined_glyphs(row);
         row.size.y = (ascent + descent).max(1.0);
         row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
         bounds = bounds.union(Rect::from_min_size(placed.pos, row.size));
@@ -1609,11 +1609,11 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &Scre
 }
 
 /// The glyphs of `row` in an italic look's Arabic (a joined letter of a section with `italics`, see [`line_formats`])
-/// sheared as the page slants them: by [`pdfcraft_fonts::Slant::Italic`]'s 12° about the baseline `baseline` (row
-/// coordinates), in place of egui's own italic skew. egui skews a glyph by moving the top corners of its quad right by a
-/// quarter of its height, which is how such a glyph is known here (a glyph's section is private to egui); Latin italic
-/// keeps egui's skew.
-fn slant_joined_glyphs(row: &mut egui::epaint::text::Row, baseline: f32) {
+/// sheared as the page slants them: by [`pdfcraft_fonts::Slant::Italic`]'s 12° about the baseline of each glyph
+/// (`Glyph::pos.y`, row coordinates), in place of egui's own italic skew. egui skews a glyph by moving the top corners of
+/// its quad right by a quarter of its height, which is how such a glyph is known here (a glyph's section is private to
+/// egui); Latin italic keeps egui's skew. The row's `mesh_bounds` are the caller's to refresh.
+fn slant_joined_glyphs(row: &mut egui::epaint::text::Row) {
     // egui's skew (`epaint::text::text_layout`, `tessellate_glyphs`).
     const EGUI_SKEW: f32 = 0.25;
     let shear = pdfcraft_fonts::Slant::Italic.shear() as f32;
@@ -1631,9 +1631,28 @@ fn slant_joined_glyphs(row: &mut egui::epaint::text::Row, baseline: f32) {
         top_left.pos.x -= EGUI_SKEW * height;
         top_right.pos.x -= EGUI_SKEW * (bottom_right.pos.y - top_right.pos.y);
         for vertex in [top_left, top_right, bottom_left, bottom_right] {
-            vertex.pos.x += (baseline - vertex.pos.y) * shear;
+            vertex.pos.x += (glyph.pos.y - vertex.pos.y) * shear;
         }
     }
+}
+
+/// `galley` with the joined letters of every row slanted as the page slants an italic look's Arabic (see
+/// [`slant_joined_glyphs`]), for a box whose rows are laid out and placed already (the Add text box): the bounds of the
+/// meshes follow the sheared glyphs. A galley with no such letter is returned as it is.
+pub(crate) fn slant_joined_rows(mut galley: Arc<egui::Galley>) -> Arc<egui::Galley> {
+    if !galley.rows.iter().any(|placed| placed.row.glyphs.iter().any(|g| bidi::is_joining_script(g.chr))) {
+        return galley;
+    }
+    let g = Arc::make_mut(&mut galley);
+    let mut meshes = Rect::NOTHING;
+    for placed in &mut g.rows {
+        let row = Arc::make_mut(&mut placed.row);
+        slant_joined_glyphs(row);
+        row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
+        meshes = meshes.union(row.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
+    }
+    g.mesh_bounds = meshes;
+    galley
 }
 
 /// The map of the draft `text` as the editor lays it out in one piece (not wrapped), in the direction the
