@@ -56,11 +56,101 @@ a second bidi reversal; adjacent visual glyph runs still recover their own readi
 Only right-to-left ActualText is kept apart this way: left-to-right spans, such as the Latin
 ligatures (`fi`, `fl`) Word and Chrome wrap in ActualText mid-word, join their line as before.
 
-A justified paragraph stretches each row but its last to the paragraph's width by widening its
-spaces. Word spacing (`Tw`) widens only single-byte code 32, so where the font shows a space with
-another code (a composite font, the generated Type 3 fallback) each space is followed by a `TJ`
-adjustment instead. Justifying a paragraph with several formats in it is not supported yet: it is
-left-aligned.
+Arabic text typed into Edit text is shaped when the source font can't shape it. A complete
+embedded face that covers the text still shapes it in place (above). Otherwise (a subset font,
+no embedded font, a face without the letters, or a paragraph an earlier edit already replaced)
+the craft-fonts Arabic face (Noto Sans Arabic) draws it: joined forms, ligatures and marks, in
+UAX #9 order, as Type 3 glyphs named `PCEdAr…` (`/Name /PCArabic`) with a ToUnicode map, up to
+240 glyphs per font. Every wrapped line is one `/Span` with `/ActualText` holding the line in
+typing order, so copy, search and a later edit read it as typed. Latin letters and digits
+between the Arabic are drawn with the paragraph's own font when it has them, else Helvetica.
+The page font's reverse ToUnicode map is never used for Arabic letters: a producer maps a
+letter's initial, medial and final glyphs to one code, so re-encoding would write isolated
+forms. `replace_line` (the automation `line` form) shapes the same way. A build without the
+Arabic face says so (`CRAFT_FONTS_DIR`) and changes nothing. Not done yet: Hebrew and Arabic in
+one paragraph, formatting part of the Arabic text or choosing a document font for it
+(refused), character spacing (ignored, since it would pull joined letters apart), at most 4,096
+distinct letter shapes per edit, and embedding the face as a real font.
+
+A paragraph of several looks (runs that differ in size, fill colour or font, such as a larger
+first row or a bold red word) keeps them when it is retyped in Arabic and drawn in the craft-fonts
+face. Each character of the draft takes the look of the stored character it came from, and an
+inserted one its neighbour's (`TextBlock::edited_spans`, as the styled rewrite and the Edit text
+box have it); a stretch of right-to-left script, a word, takes the look of its first letter, so a
+look never changes inside a joined word (`text_looks`, the rule the editor's `shaper_styles`
+draws by). Each line is drawn as runs of one look: the shaped glyphs at the run's own size and in
+its fill colour, the Latin text among them in the run's own font where that has the characters
+(else the standard font of its family and weight). Each word is measured in its own look when the
+paragraph wraps, a one-row paragraph of several runs grows and keeps its right edge as a single
+line does, and Justify widens every gap of a line by the same distance, a `TJ` adjustment in the
+size of the run it follows. A line of several looks has a `/Span` for each look, drawn one after
+another, each with `/ActualText` holding that look's characters in typing order, and the ToUnicode
+maps give the letters back. Edit text and page text extraction (copy, Find, `text_extract`) read a
+row of such spans in the same order, a simplified bidirectional pass over the spans
+(`pdfcraft_fonts::shaped_text::reading_order`): a span of right-to-left text is read right to left
+among its neighbours, Latin and numbers left to right. Two right-to-left spans side by side never
+join into one run, so a later edit reads each look back as a run of its own and keeps it. A line
+keeps one span, as before, when a look's runs are not drawn one after another (a look change
+inside a stretch of Latin text in a right-to-left line) or when its spans would read in another
+order than they were typed (as many Latin pieces as Arabic ones, which extraction takes for a
+left-to-right line). A paragraph in one look is written byte for byte as before. A bold look's Arabic is bold: a look is bold when its run's font is (its name says
+Bold, Black, Heavy, Semibold or Demi, or its descriptor has ForceBold or a FontWeight of 600 or
+more) unless a weight or family is asked for, the rule that picks the standard font of the family
+and weight for its Latin text (`text_looks::settled_bold`); a whole bold paragraph, and a bold
+line on the line form, are bold too. Its Arabic is shaped, measured and drawn at the craft-fonts
+Arabic face's `wght` 700 instance (harfrust shapes at that location, skrifa gives the advances and
+outlines there) from Type 3 fonts of its own (`PCEdAr…B`, a `FontName` ending `-Bold` and a
+`FontWeight` of 700, so a later edit reads the run as bold again); the `/ActualText` and the
+ToUnicode maps are what a regular run's would be. A build whose Arabic face has no `wght` axis draws
+bold Arabic regular, as before. The Edit text box draws bold Arabic at the same instance (its bold
+font is the interface's semibold faces with the Arabic face at `wght` 700, `theme::EDITOR_BOLD`),
+so a bold Arabic word is as wide in the box as on the page. Where the rewrite refuses a draft the box
+cannot ask it for the page's rows, and breaks the lines by a measure of its own that sets each character in
+the font and size of its own source row (the looks the box draws by), not in the first row's. An italic look's Arabic is
+slanted: a look is italic when its run's font is (its name says Italic, Oblique or Slanted, or its descriptor has the Italic
+flag or an `ItalicAngle`) unless a family is asked for with its slant in the Format panel, the rule that picks the italic
+standard font for its Latin text (`text_looks::settled_italic`); a whole italic paragraph, and an italic line on the line form,
+are slanted too. The Arabic face has no italic (no `ital` or `slnt` axis), so the slant is synthesized, not a true italic: the
+upright glyphs are drawn from Type 3 fonts of their own (`PCEdAr…I`, `…BI` when bold too) whose `FontMatrix` shears them by 12°
+(`[0.001 0 0.0002126 0.001 0 0]`), with an `ItalicAngle` of −12, the Italic flag and a `FontName` ending `-Italic` (or
+`-BoldItalic`), so a later edit reads the run as italic again. The glyph procedures, widths, measure, `/ActualText` and ToUnicode
+maps are the upright run's. The Edit text box shows the slant: it shears the vertices of an italic look's Arabic glyphs by the
+same 12° about the baseline (its Latin rows are drawn as before), and the Add text box does the same for an italic item (egui's
+own skew taken off the interface face's Arabic glyphs first; Latin, Hebrew and Thai in the box keep egui's skew). Still different: a line that keeps one span (above) reads back as one run in the look of its
+leftmost run, so editing it again starts from one look for that line; a look whose spans read
+alike (the same generated font, size and colour, only the Latin font differing) reads back as the
+look of the first; past 256 looks in one paragraph the rest take the first.
+
+Where the rows of a retyped paragraph go is one rule on every route (the single-style rewrite,
+shaped Arabic of one look or several, and the styled rewrite): unless a line spacing is asked for,
+each row the source paragraph has sits on that source row's own baseline (the first run's, for a
+row of several), so a paragraph whose rows were unevenly spaced, or whose larger first row has more
+leading, keeps them so; rows past the source's last continue at the step between its last two rows
+(under a paragraph of one row, at its own leading or 1.2 × the size on the single-style and shaped
+routes, 1.5 × the size on the styled one). The single-style and shaped routes scale each step with a
+new size (`text::row_steps`; the styled route goes to an even 1.5 × the size then), and stop
+following the source at the first step that is not a positive number at most 14 400 pt, placing
+the rows after it at the last step they kept. A line spacing asked for spaces every row evenly at
+that multiple of the size. `text_edit_layout` reports the rows (`TextEditLayout::row_rects`) where
+they are written.
+
+A justified paragraph stretches every row the wrap breaks to the paragraph's width by widening the
+spaces between its words, on every route. The last row of a paragraph, a row before a line break
+(`\n`: each line of the draft is a paragraph of its own) and a row of one word are not stretched,
+nor is a row that begins or ends with a space (those spaces are not between words). Word spacing
+(`Tw`) widens only single-byte code 32, so where the font shows a space with another code (a
+composite font, the generated Type 3 fallback, a subset with no space glyph) each space is followed
+by a `TJ` adjustment instead; the styled rewrite (several looks, or a draft with a line break) sets
+`Tw` for a simple font and uses the adjustments for the others, glyph by glyph where it shapes in the
+page's own face. Shaped Arabic in generated Type 3 glyphs is always stretched by `TJ` adjustments
+(its codes are not 32), the planner (`pdfcraft_fonts::shaped_text::ShapedPlan::line_ops_stretched`)
+placing one after every space cluster and after every space of the Latin text between the Arabic,
+which is shown word by word. A right-to-left row keeps its right edge: a stretched one ends at the
+paragraph's right edge, one that is not stretched is right-aligned. `/ActualText` and ToUnicode
+state the text as typed, whatever the spacing. `text_edit_layout` (`row_rects`, automation
+`row_boxes`) reports the stretched rows, which the Edit text box shows. Not done: justifying
+between the characters of Chinese or Japanese text (a row with no ASCII space has nothing to
+widen), and a row that begins or ends with a space.
 
 For headless editing, use `text_font_files` → `text_font_import` → `text_fonts` and pass a
 resource to `text_edit.font_resource`. `text_edit.ranges` holds selected range formatting.

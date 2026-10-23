@@ -283,7 +283,7 @@ fn finish(state: &mut MeasureView, pending: &mut Option<Edit>, doc: &Document, p
     }
 }
 pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
-    egui::ScrollArea::vertical().id_salt("measure-panel").show(ui, |ui| panel_body(app, ui, t));
+    crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().id_salt("measure-panel"), |ui| panel_body(app, ui, t));
 }
 fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
     crate::widgets::begin_dialog(ui);
@@ -319,8 +319,11 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
             state.precision = scale.precision;
         }
     }
-    ui.label(tl!("Click vertices. Enter or double-click finishes a perimeter or area. Click the first point to close an area."));
-    ui.label(tl!("Shift constrains to 45 degrees. Backspace removes a vertex. Escape cancels."));
+    widgets::body_text(
+        ui,
+        &tl_logical!("Click vertices. Enter or double-click finishes a perimeter or area. Click the first point to close an area."),
+    );
+    widgets::body_text(ui, &tl_logical!("Shift constrains to 45 degrees. Backspace removes a vertex. Escape cancels."));
     ui.separator();
     ui.label(tl!("Measurement information"));
     if let Some(reading) = &state.reading {
@@ -394,9 +397,12 @@ fn panel_body(app: &mut PdfCraftApp, ui: &mut egui::Ui, _t: &Tokens) {
                 ui.colored_label(Color32::from_rgb(190, 120, 30), format!("{}: {}", tl!("Unsupported measurements"), listing.unsupported.len()))
                     .on_hover_text(reasons.join("\n"));
             }
-            egui::ScrollArea::vertical().id_salt("measurement-list").max_height(140.0).show(ui, |ui| {
+            crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().id_salt("measurement-list").max_height(140.0), |ui| {
                 for m in &listing.measurements {
-                    if ui.button(format!("{} {}: {} {}", tl!("Page"), m.page.saturating_add(1), m.reading.label, m.label)).clicked() {
+                    if ui
+                        .button(format!("{} {}: {} {}", tl!("Page"), m.page.saturating_add(1), m.reading.label, crate::bidi::visual_auto(&m.label)))
+                        .clicked()
+                    {
                         select = Some((m.page, m.index, m.reading.clone(), m.scale.clone()));
                     }
                 }
@@ -459,12 +465,12 @@ fn export_csv(app: &mut PdfCraftApp) {
     let Some((_, id)) = app.active_ids() else { return };
     let result = app.session.get(id).ok_or_else(|| "no such document".to_string()).and_then(|d| d.measurements());
     match result {
-        Err(e) => app.notify(&e),
+        Err(e) => app.notify(e),
         Ok(listing) => {
             let csv = measure::csv(&listing.measurements);
             if !listing.unsupported.is_empty() {
-                app.notify(crate::i18n::fmt(
-                    tl!("{n} measurements use an unsupported format and are left out."),
+                app.notify(crate::i18n::fmt_logical(
+                    &tl_logical!("{n} measurements use an unsupported format and are left out."),
                     &[("n", &listing.unsupported.len().to_string())],
                 ));
             }
@@ -474,7 +480,7 @@ fn export_csv(app: &mut PdfCraftApp) {
                     &path.to_string_lossy(),
                     csv.as_bytes(),
                 ) {
-                    Ok(()) => app.notify(tl!("Saved measurements.")),
+                    Ok(()) => app.notify(tl_logical!("Saved measurements.")),
                     Err(e) => app.notify(e.to_string()),
                 };
                 match app.export_dir_override.as_ref().map(|d| std::path::PathBuf::from(d).join("measurements.csv")) {
@@ -487,7 +493,7 @@ fn export_csv(app: &mut PdfCraftApp) {
             }
             #[cfg(target_arch = "wasm32")]
             if let Err(e) = crate::editing::download("measurements.csv", csv.as_bytes()) {
-                app.notify(&e);
+                app.notify(e.to_string());
             }
         }
     }

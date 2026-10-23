@@ -11,6 +11,38 @@ use crate::widgets;
 /// Glyphs of context shown on each side of a match.
 const CONTEXT: usize = 36;
 
+/// A result's context split for painting: the text before the match, the match (when it can be
+/// told from the rest) and the text after it.
+#[derive(Debug, PartialEq, Eq)]
+struct Snippet {
+    before: String,
+    hit: Option<String>,
+    after: String,
+}
+
+/// The sections of a result line from its flattened `before`, `hit` and `after` text (logical
+/// order, whitespace collapsed). Text without right-to-left script is `…before `, the hit and
+/// ` after…`. With some, egui would lay the runs out in logical order and swap the words, so the
+/// whole line is put in display order ([`crate::bidi::visual_auto`]) and the hit is looked up in
+/// it: a stretch of right-to-left script is handed back to the shaper in logical order, so a
+/// hit of one script stays a contiguous substring. Found exactly once, the line is split around
+/// it and the hit keeps its highlight; otherwise the whole display line is plain.
+fn snippet_sections(before: &str, hit: &str, after: &str) -> Snippet {
+    let line = format!("…{before} {hit} {after}…");
+    if !crate::bidi::has_rtl(&line) {
+        return Snippet { before: format!("…{before} "), hit: Some(hit.to_owned()), after: format!(" {after}…") };
+    }
+    let shown = crate::bidi::visual_auto(&line).into_owned();
+    let mut found = shown.match_indices(hit).map(|(at, _)| at);
+    if !hit.is_empty()
+        && let (Some(at), None) = (found.next(), found.next())
+        && let (Some(head), Some(tail)) = (shown.get(..at), shown.get(at.saturating_add(hit.len())..))
+    {
+        return Snippet { before: head.to_owned(), hit: Some(hit.to_owned()), after: tail.to_owned() };
+    }
+    Snippet { before: shown, hit: None, after: String::new() }
+}
+
 pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, pages: usize) {
     crate::widgets::begin_dialog(ui);
     let searched = view.texts.len() + view.text_failed.len();
@@ -74,18 +106,21 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, pages: us
         let mut job = LayoutJob::default();
         let font = FontId::new(12.5, egui::FontFamily::Proportional);
         let plain = TextFormat { font_id: font.clone(), color: t.text_muted, ..Default::default() };
-        job.append(&format!("…{} ", flat(before)), 0.0, plain.clone());
-        job.append(
-            &flat(hit),
-            0.0,
-            TextFormat {
-                font_id: theme::semibold(12.5),
-                color: t.text,
-                background: Color32::from_rgba_unmultiplied(255, 214, 0, 90),
-                ..Default::default()
-            },
-        );
-        job.append(&format!(" {}…", flat(after)), 0.0, plain);
+        let snippet = snippet_sections(&flat(before), &flat(hit), &flat(after));
+        job.append(&snippet.before, 0.0, plain.clone());
+        if let Some(hit) = &snippet.hit {
+            job.append(
+                hit,
+                0.0,
+                TextFormat {
+                    font_id: theme::semibold(12.5),
+                    color: t.text,
+                    background: Color32::from_rgba_unmultiplied(255, 214, 0, 90),
+                    ..Default::default()
+                },
+            );
+        }
+        job.append(&snippet.after, 0.0, plain);
         job.wrap.max_width = ui.available_width();
         let selected = find.current == Some(i);
         let resp = ui.add(egui::Button::selectable(selected, job).wrap()).on_hover_text(tl!("Go to this result"));
@@ -95,5 +130,56 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, pages: us
     }
     if let Some(i) = go {
         view.go_to_match(i);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sections(s: &Snippet) -> String {
+        format!("{}{}{}", s.before, s.hit.as_deref().unwrap_or_default(), s.after)
+    }
+
+    #[test]
+    fn latin_context_is_unchanged() {
+        let s = snippet_sections("the quick", "brown", "fox jumps");
+        assert_eq!(s, Snippet { before: "…the quick ".into(), hit: Some("brown".into()), after: " fox jumps…".into() });
+        // Other scripts that read left to right are left alone too.
+        let s = snippet_sections("日本", "語", "文字");
+        assert_eq!(s.hit.as_deref(), Some("語"));
+        assert_eq!(sections(&s), "…日本 語 文字…");
+    }
+
+    #[test]
+    fn arabic_context_is_in_display_order_with_the_hit_highlighted_once() {
+        let (before, hit, after) = ("ذهب الولد إلى", "المدرسة", "في الصباح");
+        let s = snippet_sections(before, hit, after);
+        assert_eq!(s.hit.as_deref(), Some(hit), "{s:?}");
+        // The words of the right-to-left line run from the right: the last word is leftmost.
+        // Computed with `visual_auto` for "…ذهب الولد إلى المدرسة في الصباح…": the leading
+        // ellipsis ends up at the right end, the trailing one at the left, and the words in reverse.
+        assert_eq!(sections(&s), "…الصباح في المدرسة إلى الولد ذهب…");
+        assert_eq!(s.before, "…الصباح في ");
+        assert_eq!(s.after, " إلى الولد ذهب…");
+        // Latin words and numbers inside keep their own order.
+        let s = snippet_sections("صفحة 12 من", "Report", "النهائي");
+        assert_eq!(s.hit.as_deref(), Some("Report"));
+        assert_eq!(sections(&s), crate::bidi::visual_auto("…صفحة 12 من Report النهائي…"));
+    }
+
+    #[test]
+    fn a_hit_that_cannot_be_located_once_is_not_highlighted() {
+        // Twice in the line: ambiguous, so the whole display line is plain.
+        let s = snippet_sections("كتاب", "كتاب", "جديد");
+        assert_eq!(s.hit, None);
+        assert_eq!(s.after, "");
+        assert_eq!(s.before, crate::bidi::visual_auto("…كتاب كتاب جديد…"));
+        // A mixed hit is reordered inside the line and no longer a substring of it.
+        let s = snippet_sections("ملف", "a ب", "جديد");
+        assert_eq!(s.hit, None);
+        assert_eq!(s.before, crate::bidi::visual_auto("…ملف a ب جديد…"));
+        // An empty hit has nothing to highlight.
+        assert_eq!(snippet_sections("ملف", "", "جديد").hit, None);
     }
 }

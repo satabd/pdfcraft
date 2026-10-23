@@ -1399,7 +1399,7 @@ pub(crate) fn composer(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, 
                 _ => tl!("Add a comment"),
             };
             let edit =
-                ui.add(egui::TextEdit::multiline(&mut c.text).hint_text(hint).desired_rows(3).desired_width(f32::INFINITY).id_salt("composer-text"));
+                ui.add(crate::widgets::block(&mut c.text).hint_text(hint).desired_rows(3).desired_width(f32::INFINITY).id_salt("composer-text"));
             if c.focus {
                 edit.request_focus();
                 c.focus = false;
@@ -1564,11 +1564,12 @@ pub(crate) fn caret_snap(text: &PageText, vx: f32, vy: f32) -> Option<([f32; 2],
 /// The box for `text` at `size` with its displayed top-left corner at `at`, on a page turned by
 /// `rotation` (its `/Rotate`): on a quarter-turned page it is taller than wide in user space.
 pub fn text_box_rect(at: [f64; 2], text: &str, size: f64, rotation: i64) -> [f64; 4] {
-    use pdfcraft_engine::annot_text::{text_width, wrap};
+    use pdfcraft_engine::annot_text::{line_count, longest_line};
     let pad = 2.0;
-    let longest = text.lines().map(|l| text_width(l, size)).fold(0.0, f64::max);
+    // Measured as the appearance draws it: Arabic on its shaped widths, the rest in Helvetica.
+    let longest = longest_line(text, size);
     let w = (longest + 2.0 * pad + 4.0).clamp(40.0, 300.0);
-    let lines = wrap(text, size, w - 2.0 * pad).len().max(1);
+    let lines = line_count(text, size, w - 2.0 * pad);
     let h = lines as f64 * size * 1.2 + 2.0 * pad + 2.0;
     pdfcraft_engine::text_box_at(rotation, at, w, h).unwrap_or([at[0], at[1] - h, at[0] + w, at[1]])
 }
@@ -1609,11 +1610,11 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool
 pub(crate) fn attachment_items(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo, a: &Annotation) {
     let source = pdfcraft_render::AttachmentSource::Annotation { page: a.page, index: a.index };
     let Some(file) = info.attachments.iter().find(|f| f.source == source) else { return };
-    if ui.button(tl!("Save attachment…")).clicked() {
+    if crate::widgets::menu_entry(ui, true, tl!("Save attachment…"), None).clicked() {
         view.comments.attachment_request = Some((a.page, a.index, false));
         ui.close();
     }
-    if file.name.to_lowercase().ends_with(".pdf") && ui.button(tl!("Open in a new tab")).clicked() {
+    if file.name.to_lowercase().ends_with(".pdf") && crate::widgets::menu_entry(ui, true, tl!("Open in a new tab"), None).clicked() {
         view.comments.attachment_request = Some((a.page, a.index, true));
         ui.close();
     }
@@ -1628,7 +1629,7 @@ pub(crate) fn context_menu(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo
         Some(a) => {
             let (page, index) = (a.page, a.index);
             attachment_items(ui, view, info, a);
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Edit text…"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!("Edit text…"), None).clicked() {
                 view.comments.composer = Some(Composer {
                     page,
                     at: [a.rect[2] as f64, a.rect[3] as f64],
@@ -1638,22 +1639,22 @@ pub(crate) fn context_menu(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo
                 });
                 ui.close();
             }
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!("Reply"), None).clicked() {
                 view.comments.reveal = true;
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
             ui.add_enabled_ui(allowed, |ui| {
-                ui.menu_button(tl!("Set status"), |ui| {
+                crate::widgets::sub_menu(ui, tl!("Set status"), |ui| {
                     for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
-                        if ui.button(tl!(s.name())).clicked() {
+                        if crate::widgets::menu_entry(ui, true, tl!(s.name()), None).clicked() {
                             action =
                                 Some(CanvasAction::Edit(Box::new(Edit::SetAnnotationStatus { page, index, state: s, author: prefs.author.clone() })));
                             ui.close();
                         }
                     }
                 });
-                ui.menu_button(tl!("Colour"), |ui| {
+                crate::widgets::sub_menu(ui, tl!("Colour"), |ui| {
                     if let Some(c) = swatch_grid(ui, a.color.map(|c| c.map(f64::from))) {
                         action = Some(CanvasAction::Edit(Box::new(Edit::StyleAnnotation {
                             page,
@@ -1669,37 +1670,37 @@ pub(crate) fn context_menu(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo
             });
             let thread: Vec<&pdfcraft_render::Annotation> = info.annotations.iter().filter(|r| a.name.is_some() && r.in_reply_to == a.name).collect();
             let marked = crate::comments_panel::is_marked(&thread);
-            if ui.add_enabled(allowed, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }), None).clicked() {
                 action = Some(CanvasAction::Edit(Box::new(Edit::MarkAnnotation { page, index, marked: !marked, author: prefs.author.clone() })));
                 ui.close();
             }
-            if ui.button(tl!("Copy text")).clicked() {
+            if crate::widgets::menu_entry(ui, true, tl!("Copy text"), None).clicked() {
                 ui.ctx().copy_text(a.contents.clone().unwrap_or_default());
                 ui.close();
             }
             ui.separator();
-            if ui.add_enabled(allowed && !a.locked, egui::Button::new(tl!("Delete"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed && !a.locked, tl!("Delete"), None).clicked() {
                 view.comments.selected = None;
                 action = Some(CanvasAction::Edit(Box::new(Edit::DeleteAnnotation { page, index })));
                 ui.close();
             }
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Properties…"))).clicked() {
+            if crate::widgets::menu_entry(ui, allowed, tl!("Properties…"), None).clicked() {
                 action = Some(CanvasAction::Properties(page, index));
                 ui.close();
             }
-            if ui.add_enabled(tool_for(a).is_some(), egui::Button::new(tl!("Make Current Properties Default"))).clicked() {
+            if crate::widgets::menu_entry(ui, tool_for(a).is_some(), tl!("Make Current Properties Default"), None).clicked() {
                 view.comments.default_request = Some((page, index));
                 ui.close();
             }
         }
         None => {
             if let Some((page, at)) = view.comments.context_at
-                && ui.add_enabled(allowed, egui::Button::new(tl!("Add a sticky note here"))).clicked()
+                && crate::widgets::menu_entry(ui, allowed, tl!("Add a sticky note here"), None).clicked()
             {
                 view.comments.composer = Some(Composer { page, at, kind: ComposerKind::Note, text: String::new(), focus: true });
                 ui.close();
             }
-            if ui.button(tl!("Comments panel")).clicked() {
+            if crate::widgets::menu_entry(ui, true, tl!("Comments panel"), None).clicked() {
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
@@ -1882,7 +1883,7 @@ pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &m
     if tool.has_fill() {
         let resp = fill_button(ui, style.fill);
         egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).show(|ui| {
-            ui.label(egui::RichText::new(tl!("Fill colour")).font(theme::semibold(12.0)));
+            crate::widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Fill colour")).font(theme::semibold(12.0))));
             if let Some(f) = fill_picker(ui, style.fill) {
                 prefs.set_fill(tool, f);
                 ui.close();
@@ -1893,7 +1894,7 @@ pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &m
     egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_min_width(180.0);
         let mut percent = (style.opacity * 100.0).round();
-        ui.label(egui::RichText::new(tl!("Opacity")).font(theme::semibold(12.0)));
+        crate::widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Opacity")).font(theme::semibold(12.0))));
         if ui.add(egui::Slider::new(&mut percent, 10.0..=100.0).step_by(5.0).suffix(" %")).changed() {
             prefs.set_opacity(tool, percent / 100.0);
         }
@@ -1903,7 +1904,7 @@ pub(crate) fn quick_bar_controls(ui: &mut egui::Ui, tool: CommentTool, prefs: &m
         egui::Popup::menu(&resp).align(egui::RectAlign::RIGHT_START).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(180.0);
             let mut w = style.width;
-            ui.label(egui::RichText::new(tl!("Line thickness")).font(theme::semibold(12.0)));
+            crate::widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Line thickness")).font(theme::semibold(12.0))));
             if ui.add(egui::Slider::new(&mut w, tool.min_width()..=12.0).step_by(0.5).suffix(" pt")).changed() {
                 prefs.set_width(tool, w);
             }
@@ -2167,5 +2168,26 @@ mod tests {
         let long = text_box_rect([0.0, 500.0], &"word ".repeat(80), 12.0, 0);
         assert_eq!(long[2], 300.0);
         assert!(long[3] - long[1] > 50.0);
+    }
+
+    #[test]
+    fn arabic_text_boxes_are_measured_on_the_shaped_widths() {
+        if pdfcraft_fonts::document_arabic_font().is_none() {
+            eprintln!("set CRAFT_FONTS_DIR to measure Arabic text boxes");
+            return;
+        }
+        use pdfcraft_fonts::shaped_text::Measure;
+        let helvetica = |s: &str| pdfcraft_fonts::helvetica_width(s, 1.0);
+        let text = "مرحبا بالعالم الجميل";
+        let shaped = Measure::new(true, 1.0, &helvetica).line(text) * 12.0;
+        let r = text_box_rect([0.0, 500.0], text, 12.0, 0);
+        assert!((r[2] - r[0] - (shaped + 8.0)).abs() < 0.01, "{} vs {}", r[2] - r[0], shaped + 8.0);
+        // Several lines of it wrap on those widths; the box is tall enough for exactly them.
+        let long = text.repeat(16);
+        let r = text_box_rect([0.0, 500.0], &long, 12.0, 0);
+        assert_eq!(r[2], 300.0);
+        let lines = pdfcraft_engine::annot_text::line_count(&long, 12.0, 296.0);
+        assert!(lines >= 3);
+        assert!((r[3] - r[1] - (lines as f64 * 14.4 + 6.0)).abs() < 0.01, "{r:?} {lines}");
     }
 }

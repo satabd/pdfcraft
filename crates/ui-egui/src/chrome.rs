@@ -4,7 +4,7 @@ use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, Sense, Stroke, ve
 
 use crate::canvas::{DocView, Fit, PageLayout};
 use crate::theme::{self, ThemePreference, Tokens};
-use crate::{Dialog, Mode, PdfCraftApp, PropsTab, RightPanel, icons, widgets, window_controls};
+use crate::{Dialog, Mode, PdfCraftApp, PropsTab, RightPanel, icons, rtl, widgets, window_controls};
 
 /// Height of the tab strip when it doubles as the macOS title bar (#789). AppKit draws the traffic
 /// lights itself, centred in the standard 28 pt title-bar band at the top of the window, and moving
@@ -53,13 +53,20 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 .clone()
                 .filter(|_| app.draws_window_frame() && !fullscreen)
                 .unwrap_or_else(|| window_controls::Layout { left: Vec::new(), right: Vec::new() });
-            ui.horizontal_centered(|ui| {
+            // The window buttons stay where the desktop put them: the physical left ones are the
+            // start cluster in English and the end cluster when the strip is mirrored.
+            let (start_controls, end_controls) = if rtl::mirrored() { (&controls.right, &controls.left) } else { (&controls.left, &controls.right) };
+            rtl::horizontal_centered(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if !controls.left.is_empty() {
-                    ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        window_controls::buttons(ui, &controls.left);
-                    });
+                if !start_controls.is_empty() {
+                    if rtl::mirrored() {
+                        controls_cluster(ui, start_controls);
+                    } else {
+                        ui.scope(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            window_controls::buttons(ui, start_controls);
+                        });
+                    }
                     ui.add_space(window_controls::SIDE_GAP - 4.0);
                 }
                 if icons::button(ui, "house", button, app.active.is_none() && !app.combine_showing(), tl!("Home")).clicked() {
@@ -70,7 +77,7 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let controls_width = ui.fonts_mut(|f| f.layout_no_wrap("Discord".into(), theme::medium(13.0), t.text).size().x)
                     + 2.0 * button
                     + 50.0
-                    + window_controls::width(&controls.right);
+                    + window_controls::width(end_controls);
                 // Open stays in sight after the tabs: its icon, text and padding, and the gaps around it.
                 let open_width = ui.fonts_mut(|f| f.layout_no_wrap(tl!("Open").into(), theme::medium(13.0), t.text).size().x) + 38.0 + 12.0;
                 let mut tabs_width = (ui.available_width() - controls_width - open_width).max(0.0);
@@ -95,9 +102,21 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let scroll_id = ui.id().with("tab_scroll");
                 let (offset, max_offset) = ui.data(|d| d.get_temp::<(f32, f32)>(scroll_id)).unwrap_or((0.0, 0.0));
                 let mut scroll_to = None;
-                if overflow && arrow(ui, "chevron-left", offset > 0.5, tl!("Scroll tabs left")) {
-                    scroll_to = Some((offset - (TAB_MIN_WIDTH + gap)).max(0.0));
-                }
+                // Scrolling is physical: the left arrow sits at the left of the tabs, so a
+                // mirrored strip, which adds from the right, adds the right arrow first.
+                let mut scroll_arrow = |ui: &mut egui::Ui, left: bool| {
+                    if !overflow {
+                        return;
+                    }
+                    if left {
+                        if arrow(ui, "chevron-left", offset > 0.5, tl!("Scroll tabs left")) {
+                            scroll_to = Some((offset - (TAB_MIN_WIDTH + gap)).max(0.0));
+                        }
+                    } else if arrow(ui, "chevron-right", offset < max_offset - 0.5, tl!("Scroll tabs right")) {
+                        scroll_to = Some((offset + TAB_MIN_WIDTH + gap).min(max_offset));
+                    }
+                };
+                scroll_arrow(ui, !rtl::mirrored());
                 // Keyed by document, not index: a tab dragged past the active one moves it without
                 // the strip jumping to it.
                 let state = (app.active_ids().map(|(_, id)| id), app.views.len(), app.combine_showing());
@@ -111,19 +130,68 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let mut close = None;
                 // The pointer's x while a tab is dragged, for scrolling at the strip's edges.
                 let mut drag_x = None;
-                ui.scope(|ui| {
+                // A mirrored strip draws the tabs left to right too, last document first, inside the
+                // room they need, which sits against Home: the first document is the rightmost tab.
+                let tabs_builder = egui::UiBuilder::new().layout(Layout::left_to_right(Align::Center));
+                let tabs_builder = if rtl::mirrored() {
+                    let wanted: f32 =
+                        natural.iter().map(|w| cap.map_or(*w, |c| w.min(c))).sum::<f32>() + gap * natural.len().saturating_sub(1) as f32;
+                    let cursor = ui.cursor();
+                    let room = wanted.min(tabs_width).max(0.0);
+                    tabs_builder.max_rect(Rect::from_min_max(egui::pos2(cursor.right() - room, cursor.top()), cursor.right_bottom()))
+                } else {
+                    tabs_builder
+                };
+                ui.scope_builder(tabs_builder, |ui| {
                     ui.style_mut().always_scroll_the_only_direction = true;
                     let mut area = egui::ScrollArea::horizontal().id_salt("document_tabs").max_width(tabs_width).auto_shrink([true, true]);
+                    if rtl::mirrored() {
+                        // The strip starts at the right: its first tabs are in view until the reader scrolls on.
+                        area = area.stick_to_right(true);
+                    }
                     if let Some(x) = ui.data_mut(|d| d.remove_temp::<f32>(scroll_id.with("to"))) {
                         area = area.horizontal_scroll_offset(x);
                     }
                     let out = area.show(ui, |ui| {
                         ui.horizontal_centered(|ui| {
+                            // The Combine tab; its index can't clash with a document's.
+                            let combine_tab = |ui: &mut egui::Ui, app: &mut PdfCraftApp| {
+                                let mut close = None;
+                                let response = tab(
+                                    ui,
+                                    ui.id().with("combine-tab"),
+                                    &t,
+                                    "files",
+                                    tl!("Combine files"),
+                                    None,
+                                    false,
+                                    app.combine_showing(),
+                                    &mut close,
+                                    usize::MAX,
+                                    cap,
+                                    tab_h,
+                                    false,
+                                );
+                                if changed && app.combine_showing() {
+                                    response.scroll_to_me(Some(Align::Center));
+                                }
+                                if response.clicked() {
+                                    app.open_combine_tab();
+                                }
+                                if close.is_some() || response.middle_clicked() {
+                                    app.close_combine_tab();
+                                }
+                            };
                             // Each document tab's index and rect, and the one being dragged
                             // (with whether it was just released).
                             let mut slots = Vec::with_capacity(app.views.len());
                             let mut dragged = None;
-                            for i in 0..app.views.len() {
+                            // The Combine tab comes after the documents: at the right in English, at the
+                            // left of the strip's last document when mirrored.
+                            if rtl::mirrored() && app.combine_tab.open {
+                                combine_tab(ui, app);
+                            }
+                            for i in rtl::run_order(app.views.len()) {
                                 let Some(doc) = app.session.get(app.views[i].id) else { continue };
                                 let Some(name) = crate::canvas::tab_label(app, i) else { continue };
                                 let dirty = doc.dirty;
@@ -154,16 +222,16 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 let id = app.views[i].id;
                                 let reveal = cfg!(not(target_arch = "wasm32")) && doc.path.is_some();
                                 response.context_menu(|ui| {
-                                    if ui.button(tl!("Close Tab")).clicked() {
+                                    if widgets::menu_entry(ui, true, tl!("Close Tab"), None).clicked() {
                                         action = Some(crate::tab_context::Action::Close(id));
                                         ui.close();
                                     }
-                                    if ui.add_enabled(!app.closed_tabs.is_empty(), egui::Button::new(tl!("Reopen Closed Tab"))).clicked() {
+                                    if widgets::menu_entry(ui, !app.closed_tabs.is_empty(), tl!("Reopen Closed Tab"), None).clicked() {
                                         action = Some(crate::tab_context::Action::Reopen);
                                         ui.close();
                                     }
                                     let label = if cfg!(target_os = "macos") { tl!("Reveal in Finder") } else { tl!("Reveal in File Explorer") };
-                                    if ui.add_enabled(reveal, egui::Button::new(label)).clicked() {
+                                    if widgets::menu_entry(ui, reveal, label, None).clicked() {
                                         action = Some(crate::tab_context::Action::Reveal(id));
                                         ui.close();
                                     }
@@ -182,7 +250,9 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             if let Some((from, released)) = dragged
                                 && let Some(x) = ui.ctx().pointer_latest_pos().map(|p| p.x)
                             {
-                                let to = drop_index(&slots, from, x);
+                                // The slots were added in drawing order; the drop works in tab order.
+                                slots.sort_by_key(|(i, _)| *i);
+                                let to = drop_index(&slots, from, x, rtl::mirrored());
                                 if released {
                                     if close.is_none() && action.is_none() {
                                         app.move_tab(from, to);
@@ -190,7 +260,7 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 } else {
                                     drag_x = Some(x);
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                                    if let Some(marker) = drop_marker(&slots, from, to, ui.spacing().item_spacing.x) {
+                                    if let Some(marker) = drop_marker(&slots, from, to, ui.spacing().item_spacing.x, rtl::mirrored()) {
                                         let span = slots.first().map_or(ui.max_rect().y_range(), |(_, r)| r.y_range());
                                         // In front of the first tab the gap lies outside the scroll area's
                                         // clip rect (#2225): keep the whole line inside it.
@@ -208,33 +278,8 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             if let Some(action) = action {
                                 app.tab_action(action);
                             }
-                            if app.combine_tab.open {
-                                // After the document tabs; its index can't clash with theirs.
-                                let mut close = None;
-                                let response = tab(
-                                    ui,
-                                    ui.id().with("combine-tab"),
-                                    &t,
-                                    "files",
-                                    tl!("Combine files"),
-                                    None,
-                                    false,
-                                    app.combine_showing(),
-                                    &mut close,
-                                    usize::MAX,
-                                    cap,
-                                    tab_h,
-                                    false,
-                                );
-                                if changed && app.combine_showing() {
-                                    response.scroll_to_me(Some(Align::Center));
-                                }
-                                if response.clicked() {
-                                    app.open_combine_tab();
-                                }
-                                if close.is_some() || response.middle_clicked() {
-                                    app.close_combine_tab();
-                                }
+                            if !rtl::mirrored() && app.combine_tab.open {
+                                combine_tab(ui, app);
                             }
                         });
                     });
@@ -257,27 +302,19 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         }
                     }
                 });
-                if overflow && arrow(ui, "chevron-right", offset < max_offset - 0.5, tl!("Scroll tabs right")) {
-                    scroll_to = Some((offset + TAB_MIN_WIDTH + gap).min(max_offset));
-                }
+                scroll_arrow(ui, rtl::mirrored());
                 if let Some(x) = scroll_to {
                     ui.data_mut(|d| d.insert_temp(scroll_id.with("to"), x));
                     ui.ctx().request_repaint();
                 }
                 ui.add_space(4.0);
-                let tip = crate::commands::command_tip(ui.ctx(), tl!("Open a PDF ({key})"), "file.open");
-                if widgets::ghost_button_sized(ui, "plus", tl!("Open"), tab_h).on_hover_text(tip).clicked() {
+                let tip = crate::commands::command_tip_logical(ui.ctx(), &tl_logical!("Open a PDF ({key})"), "file.open");
+                if widgets::hover_text(widgets::ghost_button_sized(ui, "plus", tl!("Open"), tab_h), &tip).clicked() {
                     app.open_dialog();
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if !controls.right.is_empty() {
-                        // Laid out left to right inside the right-to-left run, so they read in
-                        // the desktop's order.
-                        let size = egui::vec2(window_controls::width(&controls.right) - window_controls::SIDE_GAP, window_controls::BUTTON);
-                        ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            window_controls::buttons(ui, &controls.right);
-                        });
+                rtl::end(ui, |ui| {
+                    if !end_controls.is_empty() {
+                        controls_cluster(ui, end_controls);
                         ui.add_space(window_controls::SIDE_GAP - 4.0);
                     }
                     let (icon, label) = match app.theme_preference {
@@ -308,6 +345,16 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         });
 }
 
+/// The window buttons of one end of the strip, laid out left to right whatever the direction of
+/// the run they sit in, so they read in the desktop's order.
+fn controls_cluster(ui: &mut egui::Ui, buttons: &[window_controls::Button]) {
+    let size = egui::vec2(window_controls::width(buttons) - window_controls::SIDE_GAP, window_controls::BUTTON);
+    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        window_controls::buttons(ui, buttons);
+    });
+}
+
 /// Both theme entry points use the same choices and command path.
 fn theme_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     for (preference, command, label) in [
@@ -315,13 +362,13 @@ fn theme_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         (ThemePreference::Light, "view.theme.light", "Light gray"),
         (ThemePreference::Dark, "view.theme.dark", "Dark gray"),
     ] {
-        if ui.add(widgets::radio(app.theme_preference == preference, tl!(label))).clicked() {
+        if widgets::menu_choice(ui, |ui| ui.add(widgets::radio(app.theme_preference == preference, tl!(label)))).clicked() {
             app.execute(command);
             ui.close();
         }
     }
     ui.separator();
-    if ui.button(tl!("Appearance settings…")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Appearance settings…"), None).clicked() {
         app.dialog = Some(Dialog::Preferences);
         ui.close();
     }
@@ -329,13 +376,13 @@ fn theme_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 
 /// The right-click menu on the title bar's theme button.
 fn appearance_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
-    if ui.button(tl!("Appearance settings…")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Appearance settings…"), None).clicked() {
         app.dialog = Some(Dialog::Preferences);
         ui.close();
     }
 }
 
-/// A tab's chrome around its name: the icon on the left, the close button on the right.
+/// A tab's chrome around its name: the icon at the start, the close button at the end.
 const TAB_CHROME: f32 = 64.0;
 /// The narrowest a tab shrinks to before the strip scrolls: room for most of a name.
 const TAB_MIN_WIDTH: f32 = 180.0;
@@ -353,27 +400,31 @@ const TAB_DRAG_EDGE: f32 = 24.0;
 const TAB_DRAG_STEP: f32 = 8.0;
 
 /// Where the tab at `from` lands when dropped with the pointer at `x`: past every other tab
-/// whose centre is left of the pointer. `slots` are the tabs' indices and rects, in order.
-fn drop_index(slots: &[(usize, Rect)], from: usize, x: f32) -> usize {
-    slots.iter().filter(|(i, r)| *i != from && r.center().x < x).count()
+/// whose centre the pointer has crossed. `slots` are the tabs' indices and rects, in tab order.
+/// The tabs read from left to right, or from right to left when `reversed` (a mirrored strip, where
+/// the first tab is the rightmost and the pointer crosses a centre by going left of it).
+fn drop_index(slots: &[(usize, Rect)], from: usize, x: f32, reversed: bool) -> usize {
+    slots.iter().filter(|(i, r)| *i != from && if reversed { r.center().x > x } else { r.center().x < x }).count()
 }
 
 /// The x of the line marking where the tab at `from` drops at `to`: in the gap before the other
-/// tab it lands in front of, or after the last. `None` when it would stay where it is.
-fn drop_marker(slots: &[(usize, Rect)], from: usize, to: usize, gap: f32) -> Option<f32> {
+/// tab it lands in front of, or after the last (in the reading order of the strip: see
+/// [`drop_index`]). `None` when it would stay where it is.
+fn drop_marker(slots: &[(usize, Rect)], from: usize, to: usize, gap: f32, reversed: bool) -> Option<f32> {
     if slots.iter().position(|(i, _)| *i == from) == Some(to) {
         return None;
     }
     let mut others = slots.iter().filter(|(i, _)| *i != from).map(|(_, r)| r);
     match to.checked_sub(1) {
-        None => others.next().map(|r| r.left() - gap / 2.0),
-        Some(before) => others.nth(before).map(|r| r.right() + gap / 2.0),
+        None => others.next().map(|r| if reversed { r.right() + gap / 2.0 } else { r.left() - gap / 2.0 }),
+        Some(before) => others.nth(before).map(|r| if reversed { r.left() - gap / 2.0 } else { r.right() + gap / 2.0 }),
     }
 }
 
 /// A scroll arrow beside the tabs; dimmed (and inert) at its end. True when clicked.
 fn arrow(ui: &mut egui::Ui, icon: &str, enabled: bool, tip: &str) -> bool {
-    ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, TAB_ARROW, false, tip)).inner.clicked()
+    // Physical: the arrow scrolls the strip towards its left or right, whatever the language.
+    ui.add_enabled_ui(enabled, |ui| icons::button_fixed(ui, icon, TAB_ARROW, false, tip)).inner.clicked()
 }
 
 /// A tab name, at most 28 characters (longer names end in "…").
@@ -457,14 +508,15 @@ fn tab(
         }
         icons::paint(
             ui,
-            Rect::from_min_size(rect.min + vec2(6.0, (height - 16.0) / 2.0), vec2(16.0, 16.0)),
+            rtl::start_rect(rect, 6.0, (height - 16.0) / 2.0, vec2(16.0, 16.0)),
             icon,
             15.0,
             if active { t.accent } else { t.text_muted },
         );
-        ui.painter().text(rect.min + vec2(28.0, rect.height() / 2.0), Align2::LEFT_CENTER, label, font, if active { t.text } else { t.text_muted });
+        ui.painter().text(rtl::start_center(rect, 28.0), rtl::flip(Align2::LEFT_CENTER), label, font, if active { t.text } else { t.text_muted });
     });
-    let x_rect = Rect::from_center_size(rect.right_center() - vec2(16.0, 0.0), vec2(20.0, 20.0));
+    // The close button (or the unsaved dot) sits at the end of the tab.
+    let x_rect = Rect::from_center_size(rtl::end_center(rect, 16.0), vec2(20.0, 20.0));
     let x = ui.interact(x_rect, id.with("close"), Sense::click());
     let x_press = theme::Press::track(ui, &x);
     x_press.wash(ui, x_rect, 4, false);
@@ -494,11 +546,11 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         .exact_size(48.0)
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(10, 0)).stroke(Stroke::new(1.0, t.divider)))
         .show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
+            rtl::horizontal_centered(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 main_menu(app, ui);
                 ui.add_space(6.0);
-                ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
+                ui.painter().vline(rtl::start(ui.cursor(), 0.0), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
                 ui.add_space(10.0);
                 for (mode, label) in
                     [(Mode::AllTools, "All tools"), (Mode::Read, "Read"), (Mode::Edit, "Edit"), (Mode::Convert, "Convert"), (Mode::Sign, "E-Sign")]
@@ -507,7 +559,7 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         app.switch_mode(mode, true);
                     }
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                rtl::end(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let has_doc = app.active.is_some();
                     ui.add_enabled_ui(has_doc, |ui| {
@@ -525,7 +577,7 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         }
                     });
                     ui.add_space(8.0);
-                    if widgets::search_box(ui, tl!("Find tools and commands"), 260.0).clicked() {
+                    if widgets::search_box(ui, &tl_logical!("Find tools and commands"), 260.0).clicked() {
                         app.palette_open = true;
                     }
                 });
@@ -536,26 +588,31 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 /// Keep menus usable when their contents are taller than the window.
 pub(crate) fn scroll_menu(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     let height = (ui.ctx().content_rect().height() - 24.0).max(40.0);
-    egui::ScrollArea::vertical().max_height(height).auto_shrink([true, true]).show(ui, add);
+    widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(height).auto_shrink([true, true]), add);
 }
 
 fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let resp = widgets::ghost_button(ui, "panel-left", tl!("Menu"));
-    egui::Popup::menu(&resp).show(|ui| {
+    let mut popup = egui::Popup::menu(&resp);
+    if rtl::mirrored() {
+        // The button is at the right of the window: open the menu towards the left.
+        popup = popup.align(rtl::menu_align());
+    }
+    popup.show(|ui| {
         scroll_menu(ui, |ui| {
             ui.set_min_width(230.0);
-            ui.menu_button(tl!("File"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "File")));
-            ui.menu_button(tl!("Edit"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Edit")));
-            ui.menu_button(tl!("Pages"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Pages")));
-            ui.menu_button(tl!("View"), |ui| {
+            widgets::sub_menu(ui, tl!("File"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "File")));
+            widgets::sub_menu(ui, tl!("Edit"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Edit")));
+            widgets::sub_menu(ui, tl!("Pages"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Pages")));
+            widgets::sub_menu(ui, tl!("View"), |ui| {
                 scroll_menu(ui, |ui| {
                     if let Some(i) = app.active {
                         let v = &mut app.views[i];
                         let ctx = ui.ctx().clone();
                         let key = |s| crate::commands::shortcut_label(&ctx, s);
                         use crate::commands::{ACTUAL_SIZE, FIT_WIDTH, NEXT_VIEW, PAGE_LEVEL, PREV_VIEW, ROTATE_CCW, ROTATE_CW, ZOOM_IN, ZOOM_OUT};
-                        ui.label(egui::RichText::new(tl!("Zoom")).color(t.text_faint).small());
+                        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Zoom")).color(t.text_faint).small()));
                         if widgets::menu_item(ui, tl!("Actual size"), &key(ACTUAL_SIZE)).clicked() {
                             v.set_zoom(1.0);
                         }
@@ -587,11 +644,11 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             v.rotate_view(false);
                         }
                         ui.separator();
-                        ui.label(egui::RichText::new(tl!("Page navigation")).color(t.text_faint).small());
-                        if ui.add_enabled(!v.back.is_empty(), egui::Button::new(tl!("Previous view")).shortcut_text(key(PREV_VIEW))).clicked() {
+                        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Page navigation")).color(t.text_faint).small()));
+                        if widgets::menu_entry(ui, !v.back.is_empty(), tl!("Previous view"), Some(&key(PREV_VIEW))).clicked() {
                             v.view_history(false);
                         }
-                        if ui.add_enabled(!v.forward.is_empty(), egui::Button::new(tl!("Next view")).shortcut_text(key(NEXT_VIEW))).clicked() {
+                        if widgets::menu_entry(ui, !v.forward.is_empty(), tl!("Next view"), Some(&key(NEXT_VIEW))).clicked() {
                             v.view_history(true);
                         }
                         ui.separator();
@@ -601,8 +658,8 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         ui.separator();
                     }
                     crate::commands::registry_menu(app, ui, "View");
-                    ui.menu_button(tl!("Display theme"), |ui| theme_menu(app, ui));
-                    ui.menu_button(tl!("Side panels"), |ui| {
+                    widgets::sub_menu(ui, tl!("Display theme"), |ui| theme_menu(app, ui));
+                    widgets::sub_menu(ui, tl!("Side panels"), |ui| {
                         scroll_menu(ui, |ui| {
                             for (p, label) in [
                                 (RightPanel::Comments, tl!("Comments")),
@@ -617,7 +674,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 (RightPanel::Search, tl!("Search")),
                                 (RightPanel::Compare, tl!("Compare")),
                             ] {
-                                if ui.add(widgets::radio(app.right == Some(p), tl!(label))).clicked() {
+                                if widgets::menu_choice(ui, |ui| ui.add(widgets::radio(app.right == Some(p), tl!(label)))).clicked() {
                                     app.choose_right_panel(Some(p));
                                 }
                             }
@@ -625,7 +682,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     });
                 })
             });
-            ui.menu_button(tl!("Help"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Help")));
+            widgets::sub_menu(ui, tl!("Help"), |ui| scroll_menu(ui, |ui| crate::commands::registry_menu(app, ui, "Help")));
         })
     });
 }
@@ -645,7 +702,7 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     );
     let page_count = doc.info.pages.len();
     let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
-    egui::Panel::right("rail")
+    rtl::panel("rail", rtl::Side::End)
         .resizable(false)
         .exact_size(48.0)
         .frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(6, 8)).stroke(Stroke::new(1.0, t.divider)))
@@ -655,7 +712,7 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let selected = app.right == Some(panel) && (app.mode == Mode::Read || app.docking.exposed(crate::docking::Panel::Inspector));
                 let r = icons::button(ui, icon, 34.0, selected, tl!(tip));
                 if has && !selected {
-                    let c = r.rect.right_top() + vec2(-8.0, 8.0);
+                    let c = egui::pos2(rtl::end_x(r.rect, 8.0), r.rect.top() + 8.0);
                     ui.painter().circle_filled(c, 3.0, t.accent);
                 }
                 if r.clicked() {
@@ -799,21 +856,23 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 /// Returns the command a click asks for, for the caller to run.
 fn page_display_menu(ui: &mut egui::Ui, view: &DocView) -> Option<&'static str> {
     let t = Tokens::get(ui.ctx());
-    ui.label(egui::RichText::new(tl!("Page display")).color(t.text_faint).small());
+    widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Page display")).color(t.text_faint).small()));
     let mut picked = None;
     for l in PageLayout::ORDER {
-        if ui.add(widgets::radio(view.layout == l, tl!(l.label()))).clicked() {
+        if widgets::menu_choice(ui, |ui| ui.add(widgets::radio(view.layout == l, tl!(l.label())))).clicked() {
             picked = Some(l.command());
         }
     }
     ui.separator();
     // Continuous scrolling is an independent checkbox over the base layout, as in Acrobat (#752).
     let mut continuous = view.continuous();
-    if ui.add(widgets::checkbox(&mut continuous, tl!("Continuous scrolling"))).changed() {
+    if widgets::menu_choice(ui, |ui| ui.add(widgets::checkbox(&mut continuous, tl!("Continuous scrolling")))).changed() {
         picked = Some("view.continuous");
     }
     let mut cover = view.cover;
-    if ui.add_enabled(view.cover_applies(), widgets::checkbox(&mut cover, tl!("Show cover page in two-page view"))).changed() {
+    if widgets::menu_choice(ui, |ui| ui.add_enabled(view.cover_applies(), widgets::checkbox(&mut cover, tl!("Show cover page in two-page view"))))
+        .changed()
+    {
         picked = Some("view.layout.cover");
     }
     if picked.is_some() {
@@ -827,27 +886,27 @@ fn page_display_menu(ui: &mut egui::Ui, view: &DocView) -> Option<&'static str> 
 fn rail_view_menu(ui: &mut egui::Ui, view: &mut DocView) -> Option<&'static str> {
     let mut picked = None;
     for (id, label) in [("view.fit_width_scrolling", "Fit to width scrolling"), ("view.fit_one_page", "Fit one full page")] {
-        if ui.button(tl!(label)).clicked() {
+        if widgets::menu_entry(ui, true, tl!(label), None).clicked() {
             picked = Some(id);
         }
     }
     ui.separator();
-    if ui.button(tl!("Actual size")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Actual size"), None).clicked() {
         view.set_zoom(1.0);
         ui.close();
     }
-    if ui.button(tl!("Zoom to page level")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Zoom to page level"), None).clicked() {
         view.set_fit(Fit::Page);
         ui.close();
     }
-    if ui.button(tl!("Fit visible")).clicked() {
+    if widgets::menu_entry(ui, true, tl!("Fit visible"), None).clicked() {
         picked = Some("view.fit_visible");
     }
     ui.separator();
     picked = page_display_menu(ui, view).or(picked);
     ui.separator();
     for (id, label) in [("view.read_mode", "Read mode"), ("view.full_screen", "Full screen mode")] {
-        if ui.button(tl!(label)).clicked() {
+        if widgets::menu_entry(ui, true, tl!(label), None).clicked() {
             picked = Some(id);
         }
     }
@@ -907,12 +966,12 @@ mod tab_widths {
         use super::drop_index;
         let slots = three_slots();
         // Centres at 50, 154 and 258.
-        assert_eq!(drop_index(&slots, 0, 10.0), 0, "still over itself");
-        assert_eq!(drop_index(&slots, 0, 160.0), 1, "past the middle tab's centre");
-        assert_eq!(drop_index(&slots, 0, 900.0), 2, "past the end");
-        assert_eq!(drop_index(&slots, 2, -50.0), 0, "before the start");
-        assert_eq!(drop_index(&slots, 2, 100.0), 1, "between the first and middle centres");
-        assert_eq!(drop_index(&[], 0, 100.0), 0);
+        assert_eq!(drop_index(&slots, 0, 10.0, false), 0, "still over itself");
+        assert_eq!(drop_index(&slots, 0, 160.0, false), 1, "past the middle tab's centre");
+        assert_eq!(drop_index(&slots, 0, 900.0, false), 2, "past the end");
+        assert_eq!(drop_index(&slots, 2, -50.0, false), 0, "before the start");
+        assert_eq!(drop_index(&slots, 2, 100.0, false), 1, "between the first and middle centres");
+        assert_eq!(drop_index(&[], 0, 100.0, false), 0);
     }
 
     /// The drop line sits in the gap the tab will land in, and not at all where it already is.
@@ -920,15 +979,52 @@ mod tab_widths {
     fn the_drop_line_marks_the_gap_and_hides_when_nothing_moves() {
         use super::drop_marker;
         let slots = three_slots();
-        assert_eq!(drop_marker(&slots, 0, 0, 4.0), None);
-        assert_eq!(drop_marker(&slots, 1, 1, 4.0), None);
+        assert_eq!(drop_marker(&slots, 0, 0, 4.0, false), None);
+        assert_eq!(drop_marker(&slots, 1, 1, 4.0, false), None);
         // The first tab dropped at the end: after the last tab.
-        assert_eq!(drop_marker(&slots, 0, 2, 4.0), Some(310.0));
+        assert_eq!(drop_marker(&slots, 0, 2, 4.0, false), Some(310.0));
         // The first tab dropped between the middle and the last: in the gap between them.
-        assert_eq!(drop_marker(&slots, 0, 1, 4.0), Some(206.0));
+        assert_eq!(drop_marker(&slots, 0, 1, 4.0, false), Some(206.0));
         // The last tab dropped at the start: before the first tab.
-        assert_eq!(drop_marker(&slots, 2, 0, 4.0), Some(-2.0));
-        assert_eq!(drop_marker(&[], 0, 1, 4.0), None);
+        assert_eq!(drop_marker(&slots, 2, 0, 4.0, false), Some(-2.0));
+        assert_eq!(drop_marker(&[], 0, 1, 4.0, false), None);
+    }
+
+    /// The same three tabs in a mirrored strip: the first is the rightmost, and the strip reads right
+    /// to left (`slots` stay in tab order, so index 0 is at the right).
+    fn three_mirrored_slots() -> Vec<(usize, egui::Rect)> {
+        (0..3).map(|i| (i, egui::Rect::from_min_size(egui::pos2((2 - i) as f32 * 104.0, 0.0), egui::vec2(100.0, 30.0)))).collect()
+    }
+
+    /// Mirrored, the pointer crosses a tab's centre by going left of it: the drop index counts the tabs
+    /// whose centre is right of the pointer (they come first).
+    #[test]
+    fn a_dragged_tab_drops_past_the_centres_it_crossed_going_left_when_mirrored() {
+        use super::drop_index;
+        let slots = three_mirrored_slots();
+        // Centres at 258 (tab 0), 154 (tab 1) and 50 (tab 2).
+        assert_eq!(drop_index(&slots, 0, 300.0, true), 0, "still over itself");
+        assert_eq!(drop_index(&slots, 0, 160.0, true), 0, "not yet left of the middle tab's centre");
+        assert_eq!(drop_index(&slots, 0, 100.0, true), 1, "left of the middle tab's centre");
+        assert_eq!(drop_index(&slots, 0, 10.0, true), 2, "past the end, at the left");
+        assert_eq!(drop_index(&slots, 2, 900.0, true), 0, "before the start, at the right");
+        assert_eq!(drop_index(&slots, 2, 200.0, true), 1, "between the first and middle centres");
+        assert_eq!(drop_index(&[], 0, 100.0, true), 0);
+    }
+
+    /// The line sits in the gap the tab will land in, on the other side of each neighbour.
+    #[test]
+    fn the_drop_line_marks_the_gap_when_mirrored() {
+        use super::drop_marker;
+        let slots = three_mirrored_slots();
+        assert_eq!(drop_marker(&slots, 0, 0, 4.0, true), None);
+        assert_eq!(drop_marker(&slots, 1, 1, 4.0, true), None);
+        // The first tab (rightmost) dropped at the end: left of the last tab, which is at x 0.
+        assert_eq!(drop_marker(&slots, 0, 2, 4.0, true), Some(-2.0));
+        // The first tab dropped between the middle and the last: in the gap between them.
+        assert_eq!(drop_marker(&slots, 0, 1, 4.0, true), Some(102.0));
+        // The last tab dropped at the start: right of the first tab, which ends at 308.
+        assert_eq!(drop_marker(&slots, 2, 0, 4.0, true), Some(310.0));
     }
 
     #[test]

@@ -116,7 +116,7 @@ fn clusters(s: &str) -> Vec<Cluster> {
 /// Whether the line reads right to left as a whole: more right-to-left letters than
 /// left-to-right ones. Counting (not the first strong character) gives the same answer for a
 /// line in either order, so reading a line and writing it back agree on its direction.
-pub(crate) fn rtl_base(text: &str) -> bool {
+pub fn rtl_base(text: &str) -> bool {
     let (mut r, mut l) = (0usize, 0usize);
     for c in text.chars() {
         match class(c) {

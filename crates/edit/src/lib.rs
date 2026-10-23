@@ -12,11 +12,15 @@
 //! marked-content sequences before the new mark.
 //!
 //! Text uses standard Helvetica (WinAnsi) added to the page resources as `/PCHelv`.
+//!
+//! Arabic in header & footer text (Bates prefixes and suffixes included) and in watermarks is shaped
+//! with the craft-fonts Arabic face and drawn from Type 3 fonts, one `/ActualText` span per line,
+//! with the Latin parts still in `/PCHelv` (the `stamped` module); without the face it is refused.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use pdfcraft_cos::{Dict, Document, Object, Stream};
-use pdfcraft_fonts::{helvetica_width, literal, win_ansi};
+use pdfcraft_fonts::{literal, win_ansi};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum EditError {
@@ -27,6 +31,12 @@ pub enum EditError {
     Invalid(String),
     #[error("{0}")]
     Cos(#[from] pdfcraft_cos::CosError),
+}
+
+impl From<pdfcraft_fonts::shaped_text::ShapedTextError> for EditError {
+    fn from(e: pdfcraft_fonts::shaped_text::ShapedTextError) -> Self {
+        EditError::Invalid(e.0)
+    }
 }
 
 /// The kinds of page marks.
@@ -75,13 +85,15 @@ impl Default for HeaderFooter {
 }
 
 impl HeaderFooter {
-    /// The first character [`add_header_footer`] would refuse, because the standard fonts can't
-    /// draw it (#125). Tokens only add ASCII (Bates prefixes and suffixes are part of the
+    /// The first character [`add_header_footer`] would refuse, because it can't draw it (#125):
+    /// the standard fonts draw Western European text, and Arabic is shaped with the craft-fonts
+    /// Arabic face (the first Arabic letter is named when this build lacks the face or the face
+    /// lacks the letter). Tokens only add ASCII (Bates prefixes and suffixes are part of the
     /// template), so checking the templates, split as `expand`'s output is, covers every page
     /// (and a `\r` that would be drawn is refused too). The dialog asks this too, so its preview
     /// never offers text that applying refuses (#2013).
     pub fn first_undrawable(&self) -> Option<char> {
-        self.text.iter().flat_map(|t| t.lines()).find_map(pdfcraft_fonts::first_non_win_ansi)
+        self.text.iter().flat_map(|t| t.lines()).find_map(stamped::first_undrawable)
     }
 }
 
@@ -117,12 +129,13 @@ pub struct Watermark {
 }
 
 impl Watermark {
-    /// The first character of a text watermark [`add_watermark`] would refuse, because the
-    /// standard fonts can't draw it (#125). A picture watermark draws no text.
+    /// The first character of a text watermark [`add_watermark`] would refuse, because it can't
+    /// draw it (#125): see [`HeaderFooter::first_undrawable`] for Arabic. A picture watermark draws
+    /// no text.
     pub fn first_undrawable(&self) -> Option<char> {
         match self.source {
             Some(_) => None,
-            None => self.text.trim().lines().find_map(pdfcraft_fonts::first_non_win_ansi),
+            None => self.text.trim().lines().find_map(stamped::first_undrawable),
         }
     }
 }
@@ -632,30 +645,49 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
             u64::MAX
         )));
     }
+    let count = all.len();
+    // The lines of page `k` of the run, by slot, tokens expanded: what is laid out and drawn.
+    let slot_lines = |k: usize| -> Result<Vec<(usize, Vec<String>)>, EditError> {
+        let number =
+            u32::try_from(u64::from(hf.start_number) + k as u64).map_err(|_| EditError::Invalid("the header page numbers are too large".into()))?;
+        let bates = bates0.checked_add(k as u64).ok_or_else(|| EditError::Invalid("the Bates numbers are too large".into()))?;
+        Ok(hf
+            .text
+            .iter()
+            .enumerate()
+            .filter(|(_, template)| !template.trim().is_empty())
+            .map(|(slot, template)| (slot, expand(template, number, count, bates, cx).lines().map(str::to_owned).collect()))
+            .collect())
+    };
+    // Arabic lines are shaped once for the whole run, before anything is changed.
+    let shaped = if hf.text.iter().any(|t| pdfcraft_fonts::shaped_text::has_arabic(t)) {
+        // Lazily, page by page: `prepare` stops at its size cap instead of a run of many pages
+        // with a long template holding every expansion at once.
+        let arabic = (0..pages.len()).flat_map(|k| match slot_lines(k) {
+            Ok(slots) => slots.into_iter().flat_map(|(_, lines)| lines).map(Ok).collect::<Vec<_>>(),
+            Err(e) => vec![Err(e)],
+        });
+        stamped::Shaped::prepare(doc, pages, arabic)?
+    } else {
+        None
+    };
     if replace {
         remove_marks(doc, pages, MarkKind::HeaderFooter)?;
     }
     let all = page_list(doc);
-    let count = all.len();
     for (k, &i) in pages.iter().enumerate() {
         let page = &all[i];
         let (w, h) = page.display_size(doc);
-        let number =
-            u32::try_from(u64::from(hf.start_number) + k as u64).map_err(|_| EditError::Invalid("the header page numbers are too large".into()))?;
-        let bates = bates0.checked_add(k as u64).ok_or_else(|| EditError::Invalid("the Bates numbers are too large".into()))?;
         let size = hf.font_size;
         let [top, bottom, left, right] = hf.margins;
         let mut body: Vec<u8> = format!("BT\n/PCHelv {} Tf\n{}\n", n(size), rgb(hf.color)).into_bytes();
+        let mut current = String::from("PCHelv");
         let mut underlines = String::new();
-        for (slot, template) in hf.text.iter().enumerate() {
-            if template.trim().is_empty() {
-                continue;
-            }
-            let lines: Vec<String> = expand(template, number, count, bates, cx).lines().map(str::to_owned).collect();
+        for (slot, lines) in slot_lines(k)? {
             let header = slot < 3;
             let line_h = size * 1.2;
             for (li, line) in lines.iter().enumerate() {
-                let tw = helvetica_width(line, size);
+                let tw = stamped::line_width(line, size);
                 let x = match slot % 3 {
                     0 => left,
                     1 => (w - tw) / 2.0,
@@ -663,7 +695,7 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
                 };
                 // Headers hang below the top margin; footers sit on the bottom margin.
                 let y = if header { h - top - size * 0.8 - li as f64 * line_h } else { bottom + (lines.len() - 1 - li) as f64 * line_h };
-                body.extend(text_op(x, y, line));
+                stamped::draw(&mut body, shaped.as_ref(), x, y, line, size, &mut current);
                 if hf.underline {
                     underlines.push_str(&format!("{} {} {} {} re f\n", n(x), n(y - size * 0.15), n(tw), n((size * 0.06).max(0.4))));
                 }
@@ -677,6 +709,9 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
         content.extend(body);
         content.extend_from_slice(END.as_bytes());
         add_resources(doc, page, None, None)?;
+        if let Some(shaped) = &shaped {
+            shaped.add_fonts(doc, &page_list(doc)[i])?;
+        }
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::HeaderFooter, content, false)?;
     }
@@ -702,11 +737,13 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
     {
         return Err(EditError::Invalid("invalid watermark settings".into()));
     }
+    let lines: Vec<&str> = text.lines().collect();
+    // Arabic lines are shaped once for every page, before anything is changed.
+    let shaped = if wm.source.is_none() { stamped::Shaped::prepare(doc, pages, lines.iter().map(|l| Ok((*l).to_owned())))? } else { None };
     if replace {
         remove_marks(doc, pages, MarkKind::Watermark)?;
     }
     let opacity = wm.opacity.clamp(0.0, 1.0);
-    let lines: Vec<&str> = text.lines().collect();
     for &i in pages {
         let page = page_list(doc)[i].clone();
         let (w, h) = page.display_size(doc);
@@ -721,7 +758,7 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
             place(doc, page, MarkKind::Watermark, content.into_bytes(), wm.behind)?;
             continue;
         }
-        let widest = lines.iter().map(|l| helvetica_width(l, 1.0)).fold(0.0, f64::max).max(0.01);
+        let widest = lines.iter().map(|l| stamped::line_width(l, 1.0)).fold(0.0, f64::max).max(0.01);
         let size = if wm.font_size > 0.0 { wm.font_size } else { ((w * w + h * h).sqrt() * 0.5 / widest).clamp(6.0, 300.0) };
         let (s, c) = wm.rotation.to_radians().sin_cos();
         let (cx, cy) = (w / 2.0 + wm.offset[0], h / 2.0 + wm.offset[1]);
@@ -743,13 +780,17 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
         );
         let line_h = size * 1.15;
         let total = line_h * (lines.len() as f64 - 1.0);
+        let mut current = String::from("PCHelv");
         for (li, line) in lines.iter().enumerate() {
-            let tw = helvetica_width(line, size);
-            content.extend(text_op(-tw / 2.0, total / 2.0 - li as f64 * line_h - size * 0.35, line));
+            let tw = stamped::line_width(line, size);
+            stamped::draw(&mut content, shaped.as_ref(), -tw / 2.0, total / 2.0 - li as f64 * line_h - size * 0.35, line, size, &mut current);
         }
         content.extend_from_slice(b"ET\n");
         content.extend_from_slice(END.as_bytes());
         add_resources(doc, &page, Some(opacity), None)?;
+        if let Some(shaped) = &shaped {
+            shaped.add_fonts(doc, &page_list(doc)[i])?;
+        }
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::Watermark, content, wm.behind)?;
     }
@@ -797,6 +838,18 @@ pub fn remove_marks(doc: &mut Document, pages: &[usize], kind: MarkKind) -> Resu
         let page = &all[i];
         let list = contents(doc, page)?;
         let before = list.len();
+        // The generated fonts the removed marks drew Arabic with go with them (only marks that
+        // draw text have any).
+        let draws_text = matches!(kind, MarkKind::HeaderFooter | MarkKind::Watermark);
+        let fonts: std::collections::HashSet<Vec<u8>> = list
+            .iter()
+            .filter(|o| draws_text && stream_tag(doc, o).as_deref() == Some(kind.tag()))
+            .filter_map(|o| match &*doc.resolve(o) {
+                Object::Stream(s) => s.decoded_within(ISOLATION_MAX_BYTES).ok(),
+                _ => None,
+            })
+            .flat_map(|data| stamped::font_names(&data))
+            .collect();
         let mut kept: Vec<Object> = list.into_iter().filter(|o| stream_tag(doc, o).as_deref() != Some(kind.tag())).collect();
         removed += before - kept.len();
         // Strip only wrapper pairs whose close ends the list (after stripping the pairs after
@@ -837,6 +890,7 @@ pub fn remove_marks(doc: &mut Document, pages: &[usize], kind: MarkKind) -> Resu
         }
         if before != kept.len() {
             doc.update_dict(page.obj, |d| d.set(b"Contents".to_vec(), Object::Array(kept)))?;
+            stamped::drop_fonts(doc, page, &fonts)?;
         }
     }
     Ok(removed)
@@ -848,6 +902,7 @@ pub fn marks_present(doc: &Document) -> Vec<MarkKind> {
 }
 
 pub mod objects;
+mod stamped;
 pub use objects::{EditableObject, MAX_MOVE_OBJECTS, ObjectKind, ObjectTarget, editable_objects, move_objects};
 
 mod flatten;
@@ -858,6 +913,7 @@ pub mod bidi;
 pub mod indic;
 mod linebreak;
 pub mod text;
+mod text_shaped;
 pub use text::{
     BlockStyle, LineEdit, MAX_FORM_DEPTH, MAX_FORM_VISITS, RangeStyle, ReadingBlocks, TextBlock, TextLine, clear_block, reading_blocks,
     reading_blocks_checked, replace_block, replace_line, rewrite_block, text_blocks, text_lines,
@@ -871,4 +927,16 @@ pub use added::{
 #[cfg(test)]
 mod marked_isolation_tests;
 #[cfg(test)]
+mod stamped_shaped_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_baseline_tests;
+#[cfg(test)]
+mod text_justify_tests;
+#[cfg(test)]
+mod text_layout_tests;
+#[cfg(test)]
+mod text_shaped_multilook_tests;
+#[cfg(test)]
+mod text_shaped_tests;

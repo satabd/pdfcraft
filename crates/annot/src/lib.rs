@@ -18,7 +18,10 @@ use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 
 pub mod appearance;
 pub mod links;
+mod shaped;
 
+#[cfg(test)]
+mod shaped_tests;
 #[cfg(test)]
 mod tests;
 
@@ -1200,7 +1203,11 @@ pub fn add_annotation(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> R
             let size = if font_size.is_finite() && *font_size > 0.0 { font_size.clamp(1.0, 400.0) } else { 12.0 };
             let [r, g, b] = style.color.map(|x| x.clamp(0.0, 1.0));
             d.set(b"DA".to_vec(), PdfString::literal(format!("{} {} {} rg /Helv {} Tf", n(r), n(g), n(b), n(size)).into_bytes()));
-            d.set(b"Q".to_vec(), Object::Int(0));
+            // Left-aligned unless the text runs right to left: then no alignment is stated, and
+            // the appearance right-aligns it (`appearance::build`), as the text reads.
+            if !shaped::rtl_text(&new.contents) {
+                d.set(b"Q".to_vec(), Object::Int(0));
+            }
             if let Some(f) = style.fill {
                 d.set(b"C".to_vec(), rgb(f));
             }
@@ -1477,13 +1484,21 @@ fn rich_text(d: &mut Dict) {
         (col[1].clamp(0.0, 1.0) * 255.0).round() as u8,
         (col[2].clamp(0.0, 1.0) * 255.0).round() as u8
     );
+    // No `/Q` and right-to-left text: right-aligned, as the appearance draws it.
     let align = match d.get(b"Q").and_then(Object::as_int) {
         Some(1) => "center",
         Some(2) => "right",
+        None if shaped::rtl_text(&text) => "right",
         _ => "left",
     };
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-    let body: String = text.split('\n').map(|line| format!("<p dir=\"ltr\">{}</p>", esc(line.trim_end_matches('\r')))).collect();
+    let body: String = text
+        .split('\n')
+        .map(|line| {
+            let line = line.trim_end_matches('\r');
+            format!("<p dir=\"{}\">{}</p>", if shaped::rtl_text(line) { "rtl" } else { "ltr" }, esc(line))
+        })
+        .collect();
     let style = format!(
         "font-size:{}pt;text-align:{align};color:{hex};font-weight:normal;font-style:normal;font-family:Helvetica;font-stretch:normal",
         n(size)

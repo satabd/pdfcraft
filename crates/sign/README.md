@@ -22,7 +22,11 @@ for s in signatures(&doc, &bytes, &trust) {                                // li
   An existing unsigned field or a new one (visible with Acrobat's name-and-details appearance,
   or invisible); certification with DocMDP P=1/2/3. A visible signature can show a `Graphic`
   where the large name would be: drawn strokes, filled outlines (a typed signature) or RGBA
-  pixels (an image XObject with a soft mask), checked and size-capped first. The document is written incrementally
+  pixels (an image XObject with a soft mask), checked and size-capped first. Arabic in the name,
+  reason, location or labels is drawn shaped (`shaped`: Type 3 fonts from the craft-fonts face in the
+  appearance's resources, one `/ActualText` span per line, right-to-left lines right-aligned, wrapped
+  on shaped widths; the signed bytes stay deterministic) and refused as before when the build has no
+  Arabic face. The document is written incrementally
   with a zero-filled `/Contents` and fixed-width `/ByteRange`, which are then patched in
   place. Encrypted documents are refused for now.
 - **Timestamps (PAdES B-T):** the `timestamp` module builds and parses RFC 3161 requests,

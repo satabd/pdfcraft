@@ -13,7 +13,7 @@ use pdfcraft_engine::{DocId, Edit};
 use pdfcraft_render::{DestView, DocInfo, LayerOp, LinkTarget, PRINT_TAG, PageText, RenderPool, RenderRequest, RequestKind, Tile, device_pixels};
 
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, QuickTool, RightPanel, comments, icons, widgets};
+use crate::{PdfCraftApp, QuickTool, RightPanel, comments, icons, rtl, widgets};
 
 /// Logical pixels per PDF point at 100% (96 dpi, like browsers).
 pub const PT: f32 = 96.0 / 72.0;
@@ -2362,7 +2362,10 @@ fn page_scroll<R>(
     id: egui::Id,
     draw: impl FnOnce(&mut egui::Ui, egui::Rect) -> R,
 ) -> egui::scroll_area::ScrollAreaOutput<R> {
-    ui.scope_builder(egui::UiBuilder::new().id(id), |ui| scroll.show_viewport(ui, draw)).inner
+    // Both ways: the vertical bar is at the start edge of a mirrored interface (the left), and the
+    // bottom bar is drawn with it, since the one setting that hides egui's bar hides both.
+    ui.scope_builder(egui::UiBuilder::new().id(id), |ui| crate::widgets::scroll_area_with(ui, scroll, true, |area, ui| area.show_viewport(ui, draw)))
+        .inner
 }
 
 pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
@@ -3628,12 +3631,12 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     let others = view.prepare.also.clone();
                     let anchor = (name.clone(), wi);
                     let mut pick = |ui: &mut egui::Ui, op: A, label: &str| {
-                        if ui.add_enabled(can_modify, egui::Button::new(tl!(label))).clicked() {
+                        if widgets::menu_entry(ui, can_modify, tl!(label), None).clicked() {
                             view.pending_edit = crate::prepare::arrange(&form, &anchor, &others, op);
                             ui.close();
                         }
                     };
-                    ui.menu_button(tl!("Align"), |ui| {
+                    widgets::sub_menu(ui, tl!("Align"), |ui| {
                         pick(ui, A::AlignLeft, "Left");
                         pick(ui, A::AlignRight, "Right");
                         pick(ui, A::AlignTop, "Top");
@@ -3641,46 +3644,46 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                         pick(ui, A::AlignCenterV, "Center vertically");
                         pick(ui, A::AlignCenterH, "Center horizontally");
                     });
-                    ui.menu_button(tl!("Distribute"), |ui| {
+                    widgets::sub_menu(ui, tl!("Distribute"), |ui| {
                         pick(ui, A::DistributeH, "Horizontally");
                         pick(ui, A::DistributeV, "Vertically");
                     });
-                    ui.menu_button(tl!("Set Fields to Same Size"), |ui| {
+                    widgets::sub_menu(ui, tl!("Set Fields to Same Size"), |ui| {
                         pick(ui, A::SameHeight, "Height");
                         pick(ui, A::SameWidth, "Width");
                         pick(ui, A::SameSize, "Both");
                     });
                     ui.separator();
                 }
-                if ui.button(tl!("Properties…")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Properties…"), None).clicked() {
                     field_menu = Some(FieldMenu::Properties);
                     ui.close();
                 }
-                if ui.add_enabled(can_modify, egui::Button::new(tl!("Duplicate…"))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!("Duplicate…"), None).clicked() {
                     field_menu = Some(FieldMenu::Duplicate(name.clone()));
                     ui.close();
                 }
                 ui.separator();
                 let delete = if view.prepare.also.is_empty() { "Delete" } else { "Delete selected fields" };
-                if ui.add_enabled(can_modify, egui::Button::new(tl!(delete))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!(delete), None).clicked() {
                     view.pending_edit = crate::prepare::delete_selected(view);
                     ui.close();
                 }
                 return;
             }
             if let Some((page, index)) = view.links.context {
-                if ui.button(tl!("Properties…")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Properties…"), None).clicked() {
                     view.links.open_existing = Some((page, index));
                     ui.close();
                 }
-                if ui.add_enabled(can_modify, egui::Button::new(tl!("Delete"))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!("Delete"), None).clicked() {
                     view.pending_edit = Some(Edit::DeleteLink { page, index });
                     view.links.selected = None;
                     view.links.context = None;
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(can_modify, egui::Button::new(tl!("Remove all links"))).clicked() {
+                if widgets::menu_entry(ui, can_modify, tl!("Remove all links"), None).clicked() {
                     view.pending_edit = Some(Edit::RemoveLinks { pages: None });
                     view.links.selected = None;
                     view.links.context = None;
@@ -3691,7 +3694,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             if view.comments.selected.is_none() {
                 let selected = view.selected_text().is_some_and(|t| !t.is_empty());
                 let key = crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY);
-                if ui.add_enabled(can_copy && selected, egui::Button::new(tl!("Copy")).shortcut_text(key)).clicked() {
+                if widgets::menu_entry(ui, can_copy && selected, tl!("Copy"), Some(&key)).clicked() {
                     copy_selected = true;
                     ui.close();
                 }
@@ -3714,11 +3717,11 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
                     }
                 };
                 if let Some(image) = hit {
-                    if ui.button(tl!("Copy Image")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Copy Image"), None).clicked() {
                         copy_image = Some(comments::CanvasAction::CopyImage(page, image));
                         ui.close();
                     }
-                    if ui.button(tl!("Copy Image in Original Format")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Copy Image in Original Format"), None).clicked() {
                         copy_image = Some(comments::CanvasAction::CopyImageFile(page, image));
                         ui.close();
                     }
@@ -3882,7 +3885,12 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         egui::Area::new(egui::Id::new("canvas-hover")).order(egui::Order::Tooltip).fixed_pos(pos + vec2(14.0, 16.0)).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_max_width(320.0);
-                ui.label(text);
+                if widgets::needs_bidi(&text) {
+                    let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                    widgets::wrapped_label(ui, &text, font, colour);
+                } else {
+                    ui.label(text);
+                }
             });
         });
     }
@@ -4326,7 +4334,7 @@ fn find_bar(view: &mut DocView, pages: usize, area: Rect, ui: &mut egui::Ui, t: 
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(icons::image("search", 16.0, t.text_muted));
-                        let edit = egui::TextEdit::singleline(&mut find.query)
+                        let edit = crate::widgets::BidiEdit::singleline(&mut find.query)
                             .id(egui::Id::new("find-input"))
                             .hint_text(tl!("Find text"))
                             .desired_width(220.0)
@@ -4373,8 +4381,10 @@ fn find_bar(view: &mut DocView, pages: usize, area: Rect, ui: &mut egui::Ui, t: 
                         }
                         let opts = icons::button(ui, "settings-2", 26.0, find.case_sensitive || find.whole_words, tl!("Find options"));
                         egui::Popup::menu(&opts).show(|ui| {
-                            let a = ui.add(widgets::checkbox(&mut find.whole_words, tl!("Whole words only"))).changed();
-                            let b = ui.add(widgets::checkbox(&mut find.case_sensitive, tl!("Case-sensitive"))).changed();
+                            let a =
+                                widgets::menu_choice(ui, |ui| ui.add(widgets::checkbox(&mut find.whole_words, tl!("Whole words only")))).changed();
+                            let b =
+                                widgets::menu_choice(ui, |ui| ui.add(widgets::checkbox(&mut find.case_sensitive, tl!("Case-sensitive")))).changed();
                             if a || b {
                                 // Search again with the new options.
                                 find.case_query.clear();
@@ -4395,6 +4405,19 @@ fn find_bar(view: &mut DocView, pages: usize, area: Rect, ui: &mut egui::Ui, t: 
     }
     if let Some(forward) = step {
         view.find_step(forward);
+    }
+}
+
+/// The contents of one row of a tool flyout (180 by 28 points): the icon at the start edge, the
+/// label after it and, on the tool in use, a check mark at the end edge.
+fn flyout_row_contents(ui: &egui::Ui, body: Rect, icon: &str, label: &crate::i18n::Logical<'_>, on: bool, t: &Tokens) {
+    icons::paint(ui, rtl::start_rect(body, 8.0, 6.0, vec2(16.0, 16.0)), icon, 16.0, t.text);
+    let reserve = if on { 28.0 } else { 8.0 };
+    let max_width = (body.width() - 34.0 - reserve).max(0.0);
+    crate::widgets::paint_start(ui, rtl::start_center(body, 34.0), label, theme::regular(13.0), t.text, max_width);
+    if on {
+        let x = if rtl::mirrored() { body.left() + 10.0 } else { body.right() - 24.0 };
+        icons::paint(ui, Rect::from_min_size(egui::pos2(x, body.top() + 7.0), vec2(14.0, 14.0)), "check", 14.0, t.accent);
     }
 }
 
@@ -4442,12 +4465,15 @@ fn notices(
         egui::Frame::NONE.fill(t.accent_soft).inner_margin(egui::Margin::symmetric(14, 7)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add(icons::image("rotate-cw", 16.0, t.accent_text));
-                ui.label(
-                    egui::RichText::new(tl!(
-                        "This file changed on disk. Reload shows the new version and drops your unsaved changes; Save replaces it with this version."
-                    ))
-                    .color(t.text),
+                let text = tl_logical!(
+                    "This file changed on disk. Reload shows the new version and drops your unsaved changes; Save replaces it with this version."
                 );
+                if crate::bidi::has_rtl(&text) {
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    widgets::logical_label(ui, &text, font, t.text, false);
+                } else {
+                    ui.label(egui::RichText::new(text.as_str()).color(t.text));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::button(ui, "x", 22.0, false, tl!("Dismiss")).clicked() {
                         view.disk_changed = false;
@@ -4463,13 +4489,15 @@ fn notices(
     if let Some(snap) = view.snapshot.as_ref() {
         let mut close = false;
         let text = if snap.kind == SnapshotKind::SignedVersion {
-            crate::i18n::fmt(
-                tl!("You are viewing the signed version of “{from}” (revision {rev}). It is a snapshot: changes here won't affect the original."),
+            crate::i18n::fmt_logical(
+                &tl_logical!(
+                    "You are viewing the signed version of “{from}” (revision {rev}). It is a snapshot: changes here won't affect the original."
+                ),
                 &[("from", &snap.from), ("rev", &snap.revision.to_string())],
             )
         } else {
-            crate::i18n::fmt(
-                tl!("You are viewing revision {rev} of “{from}”. It is a snapshot: changes here won't affect the original."),
+            crate::i18n::fmt_logical(
+                &tl_logical!("You are viewing revision {rev} of “{from}”. It is a snapshot: changes here won't affect the original."),
                 &[("rev", &snap.revision.to_string()), ("from", &snap.from)],
             )
         };
@@ -4484,7 +4512,7 @@ fn notices(
     }
     if let Some((icon, color, template, arg)) = signed {
         let mut open = false;
-        notice_bar(ui, t, icon, color, crate::i18n::fmt(tl!(template), &[("by", &arg)]), |ui| {
+        notice_bar(ui, t, icon, color, crate::i18n::fmt_logical(&crate::i18n::t_logical(template), &[("by", &arg)]), |ui| {
             if crate::widgets::pill_button(ui, tl!("Signature panel"), false).clicked() {
                 open = true;
             }
@@ -4505,33 +4533,33 @@ fn notices(
     // What the document is as a form, if it is one: what the bar says first, secured or not.
     let form = if let Some(x) = xfa {
         let lang = crate::i18n::current();
-        let pages = crate::i18n::trn(lang, x.pages as u64, "{n} page", "{n} pages");
-        let fields = crate::i18n::trn(lang, x.fields as u64, "{n} field", "{n} fields");
-        let mut text =
-            crate::i18n::fmt(tl!("Dynamic XFA form laid out from its template: {pages}, {fields}."), &[("pages", &pages), ("fields", &fields)]);
+        let pages = crate::i18n::trn_logical(lang, x.pages as u64, "{n} page", "{n} pages");
+        let fields = crate::i18n::trn_logical(lang, x.fields as u64, "{n} field", "{n} fields");
+        let mut text = crate::i18n::fmt_logical(
+            &tl_logical!("Dynamic XFA form laid out from its template: {pages}, {fields}."),
+            &[("pages", &pages), ("fields", &fields)],
+        );
         if !x.warnings.is_empty() {
-            text.push(' ');
-            text.push_str(&x.warnings.join("; "));
-            text.push('.');
+            text.push_str(&format!(" {}.", x.warnings.join("; ")));
         }
         Some(("text-cursor-input", text, true))
     } else if info.xfa == Some(pdfcraft_render::Xfa::Dynamic) {
         Some((
             "triangle-alert",
-            tl!("This is a dynamic XFA form, which PdfCraft can't display yet. What you see is the file's placeholder page.").to_string(),
+            tl_logical!("This is a dynamic XFA form, which PdfCraft can't display yet. What you see is the file's placeholder page."),
             false,
         ))
     } else if info.xfa == Some(pdfcraft_render::Xfa::Static) {
         Some((
             "text-cursor-input",
-            tl!("XFA form: its fields and its XFA data are kept in step, so other viewers show what you fill in.").to_string(),
+            tl_logical!("XFA form: its fields and its XFA data are kept in step, so other viewers show what you fill in."),
             true,
         ))
     } else if info.fields.iter().any(|f| f.kind != pdfcraft_render::FieldKind::PushButton) {
         // Push buttons alone (LaTeX `animate` frames, navigation buttons) leave nothing to fill in.
         Some((
             "text-cursor-input",
-            crate::i18n::fmt(tl!("This document contains {n} interactive form fields."), &[("n", &info.fields.len().to_string())]),
+            crate::i18n::fmt_logical(&tl_logical!("This document contains {n} interactive form fields."), &[("n", &info.fields.len().to_string())]),
             true,
         ))
     } else {
@@ -4542,17 +4570,21 @@ fn notices(
     } else if secured {
         // A secured form still says what it is, and keeps Highlight fields: the security
         // sentence follows the form's.
-        let security = tl!("This document is secured. Some changes are restricted by its security settings.");
+        let security = tl_logical!("This document is secured. Some changes are restricted by its security settings.");
         Some(match form {
-            Some((icon, text, fields)) => (icon, format!("{text} {security}"), fields),
-            None => ("lock", security.to_string(), false),
+            Some((icon, mut text, fields)) => {
+                text.push_str(&format!(" {security}"));
+                (icon, text, fields)
+            }
+            None => ("lock", security, false),
         })
     } else if form.is_some() {
         form
     } else if repaired {
-        Some(("bandage", tl!("This file was damaged and has been repaired. Saving keeps the repaired version.").to_string(), false))
+        Some(("bandage", tl_logical!("This file was damaged and has been repaired. Saving keeps the repaired version."), false))
     } else if !info.warnings.is_empty() {
-        Some(("triangle-alert", info.warnings[0].clone(), false))
+        // The engine's own wording, in English: never reordered.
+        Some(("triangle-alert", crate::i18n::Logical::from(info.warnings[0].clone()), false))
     } else {
         None
     };
@@ -4599,7 +4631,12 @@ fn notices(
 /// of running under the buttons and past the document area into the side panel (#785). The
 /// buttons are centred on a row of button height, and the message's first line is centred on
 /// the same row; a wrapped message grows the bar downwards.
-fn notice_bar(ui: &mut egui::Ui, t: &Tokens, icon: &str, icon_color: Color32, text: String, buttons: impl FnOnce(&mut egui::Ui)) {
+///
+/// `text` is in logical order ([`tl_logical!`], [`crate::i18n::fmt_logical`]; a document's name
+/// goes in through `fmt_logical`): a right-to-left sentence is wrapped and set against the right
+/// edge of its column ([`widgets::logical_label`]), and a name in Arabic reads right inside an
+/// English sentence.
+fn notice_bar(ui: &mut egui::Ui, t: &Tokens, icon: &str, icon_color: Color32, text: crate::i18n::Logical<'_>, buttons: impl FnOnce(&mut egui::Ui)) {
     const ROW: f32 = 28.0;
     const ICON: f32 = 16.0;
     egui::Frame::NONE.fill(t.accent_soft).inner_margin(egui::Margin::symmetric(14, 7)).show(ui, |ui| {
@@ -4615,9 +4652,9 @@ fn notice_bar(ui: &mut egui::Ui, t: &Tokens, icon: &str, icon_color: Color32, te
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                     let (slot, _) = ui.allocate_exact_size(vec2(ICON, line), Sense::hover());
                     icons::paint(ui, Rect::from_center_size(slot.center(), vec2(ICON, ICON)), icon, ICON, icon_color);
-                    let label = egui::Label::new(egui::RichText::new(text).color(t.text));
                     // Wrapping into a sliver would stack the message a few letters per line.
-                    ui.add(if ui.available_width() >= 120.0 { label.wrap() } else { label.truncate() });
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    widgets::logical_label(ui, &text, font, t.text, ui.available_width() < 120.0);
                 });
             });
         });
@@ -4669,25 +4706,7 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                                     let press = theme::Press::track(ui, &click);
                                     press.wash(ui, row, 4, on);
                                     let body = row.translate(press.offset());
-                                    icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 6.0), vec2(16.0, 16.0)), tool.icon(), 16.0, t.text);
-                                    let reserve = if on { 28.0 } else { 8.0 };
-                                    crate::widgets::paint_left(
-                                        ui,
-                                        body.left_center() + vec2(34.0, 0.0),
-                                        tl!(tool.label()),
-                                        theme::regular(13.0),
-                                        t.text,
-                                        (row.width() - 34.0 - reserve).max(0.0),
-                                    );
-                                    if on {
-                                        icons::paint(
-                                            ui,
-                                            Rect::from_min_size(body.right_top() + vec2(-24.0, 7.0), vec2(14.0, 14.0)),
-                                            "check",
-                                            14.0,
-                                            t.accent,
-                                        );
-                                    }
+                                    flyout_row_contents(ui, body, tool.icon(), &tl_logical!(tool.label()), on, &t);
                                     let click = theme::hand(click);
                                     let info = tl!(tool.label()).to_string();
                                     click.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, info.clone()));
@@ -4748,25 +4767,7 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                                 let press = theme::Press::track(ui, &click);
                                 press.wash(ui, row, 4, on);
                                 let body = row.translate(press.offset());
-                                icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 6.0), vec2(16.0, 16.0)), tool.icon(), 16.0, t.text);
-                                let reserve = if on { 28.0 } else { 8.0 };
-                                crate::widgets::paint_left(
-                                    ui,
-                                    body.left_center() + vec2(34.0, 0.0),
-                                    tl!(tool.label()),
-                                    theme::regular(13.0),
-                                    t.text,
-                                    (row.width() - 34.0 - reserve).max(0.0),
-                                );
-                                if on {
-                                    icons::paint(
-                                        ui,
-                                        Rect::from_min_size(body.right_top() + vec2(-24.0, 7.0), vec2(14.0, 14.0)),
-                                        "check",
-                                        14.0,
-                                        t.accent,
-                                    );
-                                }
+                                flyout_row_contents(ui, body, tool.icon(), &tl_logical!(tool.label()), on, &t);
                                 let click = theme::hand(click);
                                 let info = tl!(tool.label()).to_string();
                                 click.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, info.clone()));
@@ -4857,10 +4858,10 @@ fn organize_toolbar(view: &mut DocView, info: &DocInfo, editable: bool, dirty: b
             ui.add_sized([150.0, 30.0], egui::Label::new(egui::RichText::new(label).font(theme::medium(13.0)).color(t.text_muted)).truncate());
             ui.add_enabled_ui(editable, |ui| {
                 ui.add_space(8.0);
-                if ui.add_enabled_ui(first > 0, |ui| icons::button(ui, "chevron-left", 30.0, false, tl!("Move earlier"))).inner.clicked() {
+                if ui.add_enabled_ui(first > 0, |ui| icons::button_fixed(ui, "chevron-left", 30.0, false, tl!("Move earlier"))).inner.clicked() {
                     view.pending_edit = Some(Edit::MovePages { pages: targets.clone(), to: first - 1 });
                 }
-                if ui.add_enabled_ui(last + 1 < n, |ui| icons::button(ui, "chevron-right", 30.0, false, tl!("Move later"))).inner.clicked() {
+                if ui.add_enabled_ui(last + 1 < n, |ui| icons::button_fixed(ui, "chevron-right", 30.0, false, tl!("Move later"))).inner.clicked() {
                     view.pending_edit = Some(Edit::MovePages { pages: targets.clone(), to: first + 1 });
                 }
             });
@@ -4985,248 +4986,259 @@ fn organize_grid(view: &mut DocView, info: &DocInfo, editable: bool, dirty: bool
     let (mut in_view, mut sharper): (Vec<(usize, f32)>, Vec<RenderRequest>) = (Vec::new(), Vec::new());
     // The source cell can scroll out of the virtualized rows during a drag.
     let mut drop = view.org_drag.is_some() && ui.input(|i| i.pointer.primary_released());
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show_viewport(ui, |ui, clip| {
-        if middle_gesture {
-            let opacity = ui.opacity();
-            ui.disable();
-            ui.set_opacity(opacity);
-        }
-        if auto_delta != Vec2::ZERO {
-            ui.scroll_with_delta_animation(auto_delta, egui::style::ScrollAnimation::none());
-        }
-        ui.add_space(20.0);
-        let cols = ((ui.available_width() - 40.0) / cell.x).floor().max(1.0) as usize;
-        let rows = info.pages.len().div_ceil(cols);
-        let left = (ui.available_width() - cols as f32 * cell.x) / 2.0;
-        let (grid, _) = ui.allocate_exact_size(vec2(ui.available_width(), rows as f32 * cell.y), Sense::hover());
-        // The page Organize opened on may lie in a row the virtualized grid has not laid out,
-        // so its cell is computed rather than found.
-        if let Some(page) = reveal.filter(|p| *p < info.pages.len()) {
-            let row = page / cols;
-            let col = page % cols;
-            let c = Rect::from_min_size(pos2(grid.left() + left + col as f32 * cell.x, grid.top() + row as f32 * cell.y), cell);
-            ui.scroll_to_rect_animation(c, Some(egui::Align::Center), egui::style::ScrollAnimation::none());
-        }
-        for row in thumbnail_rows(clip.top() - 20.0, clip.bottom() - 20.0, cell.y, rows) {
-            let row_rect = Rect::from_min_size(grid.min + vec2(0.0, row as f32 * cell.y), vec2(grid.width(), cell.y));
-            for col in 0..cols {
-                let i = row * cols + col;
-                let Some(p) = info.pages.get(i) else { break };
-                let c = Rect::from_min_size(pos2(row_rect.left() + left + col as f32 * cell.x, row_rect.top()), cell);
-                view.need_thumbnail(i, c.intersects(ui.clip_rect()));
-                let resp = ui.interact(c, ui.id().with(("org", i)), if editable { Sense::click_and_drag() } else { Sense::click() });
-                cells.push((i, c));
-                if let Some((_, above)) = anchor.filter(|(page, _)| *page == i) {
-                    ui.scroll_to_rect_animation(c.translate(vec2(0.0, -above)), Some(egui::Align::Min), egui::style::ScrollAnimation::none());
-                }
-                // Drag pages to move them (the selection, or the page grabbed).
-                if resp.drag_started() {
-                    if !view.selected.contains(&i) {
-                        view.selected = [i].into();
-                        view.select_anchor = Some(i);
+    crate::widgets::scroll_area_with(ui, egui::ScrollArea::vertical().auto_shrink([false, false]), false, |area, ui| {
+        area.show_viewport(ui, |ui, clip| {
+            if middle_gesture {
+                let opacity = ui.opacity();
+                ui.disable();
+                ui.set_opacity(opacity);
+            }
+            if auto_delta != Vec2::ZERO {
+                ui.scroll_with_delta_animation(auto_delta, egui::style::ScrollAnimation::none());
+            }
+            ui.add_space(20.0);
+            let cols = ((ui.available_width() - 40.0) / cell.x).floor().max(1.0) as usize;
+            let rows = info.pages.len().div_ceil(cols);
+            let left = (ui.available_width() - cols as f32 * cell.x) / 2.0;
+            let (grid, _) = ui.allocate_exact_size(vec2(ui.available_width(), rows as f32 * cell.y), Sense::hover());
+            // The page Organize opened on may lie in a row the virtualized grid has not laid out,
+            // so its cell is computed rather than found.
+            if let Some(page) = reveal.filter(|p| *p < info.pages.len()) {
+                let row = page / cols;
+                let col = page % cols;
+                let c = Rect::from_min_size(pos2(grid.left() + left + col as f32 * cell.x, grid.top() + row as f32 * cell.y), cell);
+                ui.scroll_to_rect_animation(c, Some(egui::Align::Center), egui::style::ScrollAnimation::none());
+            }
+            for row in thumbnail_rows(clip.top() - 20.0, clip.bottom() - 20.0, cell.y, rows) {
+                let row_rect = Rect::from_min_size(grid.min + vec2(0.0, row as f32 * cell.y), vec2(grid.width(), cell.y));
+                for col in 0..cols {
+                    let i = row * cols + col;
+                    let Some(p) = info.pages.get(i) else { break };
+                    let c = Rect::from_min_size(pos2(row_rect.left() + left + col as f32 * cell.x, row_rect.top()), cell);
+                    view.need_thumbnail(i, c.intersects(ui.clip_rect()));
+                    let resp = ui.interact(c, ui.id().with(("org", i)), if editable { Sense::click_and_drag() } else { Sense::click() });
+                    cells.push((i, c));
+                    if let Some((_, above)) = anchor.filter(|(page, _)| *page == i) {
+                        ui.scroll_to_rect_animation(c.translate(vec2(0.0, -above)), Some(egui::Align::Min), egui::style::ScrollAnimation::none());
                     }
-                    let mut pages: Vec<usize> = view.selected.iter().copied().collect();
-                    pages.sort_unstable();
-                    view.org_drag = Some(pages);
-                }
-                if resp.drag_stopped() {
-                    drop = true;
-                }
-                let page_label = crate::i18n::fmt(tl!("Page {label}"), &[("label", &p.label)]);
-                resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, view.selected.contains(&i), page_label.clone()));
-                let pr = grid_page_rect(c, vec2(p.width, p.height));
-                let size = pr.size();
-                let selected = view.selected.contains(&i) || (view.selected.is_empty() && i == view.current);
-                if selected || resp.hovered() {
-                    ui.painter().rect_filled(c.shrink(6.0), CornerRadius::same(8), if selected { t.accent_soft } else { t.hover });
-                }
-                if view.selected.contains(&i) {
-                    ui.painter().rect_stroke(c.shrink(6.0), CornerRadius::same(8), Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
-                }
-                ui.painter().rect_filled(pr.translate(vec2(0.0, 1.5)), CornerRadius::same(1), t.page_shadow);
-                ui.painter().rect_filled(pr, CornerRadius::ZERO, Color32::WHITE);
-                // A page drawn larger than its thumbnail gets a render at the size drawn, while
-                // it is in view; until that arrives the thumbnail stands in.
-                let want = size.x * ppp;
-                let thumb = view.thumbs.get(&i).map(|t| &t.tex);
-                let thumb_ok = thumb.is_some_and(|t| t.size()[0] as f32 >= want * GRID_SHARP.start());
-                let sharp = view.grid_pages.get(&i).filter(|_| !thumb_ok);
-                if !thumb_ok && ui.is_rect_visible(c) {
-                    in_view.push((i, want));
-                    if !sharp.is_some_and(|(w, _)| sharp_enough(*w, want)) && !view.errors.contains_key(&i) {
-                        sharper.push(RenderRequest {
-                            page: i,
-                            kind: RequestKind::Pixels,
-                            tile: None,
-                            scale: want / p.width.max(1.0),
-                            tag: GRID_TAG,
-                            // Grid cells are previews: tiny images are skipped for them.
-                            preview: true,
-                        });
+                    // Drag pages to move them (the selection, or the page grabbed).
+                    if resp.drag_started() {
+                        if !view.selected.contains(&i) {
+                            view.selected = [i].into();
+                            view.select_anchor = Some(i);
+                        }
+                        let mut pages: Vec<usize> = view.selected.iter().copied().collect();
+                        pages.sort_unstable();
+                        view.org_drag = Some(pages);
                     }
-                }
-                if let Some(tex) = sharp.map(|(_, t)| t).or(thumb) {
-                    ui.painter().image(tex.id(), pr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                }
-                ui.painter().rect_stroke(pr, CornerRadius::ZERO, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
-                let label_font = theme::medium(12.0);
-                let label_w = (c.width() - 12.0).max(0.0);
-                let page_label = crate::widgets::fit_line(&p.label, label_w, |s| crate::widgets::text_width(ui, s, &label_font));
-                let label_pos = pos2(c.center().x, c.bottom() - 48.0);
-                ui.painter().with_clip_rect(Rect::from_center_size(label_pos, vec2(label_w, 18.0))).text(
-                    label_pos,
-                    Align2::CENTER_CENTER,
-                    page_label,
-                    label_font,
-                    t.text_muted,
-                );
-                // The checkbox toggles just this page without requiring a modifier. Keep it
-                // outside the page image, including on very tall or wide pages.
-                let mut checked = view.selected.contains(&i);
-                let check_rect = Rect::from_min_size(c.min + vec2(8.0, 8.0), Vec2::splat(20.0));
-                let check = ui.push_id(("org-check", i), |ui| ui.put(check_rect, widgets::checkbox_without_text(&mut checked))).inner;
-                let label = crate::i18n::fmt(tl!("Select page {label}"), &[("label", &p.label)]);
-                check.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, checked, label.clone()));
-                if check.on_hover_text(label).changed() {
-                    view.click_page(i, egui::Modifiers::COMMAND, false);
-                    // The document shows the page picked here when the grid closes, as after a
-                    // Pages-panel click, so reopening the grid keeps the pick (issue #1910).
-                    view.go_to_page(i);
-                }
-                // Local actions always target the labelled page. The toolbar above the grid
-                // remains the place for actions on the whole selection.
-                if selected || resp.contains_pointer() || resp.has_focus() {
-                    let actions = Rect::from_center_size(pos2(c.center().x, c.bottom() - 24.0), vec2(84.0, 26.0));
-                    ui.scope_builder(
-                        egui::UiBuilder::new().id_salt(("org-actions", i)).max_rect(actions).layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        |ui| {
-                            ui.spacing_mut().item_spacing.x = 3.0;
-                            ui.add_enabled_ui(editable, |ui| {
-                                for (icon, degrees, key) in
-                                    [("rotate-ccw", -90, "Rotate page {label} counterclockwise"), ("rotate-cw", 90, "Rotate page {label} clockwise")]
-                                {
-                                    let label = crate::i18n::fmt(tl!(key), &[("label", &p.label)]);
-                                    if icons::button(ui, icon, 26.0, false, &label).clicked() {
-                                        view.pending_edit = Some(Edit::RotatePages { pages: vec![i], degrees });
-                                    }
-                                }
-                                let label = crate::i18n::fmt(tl!("Delete page {label}"), &[("label", &p.label)]);
-                                if ui.add_enabled_ui(info.pages.len() > 1, |ui| icons::button(ui, "trash-2", 26.0, false, &label)).inner.clicked() {
-                                    view.pending_edit = Some(Edit::DeletePages { pages: vec![i] });
-                                }
+                    if resp.drag_stopped() {
+                        drop = true;
+                    }
+                    let page_label = crate::i18n::fmt(tl!("Page {label}"), &[("label", &p.label)]);
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, view.selected.contains(&i), page_label.clone()));
+                    let pr = grid_page_rect(c, vec2(p.width, p.height));
+                    let size = pr.size();
+                    let selected = view.selected.contains(&i) || (view.selected.is_empty() && i == view.current);
+                    if selected || resp.hovered() {
+                        ui.painter().rect_filled(c.shrink(6.0), CornerRadius::same(8), if selected { t.accent_soft } else { t.hover });
+                    }
+                    if view.selected.contains(&i) {
+                        ui.painter().rect_stroke(c.shrink(6.0), CornerRadius::same(8), Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
+                    }
+                    ui.painter().rect_filled(pr.translate(vec2(0.0, 1.5)), CornerRadius::same(1), t.page_shadow);
+                    ui.painter().rect_filled(pr, CornerRadius::ZERO, Color32::WHITE);
+                    // A page drawn larger than its thumbnail gets a render at the size drawn, while
+                    // it is in view; until that arrives the thumbnail stands in.
+                    let want = size.x * ppp;
+                    let thumb = view.thumbs.get(&i).map(|t| &t.tex);
+                    let thumb_ok = thumb.is_some_and(|t| t.size()[0] as f32 >= want * GRID_SHARP.start());
+                    let sharp = view.grid_pages.get(&i).filter(|_| !thumb_ok);
+                    if !thumb_ok && ui.is_rect_visible(c) {
+                        in_view.push((i, want));
+                        if !sharp.is_some_and(|(w, _)| sharp_enough(*w, want)) && !view.errors.contains_key(&i) {
+                            sharper.push(RenderRequest {
+                                page: i,
+                                kind: RequestKind::Pixels,
+                                tile: None,
+                                scale: want / p.width.max(1.0),
+                                tag: GRID_TAG,
+                                // Grid cells are previews: tiny images are skipped for them.
+                                preview: true,
                             });
-                        },
+                        }
+                    }
+                    if let Some(tex) = sharp.map(|(_, t)| t).or(thumb) {
+                        ui.painter().image(tex.id(), pr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    ui.painter().rect_stroke(pr, CornerRadius::ZERO, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
+                    let label_font = theme::medium(12.0);
+                    let label_w = (c.width() - 12.0).max(0.0);
+                    let page_label = crate::widgets::fit_line(&p.label, label_w, |s| crate::widgets::text_width(ui, s, &label_font));
+                    let label_pos = pos2(c.center().x, c.bottom() - 48.0);
+                    ui.painter().with_clip_rect(Rect::from_center_size(label_pos, vec2(label_w, 18.0))).text(
+                        label_pos,
+                        Align2::CENTER_CENTER,
+                        page_label,
+                        label_font,
+                        t.text_muted,
                     );
-                }
-                if resp.clicked() {
-                    let m = ui.input(|i| i.modifiers);
-                    view.click_page(i, m, false);
-                    view.go_to_page(i);
-                }
-                if resp.double_clicked() {
-                    open_page = Some(i);
-                }
-                // Right-click: Extract, Replace, Cut, Copy, Paste (on the selection, or this page).
-                resp.context_menu(|ui| {
-                    if !view.selected.contains(&i) {
-                        view.selected = [i].into();
+                    // The checkbox toggles just this page without requiring a modifier. Keep it
+                    // outside the page image, including on very tall or wide pages.
+                    let mut checked = view.selected.contains(&i);
+                    let check_rect = Rect::from_min_size(c.min + vec2(8.0, 8.0), Vec2::splat(20.0));
+                    let check = ui.push_id(("org-check", i), |ui| ui.put(check_rect, widgets::checkbox_without_text(&mut checked))).inner;
+                    let label = crate::i18n::fmt(tl!("Select page {label}"), &[("label", &p.label)]);
+                    check.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, checked, label.clone()));
+                    if check.on_hover_text(label).changed() {
+                        view.click_page(i, egui::Modifiers::COMMAND, false);
+                        // The document shows the page picked here when the grid closes, as after a
+                        // Pages-panel click, so reopening the grid keeps the pick (issue #1910).
                         view.go_to_page(i);
                     }
-                    if ui.button(tl!("Extract pages")).clicked() {
-                        view.pending_action = Some(ViewAction::Extract);
-                        ui.close();
+                    // Local actions always target the labelled page. The toolbar above the grid
+                    // remains the place for actions on the whole selection.
+                    if selected || resp.contains_pointer() || resp.has_focus() {
+                        let actions = Rect::from_center_size(pos2(c.center().x, c.bottom() - 24.0), vec2(84.0, 26.0));
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .id_salt(("org-actions", i))
+                                .max_rect(actions)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                ui.add_enabled_ui(editable, |ui| {
+                                    for (icon, degrees, key) in [
+                                        ("rotate-ccw", -90, "Rotate page {label} counterclockwise"),
+                                        ("rotate-cw", 90, "Rotate page {label} clockwise"),
+                                    ] {
+                                        let label = crate::i18n::fmt(tl!(key), &[("label", &p.label)]);
+                                        if icons::button(ui, icon, 26.0, false, &label).clicked() {
+                                            view.pending_edit = Some(Edit::RotatePages { pages: vec![i], degrees });
+                                        }
+                                    }
+                                    let label = crate::i18n::fmt(tl!("Delete page {label}"), &[("label", &p.label)]);
+                                    if ui.add_enabled_ui(info.pages.len() > 1, |ui| icons::button(ui, "trash-2", 26.0, false, &label)).inner.clicked()
+                                    {
+                                        view.pending_edit = Some(Edit::DeletePages { pages: vec![i] });
+                                    }
+                                });
+                            },
+                        );
                     }
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
-                        view.pending_action = Some(ViewAction::ReplacePages);
-                        ui.close();
+                    if resp.clicked() {
+                        let m = ui.input(|i| i.modifiers);
+                        view.click_page(i, m, false);
+                        view.go_to_page(i);
                     }
-                    ui.separator();
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Cut"))).clicked() {
-                        view.pending_action = Some(ViewAction::CopyPages { cut: true });
-                        ui.close();
+                    if resp.double_clicked() {
+                        open_page = Some(i);
                     }
-                    if ui.button(tl!("Copy")).clicked() {
-                        view.pending_action = Some(ViewAction::CopyPages { cut: false });
-                        ui.close();
-                    }
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Paste after"))).clicked() {
-                        view.pending_action = Some(ViewAction::PastePages);
-                        ui.close();
-                    }
-                });
-            }
-        }
-        // Between pages (and at both ends): insert files right there.
-        if editable && !middle_gesture && view.org_drag.is_none() {
-            let mid = |r: &Rect| r.top() + 16.0 + (cell.y - 88.0) / 2.0;
-            for (i, c) in &cells {
-                let label = info
-                    .pages
-                    .get(*i)
-                    .map(|p| crate::i18n::fmt(tl!("Insert a file before page {label}"), &[("label", &p.label)]))
-                    .unwrap_or_default();
-                if gap_button(ui, *i, pos2(c.left(), mid(c)), cell.y - 88.0, label, t) {
-                    view.pending_action = Some(ViewAction::InsertFromFileAt(*i));
+                    // Right-click: Extract, Replace, Cut, Copy, Paste (on the selection, or this page).
+                    resp.context_menu(|ui| {
+                        if !view.selected.contains(&i) {
+                            view.selected = [i].into();
+                            view.go_to_page(i);
+                        }
+                        if widgets::menu_entry(ui, true, tl!("Extract pages"), None).clicked() {
+                            view.pending_action = Some(ViewAction::Extract);
+                            ui.close();
+                        }
+                        if widgets::menu_entry(ui, editable, tl!("Replace pages…"), None).clicked() {
+                            view.pending_action = Some(ViewAction::ReplacePages);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if widgets::menu_entry(ui, editable, tl!("Cut"), None).clicked() {
+                            view.pending_action = Some(ViewAction::CopyPages { cut: true });
+                            ui.close();
+                        }
+                        if widgets::menu_entry(ui, true, tl!("Copy"), None).clicked() {
+                            view.pending_action = Some(ViewAction::CopyPages { cut: false });
+                            ui.close();
+                        }
+                        if widgets::menu_entry(ui, editable, tl!("Paste after"), None).clicked() {
+                            view.pending_action = Some(ViewAction::PastePages);
+                            ui.close();
+                        }
+                    });
                 }
             }
-            if let Some((i, c)) = cells.last()
-                && i + 1 == info.pages.len()
-                && gap_button(ui, i + 1, pos2(c.right(), mid(c)), cell.y - 88.0, tl!("Insert a file at the end").to_string(), t)
-            {
-                view.pending_action = Some(ViewAction::InsertFromFileAt(i + 1));
-            }
-        }
-        // While dragging: the gap the pages would go to, drawn as a bar.
-        if let (Some(pages), Some(p)) = (view.org_drag.clone(), ui.input(|i| i.pointer.hover_pos())) {
-            // Ctrl (Option on macOS) held over the drop copies the pages; see #2997.
-            let copying = copy_modifier(ui.ctx(), &ui.input(|i| i.modifiers));
-            if let Some(gap) = drop_gap(&cells, p) {
-                let x = match cells.iter().find(|(i, _)| *i == gap) {
-                    Some((_, r)) => r.left() + 3.0,
-                    None => cells.last().map_or(0.0, |(_, r)| r.right() - 3.0),
-                };
-                let row = cells.iter().find(|(i, _)| *i == gap).or(cells.last()).map(|(_, r)| r.y_range()).unwrap_or(egui::Rangef::new(0.0, 0.0));
-                ui.painter().line_segment([pos2(x, row.min + 10.0), pos2(x, row.max - 10.0)], Stroke::new(3.0, t.accent));
-                let mut text_at = p + vec2(14.0, 14.0);
-                if copying {
-                    // A "+" by the pointer: this drop copies the pages, it doesn't move them.
-                    let badge = p + vec2(12.0, 12.0);
-                    ui.painter().circle(badge, 9.0, t.accent, Stroke::new(1.0, t.accent));
-                    let ink = Stroke::new(1.5, Color32::WHITE);
-                    ui.painter().line_segment([badge - vec2(4.0, 0.0), badge + vec2(4.0, 0.0)], ink);
-                    ui.painter().line_segment([badge - vec2(0.0, 4.0), badge + vec2(0.0, 4.0)], ink);
-                    text_at.x += 18.0;
+            // Between pages (and at both ends): insert files right there.
+            if editable && !middle_gesture && view.org_drag.is_none() {
+                let mid = |r: &Rect| r.top() + 16.0 + (cell.y - 88.0) / 2.0;
+                for (i, c) in &cells {
+                    let label = info
+                        .pages
+                        .get(*i)
+                        .map(|p| crate::i18n::fmt(tl!("Insert a file before page {label}"), &[("label", &p.label)]))
+                        .unwrap_or_default();
+                    if gap_button(ui, *i, pos2(c.left(), mid(c)), cell.y - 88.0, label, t) {
+                        view.pending_action = Some(ViewAction::InsertFromFileAt(*i));
+                    }
                 }
-                ui.painter().text(
-                    text_at,
-                    Align2::LEFT_TOP,
-                    if pages.len() == 1 { tl!("1 page").to_string() } else { crate::i18n::fmt(tl!("{n} pages"), &[("n", &pages.len().to_string())]) },
-                    theme::medium(12.0),
-                    t.accent_text,
-                );
+                if let Some((i, c)) = cells.last()
+                    && i + 1 == info.pages.len()
+                    && gap_button(ui, i + 1, pos2(c.right(), mid(c)), cell.y - 88.0, tl!("Insert a file at the end").to_string(), t)
+                {
+                    view.pending_action = Some(ViewAction::InsertFromFileAt(i + 1));
+                }
             }
-            if drop {
-                view.org_drag = None;
+            // While dragging: the gap the pages would go to, drawn as a bar.
+            if let (Some(pages), Some(p)) = (view.org_drag.clone(), ui.input(|i| i.pointer.hover_pos())) {
+                // Ctrl (Option on macOS) held over the drop copies the pages; see #2997.
+                let copying = copy_modifier(ui.ctx(), &ui.input(|i| i.modifiers));
                 if let Some(gap) = drop_gap(&cells, p) {
+                    let x = match cells.iter().find(|(i, _)| *i == gap) {
+                        Some((_, r)) => r.left() + 3.0,
+                        None => cells.last().map_or(0.0, |(_, r)| r.right() - 3.0),
+                    };
+                    let row = cells.iter().find(|(i, _)| *i == gap).or(cells.last()).map(|(_, r)| r.y_range()).unwrap_or(egui::Rangef::new(0.0, 0.0));
+                    ui.painter().line_segment([pos2(x, row.min + 10.0), pos2(x, row.max - 10.0)], Stroke::new(3.0, t.accent));
+                    let mut text_at = p + vec2(14.0, 14.0);
                     if copying {
-                        // The copies land at the gap as it is: nothing leaves its place.
-                        view.pending_edit = Some(Edit::DuplicatePages { pages: pages.clone(), at: Some(gap) });
-                        view.selected = (gap..gap + pages.len()).collect();
-                    } else {
-                        // `to` counts positions without the moving pages.
-                        let to = gap - pages.iter().filter(|x| **x < gap).count();
-                        let first = pages[0];
-                        let contiguous = pages.windows(2).all(|w| w[1] == w[0] + 1);
-                        if !(contiguous && to == first) {
-                            view.pending_edit = Some(Edit::MovePages { pages: pages.clone(), to });
-                            view.selected = (to..to + pages.len()).collect();
+                        // A "+" by the pointer: this drop copies the pages, it doesn't move them.
+                        let badge = p + vec2(12.0, 12.0);
+                        ui.painter().circle(badge, 9.0, t.accent, Stroke::new(1.0, t.accent));
+                        let ink = Stroke::new(1.5, Color32::WHITE);
+                        ui.painter().line_segment([badge - vec2(4.0, 0.0), badge + vec2(4.0, 0.0)], ink);
+                        ui.painter().line_segment([badge - vec2(0.0, 4.0), badge + vec2(0.0, 4.0)], ink);
+                        text_at.x += 18.0;
+                    }
+                    ui.painter().text(
+                        text_at,
+                        Align2::LEFT_TOP,
+                        if pages.len() == 1 {
+                            tl!("1 page").to_string()
+                        } else {
+                            crate::i18n::fmt(tl!("{n} pages"), &[("n", &pages.len().to_string())])
+                        },
+                        theme::medium(12.0),
+                        t.accent_text,
+                    );
+                }
+                if drop {
+                    view.org_drag = None;
+                    if let Some(gap) = drop_gap(&cells, p) {
+                        if copying {
+                            // The copies land at the gap as it is: nothing leaves its place.
+                            view.pending_edit = Some(Edit::DuplicatePages { pages: pages.clone(), at: Some(gap) });
+                            view.selected = (gap..gap + pages.len()).collect();
+                        } else {
+                            // `to` counts positions without the moving pages.
+                            let to = gap - pages.iter().filter(|x| **x < gap).count();
+                            let first = pages[0];
+                            let contiguous = pages.windows(2).all(|w| w[1] == w[0] + 1);
+                            if !(contiguous && to == first) {
+                                view.pending_edit = Some(Edit::MovePages { pages: pages.clone(), to });
+                                view.selected = (to..to + pages.len()).collect();
+                            }
                         }
                     }
                 }
+            } else if drop {
+                view.org_drag = None;
             }
-        } else if drop {
-            view.org_drag = None;
-        }
+        })
     });
     // Files dragged in from outside go to the gap under the pointer. Some platforms don't say
     // where the pointer is until the files are dropped; then the whole grid is the target.
@@ -5340,6 +5352,59 @@ mod tests {
     }
 
     use super::*;
+
+    /// The text shapes (position, galley rectangle, text) a notice bar paints for `text` in a
+    /// 380 pt wide column.
+    fn notice_shapes(text: crate::i18n::Logical<'static>) -> Vec<(egui::Pos2, Rect, String)> {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(theme::font_definitions());
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let column = Rect::from_min_size(egui::Pos2::ZERO, vec2(380.0, 400.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+                let t = Tokens::get(ui.ctx());
+                notice_bar(ui, &t, "bandage", t.accent_text, text.clone(), |ui| {
+                    ui.label("Dismiss");
+                });
+            });
+        });
+        let shapes = output
+            .shapes
+            .iter()
+            .filter_map(|shape| if let egui::Shape::Text(t) = &shape.shape { Some((t.pos, t.galley.rect, t.galley.job.text.clone())) } else { None })
+            .filter(|(_, _, text)| text != "Dismiss" && text.chars().any(char::is_alphanumeric))
+            .collect();
+        output.drop_without_applying_deltas();
+        shapes
+    }
+
+    /// An Arabic banner is a right-to-left paragraph wrapped in typing order (the first line holds
+    /// the first words) with its lines against one right edge; an English banner is the plain
+    /// label, as before, and a name in Arabic inside an English sentence is put in display order.
+    #[test]
+    fn an_arabic_banner_wraps_from_its_first_words_against_the_right_edge() {
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        let arabic = tl_logical!("This file was damaged and has been repaired. Saving keeps the repaired version.");
+        let shapes = notice_shapes(arabic.clone());
+        crate::i18n::set_current(previous);
+        let words: Vec<&str> = arabic.split_whitespace().collect();
+        let (first, last) = (words[0], words[words.len() - 1].trim_end_matches('.'));
+        assert!(shapes.len() >= 2, "a narrow bar wraps the sentence: {shapes:?}");
+        let top = shapes.iter().min_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        let bottom = shapes.iter().max_by(|a, b| a.0.y.total_cmp(&b.0.y)).expect("a line");
+        assert!(top.2.split_whitespace().any(|w| w == first) && !top.2.contains(last), "the first line holds the first words: {shapes:?}");
+        assert!(bottom.2.contains(last), "the last line holds the last words: {shapes:?}");
+        let right = shapes.iter().map(|(pos, rect, _)| pos.x + rect.width()).fold(0.0, f32::max);
+        for (pos, rect, line) in &shapes {
+            assert!((pos.x + rect.width() - right).abs() < 0.5, "{line:?} is right-aligned");
+        }
+        // English: the sentence as it is, in one galley.
+        let english = crate::i18n::Logical::from("This file was damaged and has been repaired.");
+        assert_eq!(notice_shapes(english).iter().map(|s| s.2.as_str()).collect::<Vec<_>>(), ["This file was damaged and has been repaired."]);
+        // An English sentence naming an Arabic file reads its name in display order.
+        let named = crate::i18n::fmt_logical(&crate::i18n::Logical::from("Revision {rev} of {from}."), &[("rev", "3"), ("from", "تقرير 2024")]);
+        assert!(notice_shapes(named).iter().any(|s| s.2.contains("2024 تقرير")), "the name is reordered");
+    }
 
     #[test]
     fn typed_zoom_percentages_parse() {
@@ -6261,7 +6326,16 @@ trailer << /Root 1 0 R >>
         h.run_steps(2);
         assert_eq!(h.state().views[0].thumb_demand.len(), 2, "booklet only needs its two placed pages");
         h.state_mut().dialog = None;
-        h.run_steps(2);
+        // Thumbnail textures are pruned only once no visible main page is still being
+        // rendered on the worker threads, which a slow machine (the emulated FreeBSD CI
+        // runner) can take more than two frames to finish. Wait, bounded, for that frame.
+        for _ in 0..300 {
+            h.run_steps(1);
+            if h.state().views[0].thumbs.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(h.state().views[0].thumb_demand.is_empty());
         assert!(h.state().views[0].thumbs.is_empty());
     }

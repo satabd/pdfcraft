@@ -617,6 +617,248 @@ fn arabic_ligature_actual_text_is_one_editable_word_through_save_reopen() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Text with its whitespace runs collapsed, so wrapped rows compare with the typed text.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn retyped_arabic_is_shaped_with_actual_text_through_edit_tools_save_and_reopen() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic Edit text");
+        return;
+    }
+    let dir = workdir("edit-arabic");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let original = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+
+    // A paragraph, wrapped to a narrow width: the page's Helvetica has no Arabic, so the text is
+    // shaped with the Arabic face, one span of typing-order text per row.
+    let typed = "مرحبا بالعالم الجميل في هذا اليوم";
+    let edited = ok(&mut a, "text_edit", json!({"doc":id,"page":1,"paragraph":1,"text":typed,"width":120}));
+    assert_eq!(edited["paragraph"]["text"], typed, "{edited}");
+    let rows = ok(&mut a, "text_lines", json!({"doc":id,"page":1}));
+    let rows: Vec<String> = rows["lines"].as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap().to_owned()).collect();
+    assert!(rows.len() >= 2, "{rows:?}");
+    assert_eq!(rows.join(" "), typed);
+    assert_eq!(words(&page_text(&mut a, id)[0]), typed);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":id,"query":"بالعالم"}))["matches"].as_array().unwrap().len(), 1);
+    let rendered = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+    assert_ne!(rendered, original, "the page now shows the Arabic text");
+
+    // Save, reopen: the same lines, text, search hits and picture.
+    let lines = ok(&mut a, "text_lines", json!({"doc":id,"page":1}));
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"arabic-edited.pdf"}));
+    let re = ok(&mut a, "doc_open", json!({"path":"arabic-edited.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":re,"page":1})), lines);
+    assert_eq!(words(&page_text(&mut a, re)[0]), typed);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"بالعالم"}))["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(a.call("page_render", &json!({"doc":re,"page":1,"dpi":72})).unwrap(), rendered);
+
+    // Edit it again: the draft measures, the new text replaces the old (no reverse-ToUnicode
+    // guess at the generated fonts' codes), and a line edit shapes too.
+    let again = "السلام عليكم";
+    let draft = ok(&mut a, "text_edit_layout", json!({"doc":re,"page":1,"paragraph":1,"text":again,"width":120}));
+    assert!(draft["draft_rect"].is_array(), "{draft}");
+    ok(&mut a, "text_edit", json!({"doc":re,"page":1,"paragraph":1,"text":again,"width":120}));
+    assert_eq!(words(&page_text(&mut a, re)[0]), again);
+    let line = "مرحبا PDF ١٢٣";
+    ok(&mut a, "text_edit", json!({"doc":re,"page":1,"line":1,"text":line}));
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":re,"page":1}))["lines"][0]["text"], line);
+    ok(&mut a, "doc_save", json!({"doc":re,"path":"arabic-edited-again.pdf"}));
+    let last = ok(&mut a, "doc_open", json!({"path":"arabic-edited-again.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":last,"page":1}))["lines"][0]["text"], line);
+    assert_eq!(page_text(&mut a, last)[0], line);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":last,"query":"PDF"}))["matches"].as_array().unwrap().len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn retyped_arabic_without_the_arabic_face_is_refused_and_changes_nothing() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("edit-arabic-no-face");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let lines = ok(&mut a, "text_lines", json!({"doc":id,"page":1}));
+    let render = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+    for args in
+        [json!({"doc":id,"page":1,"paragraph":1,"text":"مرحبا بالعالم","width":120}), json!({"doc":id,"page":1,"line":1,"text":"مرحبا بالعالم"})]
+    {
+        let e = err(&mut a, "text_edit", args).to_string();
+        assert!(e.contains("Arabic") && e.contains("CRAFT_FONTS_DIR"), "{e}");
+    }
+    assert_eq!(ok(&mut a, "text_lines", json!({"doc":id,"page":1})), lines);
+    assert_eq!(a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap(), render);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Arabic in a header, a Bates number and a watermark is shaped with the Arabic face, searchable,
+/// and survives save and reopen; the page picture changes.
+#[test]
+fn arabic_header_bates_and_watermark_are_shaped_through_tools_save_and_reopen() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic headers and watermarks");
+        return;
+    }
+    let dir = workdir("arabic-stamps");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let render = |a: &mut Automation, id: u64, page: u64| a.call("page_render", &json!({"doc":id,"page":page,"dpi":72})).unwrap();
+    let blank = render(&mut a, id, 1);
+
+    // A header with the token expanded inside the Arabic line, and a Bates number with an Arabic prefix.
+    ok(&mut a, "doc_header_footer", json!({"doc":id,"header_center":"مرحبا بالعالم <<Page 1 of n>>","footer_left":"<<Bates Number#4#7#سري-#>>"}));
+    let headed = render(&mut a, id, 1);
+    assert_ne!(headed, blank, "the Arabic header is drawn");
+    for (query, page) in [("مرحبا بالعالم", 1), ("مرحبا بالعالم", 3), ("سري-0007", 1), ("سري-0009", 3)] {
+        let found = ok(&mut a, "text_find", json!({"doc":id,"query":query}));
+        assert!(found["matches"].as_array().unwrap().iter().any(|m| m["page"] == page), "{query:?} on page {page}: {found}");
+    }
+    let text = page_text(&mut a, id);
+    assert!(words(&text[0]).contains("مرحبا بالعالم Page 1 of 3") && words(&text[1]).contains("سري-0008"), "{text:?}");
+
+    // A rotated watermark.
+    ok(&mut a, "doc_watermark", json!({"doc":id,"text":"سري","rotation":45,"opacity":0.4}));
+    let marked = render(&mut a, id, 1);
+    assert_ne!(marked, headed, "the Arabic watermark is drawn");
+    assert!(ok(&mut a, "text_find", json!({"doc":id,"query":"سري"}))["matches"].as_array().unwrap().len() >= 3);
+
+    // Save and reopen: the same text, hits and pictures.
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"stamped.pdf"}));
+    let re = ok(&mut a, "doc_open", json!({"path":"stamped.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(page_text(&mut a, re), page_text(&mut a, id));
+    assert_eq!(render(&mut a, re, 1), marked);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"سري-0008"}))["count"], 1);
+
+    // Replacing the header drops the old text.
+    ok(&mut a, "doc_header_footer", json!({"doc":re,"header_center":"السلام عليكم","replace":true}));
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"بالعالم"}))["count"], 0);
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"السلام عليكم"}))["count"], 3);
+    ok(&mut a, "doc_remove_marks", json!({"doc":re,"kind":"header_footer"}));
+    ok(&mut a, "doc_remove_marks", json!({"doc":re,"kind":"watermark"}));
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":re,"query":"سري"}))["count"], 0);
+    // What is left is the Bates footer's page, which was a different mark kind (a header/footer): gone too.
+    assert_eq!(render(&mut a, re, 1), blank);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the Arabic face the marks are refused as they always were, and nothing changes.
+#[test]
+fn arabic_header_and_watermark_without_the_arabic_face_are_refused_and_change_nothing() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("arabic-stamps-no-face");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let render = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+    for (tool, args) in [
+        ("doc_header_footer", json!({"doc":id,"header_center":"مرحبا"})),
+        ("doc_header_footer", json!({"doc":id,"footer_left":"<<Bates Number#4#7#سري-#>>"})),
+        ("doc_watermark", json!({"doc":id,"text":"سري"})),
+    ] {
+        let e = err(&mut a, tool, args).to_string();
+        assert!(e.contains("the standard fonts can't draw") && e.contains("U+06"), "{tool}: {e}");
+    }
+    assert_eq!(a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap(), render);
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"unchanged.pdf"}));
+    assert_eq!(ok(&mut a, "doc_info", json!({"doc":id}))["pages"].as_array().unwrap().len(), 3);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A new document from Arabic text, and a comment summary that quotes Arabic, are readable.
+#[test]
+fn arabic_create_from_text_and_comment_summaries_are_shaped_not_escaped() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic text documents");
+        return;
+    }
+    let dir = workdir("arabic-create");
+    let mut a = auto(&dir);
+    let paragraph = "مرحبا بالعالم هذا نص عربي طويل يكفي ليلتف على عدة أسطر داخل الصفحة لأنه يحتوي على كلمات كثيرة جدا ومتنوعة وكل كلمة منها \
+                     تأخذ مكانها من السطر حتى ينتهي السطر ويبدأ سطر جديد في الفقرة نفسها ثم تنتهي الفقرة بكلمة أخيرة";
+    let text = format!("Report\n{paragraph}");
+    let id = ok(&mut a, "doc_create", json!({"from":"text","text":text}))["doc"].as_u64().unwrap();
+    let extracted = page_text(&mut a, id);
+    assert_eq!(words(&extracted[0]), format!("Report {paragraph}"), "{extracted:?}");
+    assert_eq!(ok(&mut a, "text_find", json!({"doc":id,"query":"بالعالم"}))["count"], 1);
+    let blank = ok(&mut a, "doc_create", json!({"from":"text","text":"Report"}))["doc"].as_u64().unwrap();
+    assert_ne!(
+        a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap(),
+        a.call("page_render", &json!({"doc":blank,"page":1,"dpi":72})).unwrap()
+    );
+    // Save and reopen keeps it.
+    ok(&mut a, "doc_save", json!({"doc":id,"path":"arabic.pdf"}));
+    let re = ok(&mut a, "doc_open", json!({"path":"arabic.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(page_text(&mut a, re), extracted);
+
+    // A summary quotes the comment as it is.
+    let doc = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    ok(&mut a, "comment_add", json!({"doc":doc,"page":1,"type":"note","at":[40,40],"contents":"ملاحظة مهمة OK","author":"Ada"}));
+    ok(&mut a, "comments_summarize", json!({"doc":doc,"out":"summary.pdf"}));
+    let summary = ok(&mut a, "doc_open", json!({"path":"summary.pdf"}))["doc"].as_u64().unwrap();
+    let text = page_text(&mut a, summary).join("\n");
+    assert!(text.contains("ملاحظة مهمة") && !text.contains("[U+06") && !text.contains("U+XXXX"), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the face, Arabic text is refused for a new document and escaped in a summary, as before.
+#[test]
+fn arabic_create_from_text_without_the_arabic_face_is_refused_and_summaries_escape() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("arabic-create-no-face");
+    let mut a = auto(&dir);
+    let e = err(&mut a, "doc_create", json!({"from":"text","text":"Notes\nمرحبا"})).to_string();
+    assert!(e.contains("(line 2)") && e.contains("U+0645"), "{e}");
+    let doc = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    ok(&mut a, "comment_add", json!({"doc":doc,"page":1,"type":"note","at":[40,40],"contents":"مرحبا OK","author":"Ada"}));
+    ok(&mut a, "comments_summarize", json!({"doc":doc,"out":"summary.pdf"}));
+    let summary = ok(&mut a, "doc_open", json!({"path":"summary.pdf"}))["doc"].as_u64().unwrap();
+    let text = page_text(&mut a, summary).join("\n");
+    assert!(text.contains("[U+0645][U+0631][U+062D][U+0628][U+0627] OK") && text.contains("[U+XXXX]"), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Find ignores harakat, tatweel and presentation forms: a bare query finds vowelled text, and
+/// a lam-alef ligature glyph is found by its two letters (public Acrobat behaviour).
+#[test]
+fn text_find_ignores_arabic_harakat_and_matches_presentation_forms() {
+    use pdfcraft_cos::{Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
+    use std::sync::Arc;
+
+    let dir = workdir("arabic-find-harakat");
+    let mut doc = Document::open(Arc::new(fixture(1))).unwrap();
+    // Synthetic glyph codes: A كَ, B تَ, C بَ (letter plus fatha), X lam-alef presentation form,
+    // Y ا, Z a letter drawn as an isolated presentation form (U+FEE1 meem).
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
+                1 begincodespacerange <00> <FF> endcodespacerange 5 beginbfchar \
+                <41> <0643064E> <42> <062A064E> <43> <0628064E> <58> <FEFB> <59> <FEE1> \
+                endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let unicode = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
+    doc.update_dict(ObjRef::new(3, 0), |d| d.set(b"ToUnicode".to_vec(), Object::Ref(unicode))).unwrap();
+    // Drawn left to right, so the logical order is reversed: بَ تَ كَ is "كَتَبَ" read from the right.
+    let content = "BT /F1 24 Tf 20 150 Td (CBA) Tj ET BT /F1 24 Tf 20 100 Td (XY) Tj ET";
+    doc.set(ObjRef::new(5, 0), Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    std::fs::write(dir.join("arabic.pdf"), write_full(&doc, &SaveOptions::default()).unwrap()).unwrap();
+
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"arabic.pdf"}))["doc"].as_u64().unwrap();
+    // One string per page; extraction keeps the producer's presentation forms as they are.
+    let text = page_text(&mut a, id);
+    assert_eq!(text, ["كَتَبَ\nﻡﻻ"], "the page really holds vowelled text and a ligature glyph");
+    for (query, count) in [("كتب", 1), ("كَتَبَ", 1), ("كـتـب", 1), ("لا", 1), ("ملا", 1), ("ﻡﻻ", 1), ("بتك", 0), ("كتاب", 0)]
+    {
+        let found = ok(&mut a, "text_find", json!({"doc":id,"query":query}));
+        assert_eq!(found["count"], count, "query {query:?}: {found}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Each of these writes to its required `path` and replaces an existing file there, so the MCP
 /// annotations must not tell clients the call is read-only or harmless (#130).
 #[test]
@@ -4760,6 +5002,112 @@ fn signing_with_translated_labels_through_tools() {
     assert!(stamped.contains("(Genehmigt)") && !stamped.contains("Reason") && !stamped.contains("Date"), "{stamped}");
 }
 
+/// A visible signature with an Arabic signer name, reason and labels is drawn shaped: the page
+/// looks different, the typed text is in the appearance, the signature validates and survives
+/// reopening.
+#[test]
+fn arabic_visible_signatures_are_drawn_shaped_validate_and_survive_reopen_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in visible signatures");
+        return;
+    }
+    let dir = workdir("signing-arabic");
+    let mut a = auto(&dir);
+    ok(&mut a, "sign_id_create", json!({ "name": "أحمد محمد", "key": "p256", "password": "secret12", "path": "ahmad.p12" }));
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let render = |a: &mut Automation, doc: u64| a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 96 })).unwrap();
+    let before = render(&mut a, doc);
+    let r = ok(
+        &mut a,
+        "sign_document",
+        json!({
+            "doc": doc, "id": "ahmad.p12", "password": "secret12", "page": 1, "rect": [20, 150, 280, 290],
+            "reason": "موافقة على العقد (نسخة 2)", "location": "Dubai", "out": "signed.pdf",
+            "appearance": { "reason": true, "location": true },
+            "labels": { "signed_by": "وقّعه رقمياً", "reason": "السبب: ", "location": "الموقع: ", "date": "التاريخ: " },
+        }),
+    );
+    assert_eq!((r["signature"]["signer"].as_str(), r["signature"]["reason"].as_str()), (Some("أحمد محمد"), Some("موافقة على العقد (نسخة 2)")));
+    let signed = render(&mut a, doc);
+    assert_ne!(signed, before, "the Arabic signature is drawn on the page");
+
+    // The appearance carries the typed text for copy and search, and no question marks.
+    let bytes = std::fs::read(dir.join("signed.pdf")).unwrap();
+    let (spans, question_marks) = {
+        use pdfcraft_cos::{Document, ObjRef, Object};
+        let reopened = Document::open(std::sync::Arc::new(bytes)).unwrap();
+        let mut spans = Vec::new();
+        let mut question_marks = false;
+        for num in reopened.object_numbers() {
+            if let Object::Stream(st) = &*reopened.get(ObjRef { num, generation: 0 })
+                && st.dict.name(b"Subtype") == Some(b"Form")
+            {
+                let content = String::from_utf8_lossy(&st.decoded().unwrap()).into_owned();
+                question_marks |= content.contains('?');
+                spans.extend(content.split("/ActualText <FEFF").skip(1).filter_map(|s| s.split('>').next().map(str::to_string)));
+            }
+        }
+        (spans, question_marks)
+    };
+    assert!(!question_marks);
+    let hex = |t: &str| t.encode_utf16().map(|u| format!("{u:04X}")).collect::<String>();
+    // (The reason is wrapped to the details' column: each line holds its part in typing order.)
+    for typed in ["أحمد محمد", "السبب: موافقة", "العقد (نسخة 2)"] {
+        assert!(spans.iter().any(|s| s.starts_with(&hex(typed))), "{typed}: {spans:?}");
+    }
+
+    // Trusting the signer makes it valid; the saved file reads back the same.
+    ok(&mut a, "sign_trust", json!({ "paths": ["ahmad.p12"], "password": "secret12" }));
+    let list = ok(&mut a, "sign_list", json!({ "doc": doc }));
+    assert_eq!((list["all_valid"].as_bool(), list["signatures"][0]["status"].as_str()), (Some(true), Some("valid")), "{list}");
+    let re = ok(&mut a, "doc_open", json!({ "path": "signed.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(render(&mut a, re), signed);
+    // Copy and search read the typed text, not the glyphs.
+    let text = words(&page_text(&mut a, re).join(" "));
+    for typed in ["أحمد محمد", "السبب: موافقة على العقد", "الموقع: Dubai"] {
+        assert!(text.contains(typed), "{typed}: {text}");
+    }
+    assert!(ok(&mut a, "text_find", json!({ "doc": re, "query": "أحمد محمد" }))["count"].as_u64().unwrap() >= 2);
+    let list = ok(&mut a, "sign_list", json!({ "doc": re }));
+    assert_eq!((list["all_valid"].as_bool(), list["signatures"][0]["signer"].as_str()), (Some(true), Some("أحمد محمد")), "{list}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the Arabic face a visible signature with Arabic is refused as it always was, naming
+/// the character and what to do, and nothing is written; an invisible one signs.
+#[test]
+fn arabic_visible_signatures_without_the_arabic_face_are_refused_and_write_nothing() {
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        return;
+    }
+    let dir = workdir("signing-arabic-no-face");
+    let mut a = auto(&dir);
+    ok(&mut a, "sign_id_create", json!({ "name": "Ada Lovelace", "key": "p256", "password": "secret12", "path": "ada.p12" }));
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let sign = |a: &mut Automation, extra: Value, out: &str| {
+        let mut args = json!({ "doc": doc, "id": "ada.p12", "password": "secret12", "page": 1, "rect": [20, 150, 280, 290], "out": out });
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        a.call("sign_document", &args)
+    };
+    let shown = json!({ "reason": "موافقة", "appearance": { "reason": true } });
+    let e = sign(&mut a, shown, "bad.pdf").unwrap_err().to_string();
+    assert!(e.contains("U+0645") && e.contains("the reason") && e.contains("sign without a visible appearance"), "{e}");
+    // A label: refused by name before anything is written, as before.
+    let r = sign(&mut a, json!({ "labels": { "reason": "السبب: " } }), "bad.pdf");
+    assert!(matches!(&r, Err(ToolError::InvalidArgs(m)) if m.contains("labels.reason") && m.contains("U+0627")), "{r:?}");
+    assert!(!dir.join("bad.pdf").exists());
+    // An Arabic reason that the appearance leaves out signs.
+    ok(
+        &mut a,
+        "sign_document",
+        json!({ "doc": doc, "id": "ada.p12", "password": "secret12", "page": 1, "rect": [20, 150, 280, 290], "reason": "موافقة", "out": "ok.pdf" }),
+    );
+    assert!(dir.join("ok.pdf").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn optimizing_through_tools() {
     let dir = workdir("optimize");
@@ -5445,6 +5793,203 @@ fn xfa_forms_flatten_and_convert_to_static_through_tools() {
     assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"].as_array().unwrap().len(), 0);
     let text = ok(&mut a, "text_extract", json!({ "doc": doc, "pages": [1] }));
     assert!(text.to_string().contains("Japan"), "{text}");
+}
+
+// ---- Arabic in a dynamic XFA form and in the Office exports ----
+
+/// A one-page dynamic XFA form: an Arabic draw, a Latin draw, a draw that states its alignment, and
+/// a text field whose data holds Arabic.
+fn arabic_xfa_form(title: &str) -> Vec<u8> {
+    let xdp = format!(
+        r##"<?xml version="1.0" encoding="UTF-8"?>
+<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
+<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">
+<subform name="form" layout="tb">
+ <pageSet><pageArea name="front"><contentArea x="0.5in" y="0.5in" w="7.5in" h="10in"/><medium short="8.5in" long="11in"/></pageArea></pageSet>
+ <draw name="title" w="4in" h="0.4in"><value><text>{title}</text></value><font typeface="Arial" size="16pt"/></draw>
+ <draw name="plain" w="4in" h="0.3in"><value><text>Applicant 123</text></value><font typeface="Arial" size="12pt"/></draw>
+ <draw name="left" w="4in" h="0.3in"><value><text>سلام عليكم</text></value><font typeface="Arial" size="12pt"/><para hAlign="left"/></draw>
+ <field name="who" w="3in" h="0.3in"><ui><textEdit/></ui></field>
+</subform>
+</template>
+<xfa:datasets xmlns:xfa="http://www.xfa.org/schema/xfa-data/1.0/"><xfa:data><form><who>أهلا وسهلا</who></form></xfa:data></xfa:datasets>
+</xdp:xdp>
+"##
+    );
+    pdfcraft_xfa::fixtures::shell(&xdp)
+}
+
+fn matches_of(a: &mut Automation, doc: u64, query: &str) -> usize {
+    ok(a, "text_find", json!({ "doc": doc, "query": query }))["matches"].as_array().unwrap().len()
+}
+
+/// A dynamic XFA form's Arabic text is drawn shaped, found by search, and kept when the form is
+/// converted to a static one, flattened, saved and reopened.
+#[test]
+fn xfa_arabic_text_is_drawn_through_flatten_and_static_conversion_save_and_reopen() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic XFA text");
+        return;
+    }
+    let dir = workdir("xfa-arabic");
+    std::fs::write(dir.join("arabic.pdf"), arabic_xfa_form("مرحبا بالعالم")).unwrap();
+    std::fs::write(dir.join("latin.pdf"), arabic_xfa_form("Hello world")).unwrap();
+    let mut a = auto(&dir);
+
+    // Opened (laid out from the template): the Arabic is on the page, searchable, and the page
+    // differs from the same form with a Latin title.
+    let doc = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    let info = ok(&mut a, "doc_info", json!({ "doc": doc }));
+    assert_eq!(info["xfa"], "dynamic");
+    let warnings = info["xfa_layout"]["warnings"].to_string();
+    assert!(!warnings.contains("standard fonts"), "{warnings}");
+    assert_eq!(matches_of(&mut a, doc, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, doc, "عليكم"), 1);
+    let arabic_render = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    let latin = ok(&mut a, "doc_open", json!({ "path": "latin.pdf" }))["doc"].as_u64().unwrap();
+    assert_ne!(a.call("page_render", &json!({ "doc": latin, "page": 1, "dpi": 72 })).unwrap(), arabic_render);
+    let text = page_text(&mut a, doc).join("\n");
+    assert!(text.contains("مرحبا بالعالم") && text.contains("Applicant 123"), "{text}");
+    assert!(!text.contains('?'), "{text}");
+
+    // Converted to a static form: the same page, the field with its Arabic value; saved and
+    // reopened it is unchanged.
+    ok(&mut a, "xfa_to_static", json!({ "doc": doc }));
+    assert!(ok(&mut a, "doc_info", json!({ "doc": doc }))["xfa"].is_null());
+    assert_eq!(matches_of(&mut a, doc, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, doc, "أهلا"), 1, "the field's value is drawn too");
+    let fields = ok(&mut a, "form_fields", json!({ "doc": doc }));
+    assert_eq!(fields["fields"][0]["value"], "أهلا وسهلا");
+    let static_render = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "static.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "static.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(matches_of(&mut a, re, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, re, "أهلا"), 1);
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), static_render);
+
+    // Flattened: plain page content, no fields and no XFA, the Arabic still searchable.
+    let flat = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_flatten", json!({ "doc": flat, "comments": false, "fields": true }));
+    assert!(ok(&mut a, "doc_info", json!({ "doc": flat }))["xfa"].is_null());
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": flat }))["fields"].as_array().unwrap().len(), 0);
+    assert_eq!(matches_of(&mut a, flat, "بالعالم"), 1);
+    assert_eq!(matches_of(&mut a, flat, "أهلا"), 1);
+    let flat_render = a.call("page_render", &json!({ "doc": flat, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(flat_render, a.call("page_render", &json!({ "doc": latin, "page": 1, "dpi": 72 })).unwrap());
+    ok(&mut a, "doc_save", json!({ "doc": flat, "path": "flat.pdf" }));
+    let flat_re = ok(&mut a, "doc_open", json!({ "path": "flat.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(matches_of(&mut a, flat_re, "بالعالم"), 1);
+    assert_eq!(a.call("page_render", &json!({ "doc": flat_re, "page": 1, "dpi": 72 })).unwrap(), flat_render);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Without the Arabic face the form's Arabic is shown as `?` with a warning, as it always was; the
+/// form still opens and converts. (The face is taken away on this thread, so it runs in every build.)
+#[test]
+fn xfa_arabic_text_without_the_arabic_face_is_reported_and_shown_as_before() {
+    use pdfcraft_fonts::shaped_text::{Shaper, set_test_shaper};
+    struct NoFace;
+    impl Drop for NoFace {
+        fn drop(&mut self) {
+            set_test_shaper(None);
+        }
+    }
+    set_test_shaper(Some(Shaper {
+        shape: |_, _, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        has: |_, _| false,
+        outline: |_, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        arabic_available: || false,
+    }));
+    let _no_face = NoFace;
+    let dir = workdir("xfa-arabic-no-face");
+    std::fs::write(dir.join("arabic.pdf"), arabic_xfa_form("مرحبا بالعالم")).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    let info = ok(&mut a, "doc_info", json!({ "doc": doc }));
+    let warnings = info["xfa_layout"]["warnings"].to_string();
+    assert!(warnings.contains("standard fonts can't draw") && warnings.contains("Arabic"), "{warnings}");
+    assert_eq!(matches_of(&mut a, doc, "بالعالم"), 0);
+    assert!(page_text(&mut a, doc).join("\n").contains('?'));
+    ok(&mut a, "xfa_to_static", json!({ "doc": doc }));
+    assert!(ok(&mut a, "doc_info", json!({ "doc": doc }))["xfa"].is_null());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// One part of an Office package, inflated.
+fn package_part(zip: &[u8], name: &str) -> String {
+    let mut at = 0;
+    while zip[at..].starts_with(b"PK\x03\x04") {
+        let size = u32::from_le_bytes(zip[at + 18..at + 22].try_into().unwrap()) as usize;
+        let len = u16::from_le_bytes(zip[at + 26..at + 28].try_into().unwrap()) as usize;
+        let data = at + 30 + len;
+        if zip[at + 30..data] == *name.as_bytes() {
+            let mut xml = String::new();
+            std::io::Read::read_to_string(&mut flate2::read::DeflateDecoder::new(&zip[data..data + size]), &mut xml).unwrap();
+            return xml;
+        }
+        at = data + size;
+    }
+    panic!("{name} missing");
+}
+
+/// Export writes text as text (UTF-8 in Word, PowerPoint and HTML, `\u` escapes in RTF), so Arabic
+/// needs no font and is never refused or written as `?`; right-to-left paragraphs are marked as such.
+#[test]
+fn arabic_text_exports_to_every_office_format_as_right_to_left_paragraphs() {
+    use pdfcraft_cos::{Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
+    use std::sync::Arc;
+
+    let dir = workdir("export-arabic");
+    let logical = "مرحبا بالعالم 123";
+    let hex: String = logical.encode_utf16().map(|u| format!("{u:04X}")).collect();
+    // The page's glyph codes are Latin letters; ActualText says what they spell.
+    let content =
+        format!("/Span <</ActualText <FEFF{hex}>>> BDC BT /F1 14 Tf 20 150 Td (abcd) Tj (efgh) Tj ET EMC BT /F1 14 Tf 20 100 Td (Latin line) Tj ET");
+    let mut doc = Document::open(Arc::new(fixture(1))).unwrap();
+    doc.set(ObjRef::new(5, 0), Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    std::fs::write(dir.join("arabic.pdf"), write_full(&doc, &SaveOptions::default()).unwrap()).unwrap();
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({ "path": "arabic.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "text_lines", json!({ "doc": id, "page": 1 }))["lines"][0]["text"], logical);
+    for ext in ["docx", "pptx", "html", "rtf"] {
+        let r = ok(&mut a, "doc_export_office", json!({ "doc": id, "path": format!("out.{ext}") }));
+        assert_eq!(r["format"], ext);
+    }
+    let zip = std::fs::read(dir.join("out.docx")).unwrap();
+    let word = package_part(&zip, "word/document.xml");
+    assert!(word.contains(">مرحبا بالعالم 123</w:t>") && word.contains("<w:bidi/>") && word.contains("<w:rtl/>"), "{word}");
+    assert!(word.contains(">Latin line</w:t>"), "{word}");
+    assert_eq!(word.matches("<w:bidi/>").count(), 1, "only the Arabic paragraph: {word}");
+    let slide = package_part(&std::fs::read(dir.join("out.pptx")).unwrap(), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>مرحبا بالعالم 123</a:t>") && slide.contains("algn=\"r\" rtl=\"1\""), "{slide}");
+    let html = std::fs::read_to_string(dir.join("out.html")).unwrap();
+    assert!(html.contains("dir=\"rtl\">مرحبا بالعالم 123<"), "{html}");
+    assert!(html.contains("<p>Latin line</p>"), "{html}");
+    let rtf = std::fs::read_to_string(dir.join("out.rtf")).unwrap();
+    assert!(rtf.contains("\\rtlpar\\qr") && rtf.contains("\\u1605?\\u1585?"), "{rtf}");
+    assert!(!rtf.contains("?\\u1585??"), "no stray question marks: {rtf}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Arabic typed into a page with the Arabic face exports the same way.
+#[test]
+fn arabic_added_with_the_arabic_face_exports_to_word_and_html() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise exporting added Arabic text");
+        return;
+    }
+    let dir = workdir("export-arabic-face");
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let typed = "مرحبا بالعالم";
+    ok(&mut a, "text_edit", json!({ "doc": id, "page": 1, "paragraph": 1, "text": typed }));
+    ok(&mut a, "doc_export_office", json!({ "doc": id, "path": "out.docx" }));
+    ok(&mut a, "doc_export_office", json!({ "doc": id, "path": "out.html" }));
+    let word = package_part(&std::fs::read(dir.join("out.docx")).unwrap(), "word/document.xml");
+    assert!(word.contains(typed) && word.contains("<w:bidi/>"), "{word}");
+    let html = std::fs::read_to_string(dir.join("out.html")).unwrap();
+    assert!(html.contains(&format!("dir=\"rtl\">{typed}<")), "{html}");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -6319,6 +6864,31 @@ fn mixed_visual_region_edit_preview_save_reopen_and_undo_through_tools() {
     let unchanged = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1}));
     assert_eq!(unchanged["overflow"], false);
     assert_eq!(unchanged["source_rect"], unchanged["draft_rect"]);
+    // A box to each row (top-left-origin points), and no Arabic to shape in a page face.
+    assert_eq!(unchanged["row_boxes"].as_array().unwrap().len(), unchanged["rows"].as_array().unwrap().len());
+    assert_eq!(unchanged["shaping_faces"], json!([]));
+    // A paragraph of two looks is rewritten by the styled route, which justifies as the single-style route does: every row
+    // the wrap breaks is stretched to the paragraph's width, so its box spans the source's, and the last row is not stretched.
+    let long = "Heading\nBody bold text and some more words that fill the row and wrap";
+    let justified = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":long.replace('\n', " "),"align":"justify"}));
+    let (boxes, source) = (justified["row_boxes"].as_array().unwrap(), &justified["source_rect"]);
+    assert_eq!(boxes.len(), justified["rows"].as_array().unwrap().len(), "{justified}");
+    assert!(boxes.len() >= 4, "{justified}");
+    let (left, right) = (source[0].as_f64().unwrap(), source[2].as_f64().unwrap());
+    let (last, stretched) = boxes.split_last().unwrap();
+    // (The heading, a single word at 18 pt, is a row of one word, which is not stretched.)
+    assert_eq!(justified["rows"][0], "Heading", "{justified}");
+    assert!(boxes[0][2].as_f64().unwrap() < right - 0.5, "{boxes:?} against {source}");
+    for b in &stretched[1..] {
+        assert!((b[0].as_f64().unwrap() - left).abs() < 0.5 && (b[2].as_f64().unwrap() - right).abs() < 0.5, "{boxes:?} against {source}");
+    }
+    assert!((last[0].as_f64().unwrap() - left).abs() < 0.5 && last[2].as_f64().unwrap() < right - 0.5, "{boxes:?} against {source}");
+    // Not justified, the same draft is ragged: the rows are no wider than the paragraph, and not all as wide.
+    let ragged = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":long.replace('\n', " ")}));
+    let ragged = ragged["row_boxes"].as_array().unwrap();
+    assert!(ragged.iter().all(|b| b[2].as_f64().unwrap() <= right + 0.5), "{ragged:?} against {source}");
+    assert!(ragged[..ragged.len() - 1].iter().any(|b| b[2].as_f64().unwrap() < right - 0.5), "{ragged:?} against {source}");
+    assert!(a.call("text_edit_layout", &json!({"doc":doc,"page":1,"paragraph":1,"align":"sideways"})).is_err());
     let growing = ok(&mut a, "text_edit_layout", json!({"doc":doc,"page":1,"paragraph":1,"text":"Heading\nBody bold text\nExtra row\nAnother row"}));
     assert_eq!(growing["overflow"], true);
     assert_eq!(ok(&mut a, "text_paragraphs", json!({"doc":doc,"page":1})), before, "measuring does not apply a draft");
@@ -6854,4 +7424,285 @@ fn text_box_and_callout_fill_and_border_through_tools() {
     for index in 0..2 {
         assert_eq!(session.get(saved).unwrap().comment_props(0, index).unwrap().fill, None);
     }
+}
+
+/// Arabic typed into a form field is drawn shaped (not `?`) by the field's own appearance: the
+/// page shows it, text extraction and search read it in the typed order, no viewer is asked to
+/// redraw the form, and flattening, saving and reopening keep it.
+#[test]
+fn arabic_form_values_are_drawn_shaped_flattened_and_kept_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in form fields");
+        return;
+    }
+    let dir = workdir("form-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "rect": [20, 20, 180, 42], "name": "who" }));
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "multiline": true, "rect": [20, 60, 120, 140], "name": "about" }));
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+
+    let typed = "مرحبا بالعالم";
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "who": typed } }));
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"][0]["value"], typed);
+    let filled = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(filled, empty, "the page shows the Arabic text");
+    assert!(page_text(&mut a, doc)[0].contains(typed), "{:?}", page_text(&mut a, doc));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "بالعالم" }))["matches"].as_array().unwrap().len(), 1);
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "about": "رقم 42 Report مرحبا بالعالم الجميل في هذا اليوم" } }));
+    assert!(out.get("warnings").is_none(), "{out}");
+
+    // Saved and reopened: the same picture and text, and the form still wants no redraw.
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "filled.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "filled.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains(typed));
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": re }))["fields"][0]["value"], typed);
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+
+    // Flattening is not refused (nothing is `?`): the fields go, the text stays on the page.
+    ok(&mut a, "doc_flatten", json!({ "doc": doc, "comments": false, "fields": true }));
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"].as_array().unwrap().len(), 0);
+    assert!(page_text(&mut a, doc)[0].contains(typed));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "بالعالم" }))["matches"].as_array().unwrap().len(), 2);
+    assert_ne!(a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap(), empty);
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "flat.pdf" }));
+    let flat = ok(&mut a, "doc_open", json!({ "path": "flat.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, flat)[0].contains(typed));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The same fill in a build with no Arabic face keeps the value, draws `?`, says so, and refuses
+/// to flatten the `?` into the page.
+#[test]
+fn arabic_form_values_without_the_arabic_face_are_kept_marked_and_not_flattened() {
+    use pdfcraft_fonts::shaped_text::{Shaper, set_test_shaper};
+    struct NoFace;
+    impl Drop for NoFace {
+        fn drop(&mut self) {
+            set_test_shaper(None);
+        }
+    }
+    set_test_shaper(Some(Shaper {
+        shape: |_, _, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        has: |_, _| false,
+        outline: |_, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        arabic_available: || false,
+    }));
+    let _guard = NoFace;
+    let dir = workdir("form-arabic-no-face");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "rect": [20, 20, 180, 42], "name": "who" }));
+    let typed = "مرحبا";
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "who": typed } }));
+    let warned =
+        out["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).any(|m| m.contains("form field \"who\"") && m.contains("U+0645"));
+    assert!(warned, "{out}");
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"][0]["value"], typed);
+    assert!(page_text(&mut a, doc)[0].contains('?'));
+    let e = err(&mut a, "doc_flatten", json!({ "doc": doc })).to_string();
+    assert!(e.contains("nothing was flattened"), "{e}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Arabic in a text box, a Typewriter line and Fill & Sign text is drawn shaped (not `?`) by the
+/// annotation's own appearance: the page shows it, text extraction and search read it in the typed
+/// order, flattening keeps it, and saving and reopening keep the annotation and its look.
+#[test]
+fn arabic_free_text_is_drawn_shaped_flattened_and_kept_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in text boxes");
+        return;
+    }
+    let dir = workdir("free-text-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+
+    let typed = "مرحبا بالعالم";
+    let out =
+        ok(&mut a, "comment_add", json!({ "doc": doc, "page": 1, "type": "textbox", "rect": [20, 20, 180, 50], "contents": typed, "font_size": 12 }));
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    let boxed = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(boxed, empty, "the page shows the Arabic text box");
+    let mixed = "رقم 42 Report";
+    let out = ok(
+        &mut a,
+        "comment_add",
+        json!({ "doc": doc, "page": 1, "type": "textbox", "rect": [20, 60, 120, 120], "contents": mixed, "font_size": 12 }),
+    );
+    assert!(out.get("warnings").is_none(), "{out}");
+    let out = ok(&mut a, "fill_sign_add", json!({ "doc": doc, "page": 1, "type": "text", "at": [20, 150], "text": "السلام عليكم" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    let text = page_text(&mut a, doc)[0].clone();
+    assert!(text.contains(typed) && text.contains(mixed) && text.contains("السلام عليكم"), "{text:?}");
+    assert!(!text.contains('?'), "{text:?}");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "بالعالم" }))["matches"].as_array().unwrap().len(), 1);
+    let listed = ok(&mut a, "comment_list", json!({ "doc": doc }));
+    assert_eq!(listed["count"], 3, "{listed}");
+
+    // Saved and reopened: the same picture and text.
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "boxed.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "boxed.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains(typed));
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": re }))["count"], 3);
+
+    // Flattening is not refused (nothing is `?`): the annotations go, the text stays on the page.
+    ok(&mut a, "doc_flatten", json!({ "doc": doc, "comments": true, "fields": false }));
+    assert_eq!(ok(&mut a, "comment_list", json!({ "doc": doc }))["count"], 0);
+    assert!(page_text(&mut a, doc)[0].contains(typed));
+    assert_eq!(a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap(), drawn, "flattened, the page looks the same");
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "flat.pdf" }));
+    let flat = ok(&mut a, "doc_open", json!({ "path": "flat.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, flat)[0].contains(typed));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A comb field's Arabic value (one cluster per cell, one span for the value) and an Arabic push
+/// button caption are drawn shaped, not `?`: the page shows them, search reads them in the typed
+/// order, nothing is warned about, and saving, reopening and flattening keep them.
+#[test]
+fn arabic_comb_field_and_button_caption_are_drawn_shaped_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in comb fields and buttons");
+        return;
+    }
+    let dir = workdir("comb-button-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "text", "rect": [20, 20, 180, 42], "name": "pin" }));
+    ok(&mut a, "form_set_props", json!({ "doc": doc, "field": "pin", "max_length": 5, "flags": { "comb": true } }));
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+
+    let typed = "مرحبا";
+    let out = ok(&mut a, "form_fill", json!({ "doc": doc, "values": { "pin": typed } }));
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    assert_eq!(ok(&mut a, "form_fields", json!({ "doc": doc }))["fields"][0]["value"], typed);
+    let filled = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_ne!(filled, empty, "the page shows the comb value");
+    assert!(page_text(&mut a, doc)[0].contains(typed), "{:?}", page_text(&mut a, doc));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": typed }))["matches"].as_array().unwrap().len(), 1);
+
+    let out =
+        ok(&mut a, "form_add_field", json!({ "doc": doc, "page": 1, "type": "button", "caption": "موافق", "rect": [20, 60, 120, 90], "name": "ok" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    assert!(page_text(&mut a, doc)[0].contains("موافق"), "{:?}", page_text(&mut a, doc));
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "موافق" }))["matches"].as_array().unwrap().len(), 1);
+    let out = ok(&mut a, "form_set_props", json!({ "doc": doc, "field": "ok", "caption": "إلغاء" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "إلغاء" }))["matches"].as_array().unwrap().len(), 1);
+
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "comb.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "comb.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains(typed));
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+    ok(&mut a, "doc_flatten", json!({ "doc": doc, "comments": false, "fields": true }));
+    assert!(page_text(&mut a, doc)[0].contains(typed));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A dynamic stamp's "By" line with an Arabic author and a measurement's label with an Arabic unit
+/// are drawn shaped (not `?`), searchable in the typed order, and kept through save and reopen.
+#[test]
+fn arabic_stamp_by_line_and_measurement_label_are_drawn_shaped_through_tools() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("set CRAFT_FONTS_DIR to exercise Arabic in stamps and measurements");
+        return;
+    }
+    let dir = workdir("stamp-measure-arabic");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let empty = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    let out = ok(
+        &mut a,
+        "comment_add",
+        json!({ "doc": doc, "page": 1, "type": "stamp", "stamp": "reviewed", "dynamic": true, "at": [100, 200], "author": "أحمد" }),
+    );
+    assert!(out.get("warnings").is_none(), "shaped, so nothing is drawn as `?`: {out}");
+    let text = page_text(&mut a, doc)[0].clone();
+    assert!(text.contains("REVIEWED") && text.contains("أحمد") && !text.contains('?'), "{text:?}");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": doc, "query": "أحمد" }))["matches"].as_array().unwrap().len(), 1);
+
+    ok(&mut a, "measure_scale", json!({ "doc": doc, "page": 1, "points": [[10, 10], [70, 10]], "distance": 6, "unit": "سم", "precision": 1 }));
+    let out = ok(&mut a, "measure_distance", json!({ "doc": doc, "page": 1, "points": [[10, 20], [70, 100]], "author": "Tester" }));
+    assert!(out.get("warnings").is_none(), "{out}");
+    let text = page_text(&mut a, doc)[0].clone();
+    assert!(text.contains("سم") && !text.contains('?'), "{text:?}");
+    assert_ne!(a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap(), empty);
+
+    ok(&mut a, "doc_save", json!({ "doc": doc, "path": "stamped.pdf" }));
+    let re = ok(&mut a, "doc_open", json!({ "path": "stamped.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, re)[0].contains("أحمد") && page_text(&mut a, re)[0].contains("سم"));
+    let drawn = a.call("page_render", &json!({ "doc": doc, "page": 1, "dpi": 72 })).unwrap();
+    assert_eq!(a.call("page_render", &json!({ "doc": re, "page": 1, "dpi": 72 })).unwrap(), drawn);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Search & Redact patterns read Arabic-Indic digits as digits: a phone number typed with them is
+/// found by the phone pattern, marked, and removed from the page when applied.
+#[test]
+fn redact_pattern_search_reads_arabic_indic_digits_through_tools() {
+    use pdfcraft_cos::{Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
+    use std::sync::Arc;
+
+    let dir = workdir("redact-arabic-digits");
+    let mut doc = Document::open(Arc::new(fixture(1))).unwrap();
+    // Synthetic glyph codes: A ٥, B ١, C ٢, D ٣, E ٤, F ٦, G ٧ (Arabic-Indic digits) and a hyphen.
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
+                1 begincodespacerange <00> <FF> endcodespacerange 8 beginbfchar \
+                <41> <0665> <42> <0661> <43> <0662> <44> <0663> <45> <0664> <46> <0666> <47> <0667> <2D> <002D> \
+                endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let unicode = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
+    doc.update_dict(ObjRef::new(3, 0), |d| d.set(b"ToUnicode".to_vec(), Object::Ref(unicode))).unwrap();
+    let content = "BT /F1 24 Tf 20 150 Td (AAA-BCD-EAFG) Tj ET";
+    doc.set(ObjRef::new(5, 0), Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    std::fs::write(dir.join("digits.pdf"), write_full(&doc, &SaveOptions::default()).unwrap()).unwrap();
+
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({ "path": "digits.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(page_text(&mut a, id), ["٥٥٥-١٢٣-٤٥٦٧"], "the page holds Arabic-Indic digits");
+    assert_eq!(ok(&mut a, "text_find", json!({ "doc": id, "query": "555-123-4567" }))["count"], 1, "plain search already reads them as digits");
+    let r = ok(&mut a, "redact_mark", json!({ "doc": id, "pattern": "phone" }));
+    assert_eq!((r["marked"].as_u64(), r["marks_pending"].as_u64()), (Some(1), Some(1)), "{r}");
+    let r = ok(&mut a, "redact_apply", json!({ "doc": id }));
+    assert_eq!(r["applied"].as_u64(), Some(1), "{r}");
+    let text = page_text(&mut a, id)[0].clone();
+    assert!(!text.contains('٥') && !text.contains('٧'), "{text:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The same text box in a build with no Arabic face keeps its text, draws `?`, says so, and
+/// refuses to flatten the `?` into the page.
+#[test]
+fn arabic_free_text_without_the_arabic_face_is_kept_marked_and_not_flattened() {
+    use pdfcraft_fonts::shaped_text::{Shaper, set_test_shaper};
+    struct NoFace;
+    impl Drop for NoFace {
+        fn drop(&mut self) {
+            set_test_shaper(None);
+        }
+    }
+    set_test_shaper(Some(Shaper {
+        shape: |_, _, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        has: |_, _| false,
+        outline: |_, _| Err(pdfcraft_fonts::GlyphError::NoFont),
+        arabic_available: || false,
+    }));
+    let _guard = NoFace;
+    let dir = workdir("free-text-arabic-no-face");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let typed = "مرحبا";
+    let out = ok(&mut a, "comment_add", json!({ "doc": doc, "page": 1, "type": "textbox", "rect": [20, 20, 180, 50], "contents": typed }));
+    let warned = out["warnings"].as_array().is_some_and(|w| w.iter().filter_map(Value::as_str).any(|m| m.contains("U+0645")));
+    assert!(warned, "{out}");
+    assert!(page_text(&mut a, doc)[0].contains('?'));
+    let e = err(&mut a, "doc_flatten", json!({ "doc": doc })).to_string();
+    assert!(e.contains("nothing was flattened"), "{e}");
+    std::fs::remove_dir_all(dir).unwrap();
 }

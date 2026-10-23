@@ -3,7 +3,7 @@
 
 use pdfcraft_engine::{BorderStyle, CheckStyle, DocId, Edit, FieldFont, FieldLookPatch, FieldProps, FormFieldKind, field_flags};
 
-use crate::{prepare, theme, widgets};
+use crate::{prepare, rtl, theme, widgets};
 
 /// One property shown by the dialog. `apply` is explicit: merely opening the dialog, or
 /// visiting a tab, must never turn mixed values into the first field's value.
@@ -202,13 +202,24 @@ impl Draft {
     }
 }
 
-fn row<T>(ui: &mut egui::Ui, label: &str, c: &mut Change<T>, edit: impl FnOnce(&mut egui::Ui, &mut T)) {
-    ui.add(widgets::checkbox(&mut c.apply, tl!(label)));
-    // Colour swatches contain their own grid; give every property's editor a separate
-    // namespace so border and fill controls do not share widget identities.
-    ui.push_id(label, |ui| ui.add_enabled_ui(c.apply, |ui| edit(ui, &mut c.value)));
-    ui.label(if c.mixed { tl!("Mixed") } else { "" });
-    ui.end_row();
+/// One property: a checkbox that applies it (carrying its name), the editor, and the "Mixed" tag.
+fn row<T>(rows: &mut widgets::FormRows<'_>, label: &str, c: &mut Change<T>, edit: impl FnOnce(&mut egui::Ui, &mut T)) {
+    // The checkbox decides in this frame whether the editor is enabled.
+    let apply = std::cell::Cell::new(c.apply);
+    let (value, mixed) = (&mut c.value, c.mixed);
+    rows.row_with_note(
+        |ui| {
+            let mut on = apply.get();
+            let response = ui.add(widgets::checkbox(&mut on, tl!(label)));
+            apply.set(on);
+            response
+        },
+        // Colour swatches contain their own grid; give every property's editor a separate
+        // namespace so border and fill controls do not share widget identities.
+        |ui, _| _ = ui.push_id(label, |ui| ui.add_enabled_ui(apply.get(), |ui| edit(ui, value))),
+        |ui| _ = ui.label(if mixed { tl!("Mixed") } else { "" }),
+    );
+    c.apply = apply.get();
 }
 
 impl crate::PdfCraftApp {
@@ -225,7 +236,12 @@ impl crate::PdfCraftApp {
                 if self.apply_edit(Edit::Batch { label: "Change field properties".into(), edits }) {
                     return true;
                 }
-                self.toast.as_ref().map(|(message, _)| message.clone()).unwrap_or_else(|| "The field properties could not be changed.".into())
+                // The notice is in logical order; this dialog paints the line as it is, so under
+                // the Arabic interface it goes into display order first.
+                self.toast
+                    .as_ref()
+                    .map(|(message, _)| if crate::rtl::mirrored() { crate::bidi::display_rtl(message) } else { message.as_str().to_owned() })
+                    .unwrap_or_else(|| "The field properties could not be changed.".into())
             }
             Err(error) => error,
         };
@@ -236,8 +252,8 @@ impl crate::PdfCraftApp {
     }
 }
 
-fn bool_row(ui: &mut egui::Ui, label: &str, c: &mut Change<bool>) {
-    row(ui, label, c, |ui, value| {
+fn bool_row(rows: &mut widgets::FormRows<'_>, label: &str, c: &mut Change<bool>) {
+    row(rows, label, c, |ui, value| {
         egui::ComboBox::from_id_salt(label).selected_text(tl!(if *value { "Yes" } else { "No" })).show_ui(ui, |ui| {
             ui.selectable_value(value, true, tl!("Yes"));
             ui.selectable_value(value, false, tl!("No"));
@@ -246,29 +262,31 @@ fn bool_row(ui: &mut egui::Ui, label: &str, c: &mut Change<bool>) {
 }
 
 fn color(ui: &mut egui::Ui, value: &mut Option<[f64; 3]>) {
-    ui.horizontal(|ui| {
-        let mut none = value.is_none();
-        if ui.add(widgets::checkbox(&mut none, tl!("No color"))).changed() {
-            *value = if none { None } else { Some([0.0; 3]) };
-        }
-        if let Some(c) = crate::comments::swatch_grid(ui, *value) {
-            *value = Some(c);
-        }
+    widgets::start_block(ui, |ui| {
+        ui.horizontal(|ui| {
+            let mut none = value.is_none();
+            if ui.add(widgets::checkbox(&mut none, tl!("No color"))).changed() {
+                *value = if none { None } else { Some([0.0; 3]) };
+            }
+            if let Some(c) = crate::comments::swatch_grid(ui, *value) {
+                *value = Some(c);
+            }
+        });
     });
 }
 
 /// Check a property to apply its value to every selected field. No unchecked value is used.
 pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool, bool) {
     ui.set_width(600.0);
-    ui.label(egui::RichText::new(tl!("Shared Field Properties")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Shared Field Properties"));
     ui.label(crate::i18n::fmt(tl!("{n} fields selected"), &[("n", &d.names.len().to_string())]));
-    ui.label(
-        egui::RichText::new(tl!("Only checked properties will change. Mixed means the selected fields have different values."))
-            .small()
-            .color(t.text_muted),
+    widgets::small_text(
+        ui,
+        &tl_logical!("Only checked properties will change. Mixed means the selected fields have different values."),
+        t.text_muted,
     );
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    rtl::horizontal(ui, |ui| {
         for (tab, label) in [(Tab::General, "General"), (Tab::Appearance, "Appearance"), (Tab::Options, "Options")] {
             if tab == Tab::Options && !(d.text_fields || d.choice_fields || d.check_fields) {
                 continue;
@@ -279,11 +297,14 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
         }
     });
     ui.separator();
-    egui::ScrollArea::vertical().max_height(430.0).auto_shrink([false, true]).show(ui, |ui| {
-        egui::Grid::new("bulk-field-properties").num_columns(3).spacing([16.0, 10.0]).show(ui, |ui| match d.tab {
+    crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(430.0).auto_shrink([false, true]), |ui| {
+        // A form of three cells (the checkbox with the property's name, its editor, the tag): in
+        // Arabic the checkbox is at the right, then the editor, then the tag at its left.
+        widgets::form_grid_of(ui, "bulk-field-properties", [16.0, 10.0], None, 3, |ui| match d.tab {
             Tab::General => {
                 row(ui, "Tooltip:", &mut d.tooltip, |ui, v| {
-                    ui.add(egui::TextEdit::singleline(v).desired_width(280.0));
+                    let align = widgets::field_align(v);
+                    ui.add(widgets::BidiEdit::singleline(v).desired_width(280.0).horizontal_align(align));
                 });
                 bool_row(ui, "Read Only", &mut d.read_only);
                 bool_row(ui, "Required", &mut d.required);
@@ -303,9 +324,11 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
                         });
                     });
                     row(ui, "Text Color:", &mut d.text, |ui, v| {
-                        if let Some(c) = crate::comments::swatch_grid(ui, Some(*v)) {
-                            *v = c;
-                        }
+                        widgets::start_block(ui, |ui| {
+                            if let Some(c) = crate::comments::swatch_grid(ui, Some(*v)) {
+                                *v = c;
+                            }
+                        });
                     });
                 }
                 row(ui, "Border Color:", &mut d.border, color);

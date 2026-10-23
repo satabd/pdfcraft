@@ -60,6 +60,21 @@ fn same_style(a: &TextLine, b: &TextLine) -> bool {
         && (a.size - b.size).abs() < 0.01
 }
 
+/// The runs of `row` (indexes into `lines`, as drawn along the row) in the order they read in. A row of `/ActualText`
+/// spans with right-to-left text among them (as Edit text writes a line of shaped Arabic in several looks, a span for
+/// each look) holds each run in typing order, and the runs read in the order page text extraction puts them in
+/// ([`pdfcraft_fonts::shaped_text::reading_order`]). Any other row reads as it is drawn, each run's text already put in
+/// typing order on its own.
+fn reading_row(row: &[usize], lines: &[TextLine]) -> Vec<usize> {
+    let members: Vec<&TextLine> = row.iter().filter_map(|i| lines.get(*i)).collect();
+    if members.len() < 2 || members.len() != row.len() || !members.iter().all(|l| l.actual_text) || !members.iter().any(|l| l.logical_order) {
+        return row.to_vec();
+    }
+    let texts: Vec<&str> = members.iter().map(|l| l.text.as_str()).collect();
+    let order: Vec<usize> = pdfcraft_fonts::shaped_text::reading_order(&texts).into_iter().filter_map(|k| row.get(k).copied()).collect();
+    if order.len() == row.len() { order } else { row.to_vec() }
+}
+
 fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -132,13 +147,22 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
         if !block.rows.is_empty() {
             block.editor_text.push('\n');
         }
-        for &index in &row {
+        // The runs in the order they read in; `block.lines` keeps them in the order they are drawn.
+        let reading = reading_row(&row, lines);
+        let reordered = reading != row;
+        let mut prev: Option<&TextLine> = None;
+        for &index in &reading {
             let Some(line) = lines.get(index) else { continue };
-            // Some producers position separate words without encoding a space.
-            if let Some(prev) = block.lines.last().filter(|i| row.contains(i)).and_then(|i| lines.get(*i))
+            // Some producers position separate words without encoding a space. (Runs read in another order than they are
+            // drawn in are apart by the gap between their boxes, on whichever side it is.)
+            let gap = |prev: &TextLine| {
+                let after = line.frame_rect()[0] - prev.frame_rect()[2];
+                if reordered { after.max(prev.frame_rect()[0] - line.frame_rect()[2]) } else { after }
+            };
+            if let Some(prev) = prev
                 && !row_text.ends_with(char::is_whitespace)
                 && !line.text.starts_with(char::is_whitespace)
-                && line.frame_rect()[0] - prev.frame_rect()[2] > line.size * 0.12
+                && gap(prev) > line.size * 0.12
             {
                 row_text.push(' ');
                 block.editor_text.push(' ');
@@ -148,8 +172,9 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
             block.spans.push((start..block.editor_text.len(), index));
             row_text.push_str(&line.text);
             block.invisible &= line.origin.state.render_mode == 3;
-            block.lines.push(index);
+            prev = Some(line);
         }
+        block.lines.extend(row.iter().filter(|i| lines.get(**i).is_some()));
         if !block.text.is_empty() {
             if block.text.ends_with('-') {
                 block.text.pop();
@@ -164,32 +189,30 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
     blocks
 }
 
+/// The face [`shape_source`] shapes in: its program, the shaped run, the family name, and the page font
+/// resource the program is embedded under (the source's own, or a matching full face the page has).
+pub(super) type SourceShaping = (Vec<u8>, pdfcraft_fonts::source_shaping::ShapedRun, String, String);
+
 /// Shape in the source or an explicitly registered matching full face. Never use interface fonts.
-fn shape_source(
-    doc: &Document,
-    fonts: &Dict,
-    name: &str,
-    text: &str,
-) -> Result<Option<(Vec<u8>, pdfcraft_fonts::source_shaping::ShapedRun, String)>, EditError> {
+pub(super) fn shape_source(doc: &Document, fonts: &Dict, name: &str, text: &str) -> Result<Option<SourceShaping>, EditError> {
     if !pdfcraft_fonts::source_shaping::required(text) {
         return Ok(None);
     }
     let source =
         fonts.get(name.as_bytes()).and_then(|f| doc.dict(f)).ok_or_else(|| EditError::Invalid("the shaped text has no font resource".into()))?;
     let family = Metrics::from_dict(doc, &source).base_font;
-    let mut candidates = vec![source];
+    let mut candidates = vec![(name.to_owned(), source)];
     candidates.extend(
-        fonts
-            .iter()
-            .filter_map(|(_, f)| doc.dict(f))
-            .filter(|f| pdfcraft_fonts::embedding::face_key(&Metrics::from_dict(doc, f).base_font) == pdfcraft_fonts::embedding::face_key(&family)),
+        fonts.iter().filter_map(|(resource, f)| Some((String::from_utf8_lossy(resource).into_owned(), doc.dict(f)?))).filter(|(_, f)| {
+            pdfcraft_fonts::embedding::face_key(&Metrics::from_dict(doc, f).base_font) == pdfcraft_fonts::embedding::face_key(&family)
+        }),
     );
-    for font in candidates {
+    for (resource, font) in candidates {
         if let Some(bytes) = pdfcraft_fonts::pdf::embedded_sfnt(doc, &font)
             && pdfcraft_fonts::embedding::covers(&bytes, text)
             && let Ok(shaped) = pdfcraft_fonts::source_shaping::shape(&bytes, text)
         {
-            return Ok(Some((bytes, shaped, family)));
+            return Ok(Some((bytes, shaped, family, resource)));
         }
     }
     Err(EditError::Invalid("complex text needs the complete source TrueType/OpenType face; load that font before editing".into()))
@@ -375,9 +398,14 @@ pub(super) fn rewrite_styled_block(
     if !dx.is_finite() || !dy.is_finite() || style.width.is_some_and(|w| !w.is_finite()) {
         return Err(EditError::Invalid("the paragraph's position and width must be finite".into()));
     }
+    // Text that reads right to left (more Hebrew or Arabic letters than Latin) keeps the right edge of its rows, as the single-style
+    // rewrite does: it is right-aligned unless an alignment is asked for, and a single row grows to the left.
+    let rtl = crate::bidi::rtl_base(&draft.replace('\n', " "));
     // A visual row grows even when it contains several source/font runs. Multi-row
     // paragraphs retain their container width; an explicit width always wins.
-    let natural = if block.invisible || block.rows.len() == 1 {
+    let natural = if rtl && !block.invisible && block.rows.len() == 1 {
+        (block.rect[2] + dx - (p.crop(doc)[0] + 36.0)).max(block.rect[2] - block.rect[0])
+    } else if block.invisible || block.rows.len() == 1 {
         (p.crop(doc)[2] - 36.0 - (block.rect[0] + dx)).max(block.rect[2] - block.rect[0])
     } else {
         block.rect[2] - block.rect[0]
@@ -548,7 +576,7 @@ pub(super) fn rewrite_styled_block(
             }
             let segment = items.get(at..end).unwrap_or_default();
             let string: String = segment.iter().map(|v| v.0).collect();
-            if let Some((_, shaped, _)) = shape_source(doc, &fonts, &item.2, &string)? {
+            if let Some((_, shaped, _, _)) = shape_source(doc, &fonts, &item.2, &string)? {
                 let source = lines.get(item.1).unwrap_or(first);
                 let scale =
                     overrides.get(&item.1).and_then(|r| r.scale).or(style.scale).map_or(source.origin.state.scale, |s| (s / 100.0).clamp(0.1, 10.0));
@@ -575,6 +603,9 @@ pub(super) fn rewrite_styled_block(
     let mut row_start = 0;
     let mut row = Vec::new();
     let mut row_width = 0.0;
+    // Whether each row ends its paragraph (a line break follows it, or it is the last): a justified text leaves those
+    // unstretched, as it does the rows it did not break.
+    let mut ends_paragraph = Vec::new();
     // Wrap at word boundaries, retaining explicit source row breaks and whitespace.
     let mut at = 0;
     while at < chars.len() {
@@ -582,6 +613,7 @@ pub(super) fn rewrite_styled_block(
         if item.0 == '\n' {
             row_ranges.push(row_start..row_start + row.len());
             rows.push(std::mem::take(&mut row));
+            ends_paragraph.push(true);
             row_width = 0.0;
             at += 1;
             row_start = at;
@@ -605,6 +637,7 @@ pub(super) fn rewrite_styled_block(
             }
             row_ranges.push(row_start..row_start + row.len());
             rows.push(std::mem::take(&mut row));
+            ends_paragraph.push(false);
             row_width = 0.0;
             row_start = at;
         }
@@ -615,6 +648,7 @@ pub(super) fn rewrite_styled_block(
     if !row.is_empty() {
         row_ranges.push(row_start..row_start + row.len());
         rows.push(row);
+        ends_paragraph.push(true);
     }
     let streams = content_streams(doc, &p.dict);
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
@@ -654,6 +688,31 @@ pub(super) fn rewrite_styled_block(
         }
     }
     let measured: Vec<_> = rows.iter().map(|r| measure(r)).collect::<Result<_, _>>()?;
+    // Justified: each row the wrap broke is stretched to the paragraph's width by widening the spaces between its words, by
+    // this many points each (none for a row that ends its paragraph or a line, or has no space between words). A row that
+    // begins or ends with a space is not stretched either: those spaces are not between words.
+    let justify = style.align == Some(crate::added::Align::Justify);
+    let gap_points: Vec<f64> = rows
+        .iter()
+        .enumerate()
+        .map(|(r, row)| {
+            let edge = |c: Option<&(char, usize, String)>| c.is_none_or(|c| c.0.is_whitespace());
+            let gaps = row.iter().filter(|c| c.0 == ' ').count();
+            let extra = width - measured.get(r).copied().unwrap_or(0.0);
+            if !justify
+                || ends_paragraph.get(r).copied().unwrap_or(true)
+                || edge(row.first())
+                || edge(row.last())
+                || gaps == 0
+                || !extra.is_finite()
+                || extra <= 0.0
+            {
+                return 0.0;
+            }
+            let gap = extra / gaps as f64;
+            if gap.is_finite() { gap } else { 0.0 }
+        })
+        .collect();
     let mut shaped_runs = HashMap::new();
     let mut segment_advances = HashMap::new();
     for (row_index, row) in rows.iter().enumerate().filter(|(r, _)| !kept.get(*r).copied().unwrap_or(false)) {
@@ -665,7 +724,7 @@ pub(super) fn rewrite_styled_block(
             }
             segment_advances.insert((row_index, at), row.get(at..end).unwrap_or_default().iter().map(&advance).sum::<f64>());
             let string: String = row.get(at..end).unwrap_or_default().iter().map(|v| v.0).collect();
-            if let Some((bytes, shaped, family)) = shape_source(doc, &fonts, &item.2, &string)? {
+            if let Some((bytes, shaped, family, _)) = shape_source(doc, &fonts, &item.2, &string)? {
                 shaped_runs.insert((row_index, at), (bytes, shaped, family));
             }
             at = end;
@@ -717,9 +776,24 @@ pub(super) fn rewrite_styled_block(
             continue;
         }
         let w = measured.get(row_index).copied().unwrap_or(0.0);
-        let align = style.align.unwrap_or(if centered { crate::added::Align::Center } else { crate::added::Align::Left });
+        let gap = gap_points.get(row_index).copied().unwrap_or(0.0);
+        let align = match style.align {
+            // A justified right-to-left row that is not stretched keeps the right edge the stretched ones end at.
+            Some(crate::added::Align::Justify) if gap <= 0.0 && rtl => crate::added::Align::Right,
+            Some(align) => align,
+            None if centered => crate::added::Align::Center,
+            None if rtl => crate::added::Align::Right,
+            None => crate::added::Align::Left,
+        };
         let original_rect = block.rows.get(row_index).and_then(|row| row_rect(row, lines)).unwrap_or(block.rect);
-        let left = if style.width.is_none() && style.align.is_none() { original_rect[0] } else { block.rect[0] };
+        let left = if style.width.is_none() && style.align.is_none() {
+            original_rect[0]
+        } else if justify && rtl && style.width.is_none() && block.rows.len() == 1 && !block.invisible {
+            // A single right-to-left row grows to the left, from its right edge, as far as the margin.
+            block.rect[2] - width
+        } else {
+            block.rect[0]
+        };
         let available = if style.width.is_none() && style.align.is_none() { original_rect[2] - original_rect[0] } else { width };
         let mut x = left
             + match align {
@@ -746,8 +820,22 @@ pub(super) fn rewrite_styled_block(
             if let Some(s) = overrides.get(&item.1).and_then(|r| r.scale).or(style.scale) {
                 state.scale = (s / 100.0).clamp(0.1, 10.0);
             }
-            if !shaped_runs.contains_key(&(row_index, pos)) {
+            let is_shaped = shaped_runs.contains_key(&(row_index, pos));
+            if !is_shaped {
                 state.scale *= calibration.get(&item.1).copied().unwrap_or(1.0);
+            }
+            // A justified row's spaces between words: each is widened by `gap` points. In text space units (before the
+            // horizontal scale, as word spacing is), the share of this segment's text matrix that reaches the page.
+            let stretched = if gap > 0.0 { segment.iter().filter(|c| c.0 == ' ').count() } else { 0 };
+            let unit = state.scale * if is_shaped { source.origin.k } else { across(source) };
+            let gap_text = if stretched > 0 && unit.is_finite() && unit > 1e-9 && gap.is_finite() { gap / unit } else { 0.0 };
+            // Word spacing reaches only a single-byte code 32 (ISO 32000-1 §9.3.3): where the font shows its space so, it
+            // widens the spaces of the whole segment; otherwise (a composite font, a generated Type 3 font, a subset with no
+            // space glyph) each gap is a TJ adjustment after its space. Shaped glyphs sit at matrices of their own.
+            let word_spacing_reaches =
+                gap_text > 0.0 && !is_shaped && m.encode(" ").is_some_and(|b| m.codes(&b).iter().all(|(c, len)| m.is_space(*c, *len)));
+            if gap_text > 0.0 && word_spacing_reaches {
+                state.word_spacing += gap_text;
             }
             if let Some([r, g, b]) = overrides.get(&item.1).and_then(|r| r.color).or(style.color) {
                 state.fill = vec![Op::new("rg", vec![n(r), n(g), n(b)])];
@@ -780,7 +868,8 @@ pub(super) fn rewrite_styled_block(
                     block_ops.push(Op::new("Tm", matrix.map(n).to_vec()));
                     block_ops.push(Op::new("Tj", vec![Object::String(PdfString::literal(code.to_be_bytes().to_vec()))]));
                     block_ops.push(Op::new("ET", vec![]));
-                    extra += state.char_spacing * glyph.text.chars().count() as f64 + state.word_spacing * glyph.text.matches(' ').count() as f64;
+                    extra += state.char_spacing * glyph.text.chars().count() as f64
+                        + (state.word_spacing + gap_text) * glyph.text.matches(' ').count() as f64;
                 }
                 block_ops.push(Op::new("EMC", vec![]));
                 segment_width = (shaped.advance * size + extra) * state.scale * source.origin.k;
@@ -788,15 +877,22 @@ pub(super) fn rewrite_styled_block(
                 block_ops.push(Op::new("BT", vec![]));
                 block_ops.extend(state.ops());
                 block_ops.push(Op::new("Tm", tm.iter().map(|v| n(*v)).collect()));
-                block_ops.extend(source_show(
-                    m,
-                    &string,
-                    size_of(source, item.1),
-                    spaces.borrow().get(&item.2).copied().unwrap_or_else(|| source_space(doc, &fonts, m)),
-                    state.char_spacing,
-                    state.word_spacing,
-                )?);
+                let (size, space) = (size_of(source, item.1), spaces.borrow().get(&item.2).copied().unwrap_or_else(|| source_space(doc, &fonts, m)));
+                if gap_text > 0.0 && !word_spacing_reaches {
+                    // Shown up to and including each space, then moved on.
+                    for piece in string.split_inclusive(' ') {
+                        block_ops.extend(source_show(m, piece, size, space, state.char_spacing, state.word_spacing)?);
+                        if piece.ends_with(' ') {
+                            block_ops.push(Op::new("TJ", vec![Object::Array(vec![n(-1000.0 * gap_text / size)])]));
+                        }
+                    }
+                } else {
+                    block_ops.extend(source_show(m, &string, size, space, state.char_spacing, state.word_spacing)?);
+                }
                 block_ops.push(Op::new("ET", vec![]));
+                if gap_text > 0.0 {
+                    segment_width += stretched as f64 * gap;
+                }
             }
             if underlines.get(&item.1).copied().or(style.underline) == Some(true) {
                 let [r, g, b] = overrides.get(&item.1).and_then(|r| r.color).or(style.color).unwrap_or(source.color);

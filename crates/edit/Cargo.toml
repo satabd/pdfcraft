@@ -21,4 +21,8 @@ kurbo = { workspace = true }
 unicode-bidi = "0.3"
 
 [dev-dependencies]
+# The stand-in for the Arabic face that the shaped-text tests use.
+pdfcraft-fonts = { workspace = true, features = ["test-shaper"] }
 hayro-syntax = { workspace = true }
+# Page text as copy and Find read it, for the shaped-text tests: what a span of each look reads back as.
+pdfcraft-render = { workspace = true }

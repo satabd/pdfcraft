@@ -615,6 +615,7 @@ impl Automation {
                     width: a.opt_num("width")?,
                     resource: a.opt_str("font_resource")?.map(str::to_owned),
                     ranges: parse_style_ranges(a.get("ranges"))?,
+                    align: a.opt_str("align")?.map(text_align).transpose()?,
                     ..Default::default()
                 };
                 let layout = doc.text_edit_layout(page, k as usize - 1, text, &style).map_err(failed)?;
@@ -625,8 +626,10 @@ impl Automation {
                     [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]
                 };
                 let fonts: Vec<_> = doc.text_editor_fonts(page).into_iter().map(|f| json!({"resource": f.resource, "face": f.face})).collect();
+                let faces: Vec<_> = layout.shaping_faces.iter().map(|(line, resource)| json!({"line": line + 1, "resource": resource})).collect();
                 json!({ "page": page + 1, "paragraph": k, "source_rect": view_rect(layout.source_rect),
-                    "draft_rect": layout.draft_rect.map(view_rect), "overflow": layout.overflow, "embedded_fonts": fonts })
+                    "draft_rect": layout.draft_rect.map(view_rect), "overflow": layout.overflow, "rows": layout.rows,
+                    "row_boxes": layout.row_rects.iter().map(|r| view_rect(*r)).collect::<Vec<_>>(), "shaping_faces": faces, "embedded_fonts": fonts })
             }
             "text_edit" if a.get("paragraph").is_some() => {
                 let page = self.page(&a)?;
@@ -665,15 +668,7 @@ impl Automation {
                 if let Some(c) = a.opt_str("color")? {
                     style.color = Some(comments::parse_color(c)?);
                 }
-                if let Some(al) = a.opt_str("align")? {
-                    style.align = Some(match al {
-                        "left" => pdfcraft_engine::TextAlign::Left,
-                        "center" => pdfcraft_engine::TextAlign::Center,
-                        "right" => pdfcraft_engine::TextAlign::Right,
-                        "justify" => pdfcraft_engine::TextAlign::Justify,
-                        other => return Err(ToolError::InvalidArgs(format!("unknown align {other:?}"))),
-                    });
-                }
+                style.align = a.opt_str("align")?.map(text_align).transpose()?;
                 let mut out = self.apply(&a, Edit::EditTextBlock { page, block: k as usize - 1, text, style })?;
                 if let Some(b) = self.doc(&a)?.text_blocks(page).get(k as usize - 1) {
                     out["paragraph"] = json!({ "text": b.text, "lines": b.lines.len(), "font": b.base_font });
@@ -2188,6 +2183,17 @@ fn foreign_share(path: &Path, root: &Path) -> bool {
 }
 
 // ---- JSON helpers ----------------------------------------------------------------------------
+
+/// The alignment `name` ("left", "center", "right", "justify") names.
+fn text_align(name: &str) -> Result<pdfcraft_engine::TextAlign> {
+    Ok(match name {
+        "left" => pdfcraft_engine::TextAlign::Left,
+        "center" => pdfcraft_engine::TextAlign::Center,
+        "right" => pdfcraft_engine::TextAlign::Right,
+        "justify" => pdfcraft_engine::TextAlign::Justify,
+        other => return Err(ToolError::InvalidArgs(format!("unknown align {other:?}"))),
+    })
+}
 
 fn parse_style_ranges(value: Option<&Value>) -> Result<Vec<pdfcraft_engine::RangeStyle>> {
     let Some(value) = value else { return Ok(Vec::new()) };

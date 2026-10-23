@@ -20,9 +20,12 @@ use pdfcraft_fonts::{CraftFont, GlyphError, japanese_glyph_from};
 
 use crate::EditError;
 
+#[path = "text_looks.rs"]
+mod looks;
 #[path = "text_regions.rs"]
 mod regions;
-use regions::{group_blocks, rewrite_styled_block};
+use crate::text_shaped;
+use regions::{group_blocks, rewrite_styled_block, shape_source};
 
 /// One line of existing text.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,7 +51,7 @@ pub struct TextLine {
     pub decodable: bool,
     /// Whether the font requires visual-order Indic text.
     pub visual_order: bool,
-    /// The Japanese or Hebrew fallback face the font subsets, when the line is in one (see [`same_font`]).
+    /// The Japanese, Hebrew or Arabic fallback face the font subsets, when the line is in one (see [`same_font`]).
     face: Option<String>,
     /// Its box along and across its baseline, `[along0, across0, along1, across1]` (see
     /// [`TextLine::frame_rect`]). Upright text has `rect`; turned text has its own box, which is
@@ -149,6 +152,63 @@ pub struct TextEditLayout {
     pub source_rect: [f64; 4],
     pub draft_rect: Option<[f64; 4]>,
     pub overflow: bool,
+    /// The text of each row of the paragraph as the rewrite lays it out, top to bottom: where the page breaks the draft
+    /// into lines (a row of several runs is one row).
+    pub rows: Vec<String>,
+    /// The box of each of `rows` in user space, as the rewrite writes it (the union of the boxes of its runs): a justified
+    /// row is as wide as the paragraph, a right-to-left one ends where it was put.
+    pub row_rects: Vec<[f64; 4]>,
+    /// The page fonts the rewrite shapes the draft's Arabic in, in place, as `(source run, font resource)` for each source
+    /// run of the paragraph (an index into [`text_lines`]): the complete face the run's font is, or one the page
+    /// has of the same face, which the rewrite shapes the letters in with its own tables and draws them in. Empty where the
+    /// rewrite draws Arabic as generated shaped glyphs instead (a subset or no embedded face, a font or weight change,
+    /// a face lacking a letter), and for text with no Arabic.
+    pub shaping_faces: Vec<(usize, String)>,
+}
+
+/// Whether `style` leaves the paragraph's own fonts alone: no document font chosen, no family or weight change, for
+/// the paragraph or for any range of it. The rewrite then shows the text in the face it is written in when it can.
+fn keeps_source_face(style: &BlockStyle) -> bool {
+    style.resource.is_none()
+        && style.family.is_none()
+        && style.bold.is_none()
+        && style.ranges.iter().all(|r| r.family.is_none() && r.resource.is_none())
+}
+
+/// The page fonts the rewrite of `draft` in `style` shapes Arabic in, in place, for each source run of `block` (see
+/// [`TextEditLayout::shaping_faces`]). This is the decision [`rewrite_block_from`] takes (`arabic_source`) and the styled
+/// rewrite follows, asked for every run: a face that [`shape_source`] shapes each row of the draft in.
+fn shaping_faces(doc: &Document, page: usize, lines: &[TextLine], block: &TextBlock, draft: &str, style: &BlockStyle) -> Vec<(usize, String)> {
+    let members: Vec<&TextLine> = block.lines.iter().filter_map(|i| lines.get(*i)).collect();
+    if !text_shaped::has_arabic(draft)
+        || draft.chars().any(crate::bidi::is_hebrew)
+        || !keeps_source_face(style)
+        || !members.iter().all(|line| line.upright())
+        || members.iter().any(|line| line.visual_order)
+    {
+        return Vec::new();
+    }
+    let Ok(p) = page_dict(doc, page) else { return Vec::new() };
+    let resources = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
+    let fonts = resources.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    let mut by_font: HashMap<&str, Option<String>> = HashMap::new();
+    block
+        .lines
+        .iter()
+        .filter_map(|index| {
+            let line = lines.get(*index)?;
+            let face = by_font
+                .entry(line.font.as_str())
+                .or_insert_with(|| {
+                    // (the rewrite shapes one row at a time; a row of other scripts alone has nothing to shape)
+                    let mut faces = draft.split('\n').filter_map(|row| shape_source(doc, &fonts, &line.font, row).transpose());
+                    let first = faces.next()?.ok()?.3;
+                    faces.all(|face| face.is_ok()).then_some(first)
+                })
+                .clone()?;
+            Some((*index, face))
+        })
+        .collect()
 }
 
 pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, style: &BlockStyle) -> Result<TextEditLayout, EditError> {
@@ -158,7 +218,10 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
     let original = group_blocks(&lines);
     let source = original.get(block).ok_or(EditError::Invalid("text block does not exist".into()))?;
     if text == source.editor_text && *style == BlockStyle::default() {
-        return Ok(TextEditLayout { source_rect: source.rect, draft_rect: Some(source.rect), overflow: false });
+        let rows = source.rows.iter().map(|row| row.iter().filter_map(|i| lines.get(*i)).map(|l| l.text.as_str()).collect::<String>()).collect();
+        let row_rects = source.rows.iter().filter_map(|row| row.iter().filter_map(|i| lines.get(*i)).map(|l| l.rect).reduce(union)).collect();
+        let shaping_faces = shaping_faces(doc, page, &lines, source, text, style);
+        return Ok(TextEditLayout { source_rect: source.rect, draft_rect: Some(source.rect), overflow: false, rows, row_rects, shaping_faces });
     }
     // Subtract the untouched runs by value, rather than by operator offsets: a rewrite may
     // split BT/ET or add font resources. A multiset also handles coincident repeated text.
@@ -170,9 +233,12 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
             *untouched.entry(key(line)).or_insert(0_usize) += 1;
         }
     }
+    let shaping_faces = shaping_faces(doc, page, &lines, source, text, style);
     let mut draft = doc.clone();
     rewrite_block_from(&mut draft, page, lines, block, Some(text), style, MAX_TYPE3_GLYPHS)?;
     let mut rect: Option<[f64; 4]> = None;
+    // The runs the rewrite wrote, in order; those on one baseline are one row.
+    let mut rows: Vec<(f64, String, [f64; 4])> = Vec::new();
     for line in text_lines(&draft, page)? {
         if let Some(count) = untouched.get_mut(&key(&line))
             && *count > 0
@@ -181,10 +247,19 @@ pub fn text_edit_layout(doc: &Document, page: usize, block: usize, text: &str, s
             continue;
         }
         rect = Some(rect.map_or(line.rect, |r| [r[0].min(line.rect[0]), r[1].min(line.rect[1]), r[2].max(line.rect[2]), r[3].max(line.rect[3])]));
+        match rows.last_mut() {
+            Some((baseline, row, row_rect)) if (*baseline - line.origin_baseline()).abs() <= line.size.abs() * 0.25 => {
+                row.push_str(&line.text);
+                *row_rect = union(*row_rect, line.rect);
+            }
+            _ => rows.push((line.origin_baseline(), line.text.clone(), line.rect)),
+        }
     }
+    let row_rects = rows.iter().map(|(_, _, rect)| *rect).collect();
+    let rows = rows.into_iter().map(|(_, row, _)| row).collect();
     let overflow = rect
         .is_some_and(|r| r[0] < source.rect[0] - 0.5 || r[1] < source.rect[1] - 0.5 || r[2] > source.rect[2] + 0.5 || r[3] > source.rect[3] + 0.5);
-    Ok(TextEditLayout { source_rect: source.rect, draft_rect: rect, overflow })
+    Ok(TextEditLayout { source_rect: source.rect, draft_rect: rect, overflow, rows, row_rects, shaping_faces })
 }
 
 /// Text and graphics state captured for rewriting.
@@ -514,7 +589,7 @@ struct Ts {
     /// The operators that set the current fill colour (`g`, `rg`, `k`, or `cs` + `sc`/`scn`).
     fill: Vec<Op>,
     font: Option<(Vec<u8>, Rc<Metrics>)>,
-    /// The Japanese or Hebrew fallback face the font subsets, when the font is one (see [`is_type3_fallback`]).
+    /// The Japanese, Hebrew or Arabic fallback face the font subsets, when the font is one (see [`is_type3_fallback`]).
     face: Option<String>,
     size: f64,
     char_spacing: f64,
@@ -1123,7 +1198,7 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
             let bt = pen.bt;
             let (near, gap) = pen.continues(&s, if bt == s.bt { 3.0 } else { 1.5 });
             piece == si
-                && lines.last().is_some_and(|l| l.scope == s.scope && l.logical_order == s.logical_order)
+                && lines.last().is_some_and(|l| joins_order(l, &s))
                 && (bt == s.bt || lines.last().is_some_and(|l| compatible_word(l, &s)))
                 && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_font(l, &s.font, s.face.as_deref())))
                 && (s.text.trim().is_empty()
@@ -1200,6 +1275,13 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
     Ok(lines)
 }
 
+/// Whether run `s` may continue line `l` as far as their marked content and order go: in the same scope, and both in
+/// typing order or neither. Two right-to-left `/ActualText` spans never join: each is already in typing order, and the
+/// order they read in is that of the row they are in (see `group_layout`), as page text extraction takes it.
+fn joins_order(l: &TextLine, s: &Shown) -> bool {
+    l.scope == s.scope && l.logical_order == s.logical_order && !(l.logical_order && s.logical_order)
+}
+
 /// Joining independent text objects is safe only when they use the same text and graphics
 /// transforms and spacing. In particular, a nearby rotated label isn't part of this line.
 fn compatible_word(line: &TextLine, shown: &Shown) -> bool {
@@ -1218,7 +1300,7 @@ fn compatible_word(line: &TextLine, shown: &Shown) -> bool {
 fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream: usize) {
     let joins = last.is_some_and(|pen| {
         let bt = pen.bt;
-        lines.last().is_some_and(|l| l.scope == s.scope && l.logical_order == s.logical_order)
+        lines.last().is_some_and(|l| joins_order(l, &s))
             && (bt == s.bt || lines.last().is_some_and(|l| compatible_word(l, &s)))
             && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_font(l, &s.font, s.face.as_deref())))
             && (s.text.trim().is_empty()
@@ -1449,14 +1531,16 @@ const JAPANESE_FONT_NAME: &str = "PCJapanese";
 /// The `/Name` of the Type 3 fonts generated for Hebrew text.
 const HEBREW_FONT_NAME: &str = "PCHebrew";
 
-/// Whether `font` is one of those generated fonts (Japanese or Hebrew): a replacement longer than
-/// one of them is split across several, which read back as one line (see [`same_font`]).
+/// Whether `font` is one of those generated fonts (Japanese, Hebrew or Arabic): a replacement
+/// longer than one of them is split across several, which read back as one line (see [`same_font`]).
 fn is_type3_fallback(font: &Dict) -> bool {
     font.name(b"Subtype") == Some(b"Type3")
-        && font.name(b"Name").is_some_and(|n| n == JAPANESE_FONT_NAME.as_bytes() || n == HEBREW_FONT_NAME.as_bytes())
+        && font
+            .name(b"Name")
+            .is_some_and(|n| n == JAPANESE_FONT_NAME.as_bytes() || n == HEBREW_FONT_NAME.as_bytes() || n == text_shaped::ARABIC_FONT_NAME.as_bytes())
 }
 
-/// Whether a run shown in `font` (a resource name, and the Japanese or Hebrew fallback face it subsets, if
+/// Whether a run shown in `font` (a resource name, and the Japanese, Hebrew or Arabic fallback face it subsets, if
 /// any) continues `line`: the same font resource, or another subset of the same face.
 fn same_font(line: &TextLine, font: &[u8], face: Option<&str>) -> bool {
     line.font.as_bytes() == font || (line.face.is_some() && line.face.as_deref() == face)
@@ -1864,6 +1948,14 @@ fn refuse_clipping_text(lines: &[TextLine], dropped: &std::collections::HashSet<
 /// [`replace_line`] with the most unique characters one generated font may hold (tests lower it).
 pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usize, text: &str, max_glyphs: usize) -> Result<LineEdit, EditError> {
     let text = text.replace(['\n', '\r'], " ");
+    // Arabic is shaped (see `text_shaped`), so its face must exist; settled before anything changes.
+    let arabic = text_shaped::has_arabic(&text);
+    if arabic && text.chars().any(crate::bidi::is_hebrew) {
+        return Err(text_shaped::mixed_scripts_error());
+    }
+    if arabic {
+        text_shaped::require_face(&text)?;
+    }
     let lines = text_lines(doc, page)?;
     let target = lines.get(line).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no line {}", page + 1, line + 1)))?;
     // Copies of the line drawn on the same baseline go with it, so the replacement is all that
@@ -1885,7 +1977,7 @@ pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usi
     let indic_text = if visual_indic { crate::indic::to_visual(&text) } else { text.clone() };
     // Typed in logical order; drawn left to right (right-to-left runs reversed).
     let shown = crate::bidi::to_visual(&indic_text);
-    let reused = font.as_ref().filter(|m| source_encodes(m, &shown));
+    let reused = font.as_ref().filter(|m| !arabic && source_encodes(m, &shown));
     let mut substituted = None;
     let mut replacement: Vec<Op> = Vec::new();
     // ' and " also move to the next line; keep that.
@@ -1907,6 +1999,17 @@ pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usi
             target.origin.state.char_spacing,
             target.origin.state.word_spacing,
         )?),
+        None if arabic => {
+            let size = font_size_before(&ops, first).unwrap_or(target.size);
+            let (spacing, words) = match ops[first].op.as_slice() {
+                b"\"" => (ops[first].operands.get(1).and_then(Object::as_f64), ops[first].operands.first().and_then(Object::as_f64)),
+                _ => (None, None),
+            };
+            let (spacing, words) = (spacing.unwrap_or(target.origin.state.char_spacing), words.unwrap_or(target.origin.state.word_spacing));
+            let substituted_font =
+                shaped_line(doc, &mut fonts_res, &target, font.as_ref(), &text, size, max_glyphs, (spacing, words), &mut replacement)?;
+            substituted = Some(substituted_font);
+        }
         None => {
             let fallback_shown = crate::bidi::to_visual(&text);
             if needs_type3(&text) {
@@ -1959,6 +2062,71 @@ pub(crate) fn replace_line_with_limit(doc: &mut Document, page: usize, line: usi
         }
     })?;
     Ok(LineEdit { substituted })
+}
+
+/// Replaces `target` with `text` laid out and shaped as Arabic: the operators go to `replacement`,
+/// which ends with the target's own font and spacing restored. Returns what to report as the
+/// substituted font. The Latin pieces use the line's own font when it can show them, else
+/// Helvetica in the line's family.
+#[allow(clippy::too_many_arguments)]
+fn shaped_line(
+    doc: &mut Document,
+    fonts_res: &mut Dict,
+    target: &TextLine,
+    font: Option<&Metrics>,
+    text: &str,
+    size: f64,
+    max_glyphs: usize,
+    (spacing, words): (f64, f64),
+    replacement: &mut Vec<Op>,
+) -> Result<String, EditError> {
+    let n = pdfcraft_content::num;
+    let rtl = crate::bidi::rtl_base(text);
+    let latin = text_shaped::latin_of(text);
+    let space = font.map_or(0.33, |m| source_space(doc, fonts_res, m));
+    let reuse = font.filter(|m| source_encodes(m, &latin) && source_encodes(m, &text_shaped::with_mirrors(&latin)));
+    let base = source_family(&target.base_font).base_font(target.bold, target.italic);
+    let helvetica = format!("PCEd{}", base.replace('-', ""));
+    let show = |s: &str| -> Result<Vec<Op>, EditError> {
+        if let Some(m) = reuse {
+            return source_show(m, s, size, space, 0.0, 0.0);
+        }
+        if s.chars().any(|c| !is_win_ansi_char(c) && c != '?') {
+            return Err(text_shaped::unsupported_with_arabic(s));
+        }
+        Ok(vec![Op::new("Tj", vec![Object::String(PdfString::literal(pdfcraft_fonts::win_ansi(s)))])])
+    };
+    let latin_font = if reuse.is_some() { target.font.as_str() } else { helvetica.as_str() };
+    // The Arabic in the line's weight and slant, as its Latin text is (the rules of `looks::settled_bold` and
+    // `looks::settled_italic` with no style asked for).
+    let latin_show = text_shaped::LatinShow { font: latin_font, show: &show };
+    let (weight, slant) = (looks::weight(target.bold), looks::slant(target.italic));
+    let plan = text_shaped::plan(doc, fonts_res, &[text.to_owned()], rtl, max_glyphs, &latin_show, weight, slant)?;
+    if reuse.is_none() {
+        let mut f = Dict::new();
+        f.set(b"Type".to_vec(), Object::name("Font"));
+        f.set(b"Subtype".to_vec(), Object::name("Type1"));
+        f.set(b"BaseFont".to_vec(), Object::name(base));
+        f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+        fonts_res.set(helvetica.clone().into_bytes(), Object::Dict(f));
+    }
+    // Spacing would pull the joined letters apart; it comes back after the line.
+    if spacing != 0.0 {
+        replacement.push(Op::new("Tc", vec![n(0.0)]));
+    }
+    if words != 0.0 {
+        replacement.push(Op::new("Tw", vec![n(0.0)]));
+    }
+    let mut current = target.font.clone();
+    replacement.extend(plan.line_ops(0, size, &mut current));
+    replacement.push(Op::new("Tf", vec![Object::name(&target.font), n(size)]));
+    if spacing != 0.0 {
+        replacement.push(Op::new("Tc", vec![n(spacing)]));
+    }
+    if words != 0.0 {
+        replacement.push(Op::new("Tw", vec![n(words)]));
+    }
+    Ok(format!("{} Type3", plan.family()))
 }
 
 /// The size of the last `Tf` before operator `at`.
@@ -2097,29 +2265,93 @@ fn paragraph_separator(c: char) -> bool {
 /// Greedy word wrapping to `width` with `advance` giving a string's width. Each `\n` starts a
 /// new line. A row may also end inside a word of Chinese or Japanese text ([`crate::linebreak`]);
 /// those pieces join without a space.
+#[cfg(test)]
 fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<String> {
-    let mut out = Vec::new();
+    wrap_rows(text, width, advance).into_iter().map(|(line, _)| line).collect()
+}
+
+/// [`wrap`] with whether each line ends its paragraph: it is the last, or a `\n` follows it. A justified text stretches
+/// the other lines, those the wrap broke.
+fn wrap_rows(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<(String, bool)> {
+    let text = collapse(text, &[]).0;
+    wrap_ranges(&text, width, |range| advance(text.get(range).unwrap_or_default()))
+        .into_iter()
+        .map(|(range, ends)| (text.get(range).unwrap_or_default().to_owned(), ends))
+        .collect()
+}
+
+/// `text` as a rewrite lays it out: each line (between `\n`s) with its runs of white space as one space and none at
+/// either end (an ideographic space stays, see [`paragraph_separator`]). With `looks` (one for each character of
+/// `text`), also the look of each character kept: a space that stands for a run of them has the first one's.
+fn collapse(text: &str, looks: &[usize]) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(text.len());
+    let mut kept = Vec::with_capacity(if looks.is_empty() { 0 } else { text.len() });
+    // The look of the space owed before the next word of the line, and whether the line has a word yet.
+    let mut space: Option<usize> = None;
+    let mut started = false;
+    for (i, c) in text.chars().enumerate() {
+        let look = looks.get(i).copied().unwrap_or(0);
+        if c == '\n' {
+            out.push('\n');
+            kept.push(look);
+            (space, started) = (None, false);
+        } else if paragraph_separator(c) {
+            if started && space.is_none() {
+                space = Some(look);
+            }
+        } else {
+            if let Some(look) = space.take() {
+                out.push(' ');
+                kept.push(look);
+            }
+            out.push(c);
+            kept.push(look);
+            started = true;
+        }
+    }
+    if looks.is_empty() {
+        kept.clear();
+    }
+    (out, kept)
+}
+
+/// Greedy word wrapping of `text`, already [`collapse`]d, to `width` with `advance` giving the width of a byte range of
+/// it: each line as a byte range of `text`, with whether it ends its paragraph (it is the last, or a `\n` follows it).
+/// Each `\n` starts a new line. A row may also end inside a word of Chinese or Japanese text ([`crate::linebreak`]);
+/// those pieces join without a space.
+fn wrap_ranges(text: &str, width: f64, advance: impl Fn(std::ops::Range<usize>) -> f64) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut out: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    let mut row_start = 0;
     for row in text.split('\n') {
-        let mut line = String::new();
         let start = out.len();
-        for word in row.split(paragraph_separator).filter(|word| !word.is_empty()) {
-            for (i, piece) in crate::linebreak::pieces(word).into_iter().enumerate() {
-                let candidate = match (line.is_empty(), i) {
-                    (true, _) => piece.to_string(),
-                    (false, 0) => format!("{line} {piece}"),
-                    (false, _) => format!("{line}{piece}"),
-                };
-                if !line.is_empty() && advance(&candidate) > width {
-                    out.push(std::mem::take(&mut line));
-                    line = piece.to_string();
-                } else {
-                    line = candidate;
-                }
+        // The line being filled, as a byte range of `text`; empty until it has a piece.
+        let mut line: Option<std::ops::Range<usize>> = None;
+        for (at, word) in row.split(' ').scan(0, |at, word| {
+            let here = *at;
+            *at += word.len() + 1;
+            Some((here, word))
+        }) {
+            if word.is_empty() {
+                continue;
+            }
+            let mut offset = row_start + at;
+            for piece in crate::linebreak::pieces(word) {
+                let piece_range = offset..offset + piece.len();
+                offset = piece_range.end;
+                line = Some(match line.take() {
+                    None => piece_range,
+                    Some(current) if advance(current.start..piece_range.end) > width => {
+                        out.push((current, false));
+                        piece_range
+                    }
+                    Some(current) => current.start..piece_range.end,
+                });
             }
         }
-        if !line.is_empty() || out.len() == start {
-            out.push(line);
+        if line.is_some() || out.len() == start {
+            out.push((line.unwrap_or(row_start..row_start), true));
         }
+        row_start += row.len() + 1;
     }
     out
 }
@@ -2193,6 +2425,21 @@ pub(crate) fn rewrite_block_with_limit(
     rewrite_block_from(doc, page, lines, block, text, style, max_glyphs)
 }
 
+/// The steps down from each row of a paragraph to the next, in text space, for at most `limit` steps: `across` is each row's
+/// baseline across the text's direction in user space, top to bottom (`None` where a row has none), `k` the text-to-user
+/// scale, and a step is scaled from the source's font size `old_size` to the `size` the rows are written at. The steps stop
+/// at the first that is not a positive number at most the largest page (14 400 pt) long: the rows after it are placed by
+/// the paragraph's pitch instead.
+pub(crate) fn row_steps(across: impl Iterator<Item = Option<f64>>, k: f64, size: f64, old_size: f64, limit: usize) -> Vec<f64> {
+    let across: Vec<Option<f64>> = across.take(limit.saturating_add(1)).collect();
+    across
+        .iter()
+        .zip(across.iter().skip(1))
+        .map(|(upper, lower)| upper.zip(*lower).map(|(upper, lower)| (upper - lower) / k * size / old_size))
+        .map_while(|step| step.filter(|step| step.is_finite() && *step > 0.0 && (*step * k).abs() <= 14_400.0))
+        .collect()
+}
+
 /// [`rewrite_block_with_limit`] with the page's [`text_lines`], read from `doc` as it is now.
 fn rewrite_block_from(
     doc: &mut Document,
@@ -2217,7 +2464,8 @@ fn rewrite_block_from(
     let registered_face = fonts_res.iter().any(|(name, _)| name.starts_with(b"PCFull"));
     // Hebrew is written back in drawing order (and with the Hebrew fallback face) by the
     // single-style path below; the styled region path does not reorder right-to-left runs.
-    let hebrew = text.unwrap_or(&b.text).chars().any(crate::bidi::is_hebrew);
+    let draft = text.unwrap_or(&b.text);
+    let hebrew = draft.chars().any(crate::bidi::is_hebrew);
     if hebrew && (!style.ranges.is_empty() || style.resource.is_some()) {
         return Err(EditError::Invalid(
             "formatting part of right-to-left (Hebrew) text, or choosing a document font for it, isn't supported yet".into(),
@@ -2230,8 +2478,33 @@ fn rewrite_block_from(
         return Err(EditError::Invalid("formatting part of turned text, or choosing a document font for it, isn't supported yet".into()));
     }
     let visual_indic = members.iter().any(|line| line.visual_order);
+    // Arabic (#125) is shaped. A complete source face that covers the text shapes it itself (the
+    // styled path below); otherwise -- a subset font, none, a face without the glyphs, a previous
+    // edit's generated font -- the craft-fonts Arabic face draws it, shaped, as Type 3 glyphs. The
+    // page font's reverse ToUnicode map is never used for Arabic letters: producers map a letter's
+    // initial, medial and final glyphs to one code. Formatting part of the text keeps the styled
+    // path, which says what it needs.
+    let arabic = text_shaped::has_arabic(draft);
+    if arabic && hebrew {
+        return Err(text_shaped::mixed_scripts_error());
+    }
+    // Nothing asked for: the paragraph keeps the glyphs its producer drew (as the styled path does).
+    if arabic && *style == BlockStyle::default() && text.is_none_or(|t| t == b.text || t == b.editor_text) {
+        return Ok(LineEdit { substituted: None });
+    }
+    let arabic_source = arabic
+        && style.ranges.is_empty()
+        && keeps_source_face(style)
+        && upright
+        && !visual_indic
+        && shape_source(doc, &fonts_res, &first.font, draft).ok().flatten().is_some();
+    let shaped = arabic && style.ranges.is_empty() && style.resource.is_none() && !arabic_source;
+    if shaped {
+        text_shaped::require_face(draft)?;
+    }
     if upright
         && !hebrew
+        && !shaped
         && !visual_indic
         && (!style.ranges.is_empty()
             || style.resource.is_some()
@@ -2252,14 +2525,19 @@ fn rewrite_block_from(
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
     let ops = pieces.parse().ops;
     // Explicit line breaks stay (#1443); within a line, runs of white space become one space.
-    let text = text
-        .unwrap_or(&b.text)
-        .split('\n')
-        .map(|row| row.split(paragraph_separator).filter(|word| !word.is_empty()).collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = collapse(text.unwrap_or(&b.text), &[]).0;
+    // Shaped Arabic in a paragraph of several looks keeps each character's own look (see `looks`); `None` when the whole
+    // draft is in the paragraph's first look, which is written as a paragraph of one look is.
+    let looked = if shaped { looks::looked_text(&b, &lines, draft, style) } else { None };
     // The characters to show, for choosing fonts: the breaks are moves, not glyphs.
     let flat = text.replace('\n', " ");
+    // What the page font or Helvetica has to show: with shaped Arabic, the rest of the text.
+    // (In a paragraph of several looks, that of the first look: each look shows its own in its own font.)
+    let fonts_text = match &looked {
+        _ if !shaped => flat.clone(),
+        Some(looked) => text_shaped::latin_of(&looked.text_of(0)),
+        None => text_shaped::latin_of(&flat),
+    };
     let o = &first.origin;
     let last = members.last().copied().unwrap_or(first);
     let emit = &last.origin;
@@ -2275,15 +2553,26 @@ fn rewrite_block_from(
     if let Some(sc) = style.scale {
         ts_state.scale = (sc / 100.0).clamp(0.1, 10.0);
     }
+    if shaped {
+        // Spacing would pull joined letters apart.
+        ts_state.char_spacing = 0.0;
+    }
     let o_state = ts_state.clone();
     let metrics = fonts_res.get(font_name.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).map(|d| Metrics::from_dict(doc, &d));
     let visual_indic = metrics.as_ref().is_some_and(|m| m.visual_order) || first.visual_order;
-    let indic_text = if visual_indic { crate::indic::to_visual(&flat) } else { flat.clone() };
-    let reuse = style.family.is_none() && style.bold.is_none() && metrics.as_ref().is_some_and(|m| source_encodes(m, &indic_text));
+    let indic_text = if visual_indic { crate::indic::to_visual(&fonts_text) } else { fonts_text.clone() };
+    // Shaped Arabic draws mirrored brackets in right-to-left runs, so the font needs those too.
+    let reuse = style.family.is_none()
+        && style.bold.is_none()
+        && metrics
+            .as_ref()
+            .is_some_and(|m| source_encodes(m, &indic_text) && (!shaped || source_encodes(m, &text_shaped::with_mirrors(&indic_text))));
     let space = metrics.as_ref().map_or(0.33, |m| source_space(doc, &fonts_res, m));
     // The chosen style also determines the real Japanese fallback outlines and advances.
-    let (family, bold, italic) = style.family.unwrap_or((source_family(&b.base_font), b.bold, b.italic));
-    let bold = style.bold.unwrap_or(bold);
+    let family = style.family.map_or_else(|| source_family(&b.base_font), |(family, _, _)| family);
+    // (The rules each look of a paragraph of several follows too: its Arabic is drawn at this weight and slant.)
+    let bold = looks::settled_bold(b.bold, style);
+    let italic = looks::settled_italic(b.italic, style);
     // The face is chosen after `bold` settles, so a bold request measures with the bold metrics.
     let face = family.std14(bold, italic);
     let std_width = move |s: &str, size: f64| -> f64 { face.text_width(s, size) };
@@ -2294,7 +2583,9 @@ fn rewrite_block_from(
     // Right-to-left text (more Hebrew or Arabic letters than Latin) is right-aligned unless an
     // alignment is asked for, and a single right-to-left line keeps its right edge as it grows.
     let rtl = crate::bidi::rtl_base(&flat);
-    let anchored_right = rtl && upright && style.width.is_none() && members.len() == 1;
+    // (A paragraph of several looks is a single line when it is one row of runs, as the styled rewrite counts it.)
+    let single_line = if looked.is_some() { b.rows.len() == 1 } else { members.len() == 1 };
+    let anchored_right = rtl && upright && style.width.is_none() && single_line;
     // The paragraph's width along its lines: in user space unless it is turned.
     let frame = if upright {
         b.rect
@@ -2310,7 +2601,7 @@ fn rewrite_block_from(
         // Turned text: the page's margins are along another axis. A single line grows (below).
         None if !upright => (frame[2] - frame[0]).max(size * k),
         None if anchored_right => (b.rect[2] - b.rect[0]).max(size * k).max(b.rect[2] + dx - (p.crop(doc)[0] + 36.0)),
-        None if members.len() == 1 => (b.rect[2] - b.rect[0]).max(size * k).max(p.crop(doc)[2] - 36.0 - (b.rect[0] + dx)),
+        None if single_line => (b.rect[2] - b.rect[0]).max(size * k).max(p.crop(doc)[2] - 36.0 - (b.rect[0] + dx)),
         None => (b.rect[2] - b.rect[0]).max(size * k),
     };
     if !width.is_finite() {
@@ -2337,8 +2628,60 @@ fn rewrite_block_from(
         let emit_inv = Matrix(emit.ctm).invert().ok_or_else(|| EditError::Invalid("the paragraph has a singular transform".into()))?;
         Matrix(o.tm).then(&Matrix(o.ctm)).then(&emit_inv).0
     };
-    let type3 = if !reuse && needs_type3(&flat) { Some(type3_font(doc, &mut fonts_res, &flat, family, bold, max_glyphs)?) } else { None };
+    let type3 = if !reuse && needs_type3(&fonts_text) {
+        if shaped {
+            return Err(text_shaped::unsupported_with_arabic(&fonts_text));
+        }
+        Some(type3_font(doc, &mut fonts_res, &flat, family, bold, max_glyphs)?)
+    } else {
+        None
+    };
+    // Shaped Arabic is measured by laying a line out; Latin pieces by the font that draws them.
+    // (The Latin pieces of a line: the paragraph's own font where it has them, the standard font of its family otherwise.)
+    let first_look =
+        looks::LatinLook { metrics: metrics.clone().filter(|_| reuse), space, face, size, weight: looks::weight(bold), slant: looks::slant(italic) };
+    let latin_width = |s: &str| -> f64 { first_look.width(s) };
+    // The other looks of a paragraph of several (see `looks`): each in its run's size and fill colour, its Latin text in its
+    // run's own font where that has it. Settled before anything is written.
+    let mut other_looks: Vec<(String, looks::LatinLook, Vec<Op>)> = Vec::new();
+    if let Some(looked) = &looked {
+        for (look, source) in looked.sources.iter().enumerate().skip(1) {
+            let line = lines.get(*source).unwrap_or(first);
+            let look_size = match style.size {
+                Some(_) => size,
+                None if line.size.to_bits() == first.size.to_bits() => size,
+                None => Some(line.size / k).filter(|s| s.is_finite()).map_or(size, |s| s.clamp(0.1, 100_000.0)),
+            };
+            let fill = match style.color {
+                Some([r, g, bl]) => vec![Op::new("rg", vec![pdfcraft_content::num(r), pdfcraft_content::num(g), pdfcraft_content::num(bl)])],
+                None => line.origin.state.fill.clone(),
+            };
+            let latin = text_shaped::latin_of(&looked.text_of(look));
+            let (font, latin_look) = looks::LatinLook::of(doc, &mut fonts_res, line, &latin, style, look_size)?;
+            other_looks.push((font, latin_look, fill));
+        }
+    }
+    let other_widths: Vec<_> = other_looks.iter().map(|(_, look, _)| move |s: &str| look.width(s)).collect();
+    // Each look's weight, the paragraph's first: a bold look's Arabic is measured and drawn at the face's bold instance.
+    let weights: Vec<text_shaped::Weight> = std::iter::once(first_look.weight).chain(other_looks.iter().map(|(_, look, _)| look.weight)).collect();
+    // And slant: an italic look's Arabic is drawn slanted (no input of the measure: a slant changes no advance).
+    let slants: Vec<text_shaped::Slant> = std::iter::once(first_look.slant).chain(other_looks.iter().map(|(_, look, _)| look.slant)).collect();
+    let measure = shaped.then(|| {
+        match &looked {
+            Some(_) => text_shaped::Measure::with_looks(
+                rtl,
+                std::iter::once((size, &latin_width as text_shaped::LatinWidth))
+                    .chain(other_looks.iter().zip(&other_widths).map(|((_, look, _), width)| (look.size, width as text_shaped::LatinWidth)))
+                    .collect(),
+            ),
+            None => text_shaped::Measure::new(rtl, size, &latin_width),
+        }
+        .weighted(weights.clone())
+    });
     let advance = |s: &str| -> f64 {
+        if let Some(measure) = &measure {
+            return measure.line(s) * o_state.scale * k;
+        }
         let t = match (&metrics, reuse) {
             (Some(m), true) => {
                 let visual_s = if m.visual_order { crate::indic::to_visual(s) } else { s.to_owned() };
@@ -2359,7 +2702,7 @@ fn rewrite_block_from(
         t * o_state.scale * k
     };
     // A turned single line grows to fit, up to where its baseline reaches the page's margin.
-    let width = if !upright && style.width.is_none() && members.len() == 1 {
+    let width = if !upright && style.width.is_none() && single_line {
         let crop = p.crop(doc);
         let (x0, y0) = (first.origin.x + dx, first.origin.baseline + dy);
         let (ux, uy) = first.direction();
@@ -2378,14 +2721,46 @@ fn rewrite_block_from(
             f64::INFINITY
         };
         let cap = width.max(tx.min(ty)).min(14_400.0);
-        text.split('\n').map(&advance).fold(width, f64::max).min(cap)
+        let natural = match (&measure, &looked) {
+            (Some(measure), Some(looked)) => text
+                .split('\n')
+                .scan(0, |at, row| {
+                    let range = *at..*at + row.len();
+                    *at = range.end + 1;
+                    Some(measure.line_looked(row, &looked.looks_of(range)) * o_state.scale * k)
+                })
+                .fold(width, f64::max),
+            _ => text.split('\n').map(&advance).fold(width, f64::max),
+        };
+        natural.min(cap)
     } else {
         width
     };
     let right_edge = if anchored_right { right_edge } else { width };
-    let wrapped = wrap(&text, width + 0.5, advance);
+    // Each word of a paragraph of several looks is measured in its own (and the looks of each line kept for drawing it).
+    let mut wrapped_looks: Vec<Vec<usize>> = Vec::new();
+    let wrapped_rows = match (&measure, &looked) {
+        (Some(measure), Some(looked)) => {
+            let ranges = wrap_ranges(&text, width + 0.5, |range| {
+                measure.approx_looked(text.get(range.clone()).unwrap_or_default(), &looked.looks_of(range)) * o_state.scale * k
+            });
+            wrapped_looks = ranges.iter().map(|(range, _)| looked.looks_of(range.clone())).collect();
+            ranges.into_iter().map(|(range, ends)| (text.get(range).unwrap_or_default().to_owned(), ends)).collect()
+        }
+        (Some(measure), None) => wrap_rows(&text, width + 0.5, |s| measure.approx(s) * o_state.scale * k),
+        (None, _) => wrap_rows(&text, width + 0.5, advance),
+    };
+    // Whether each line ends its paragraph (a justified text leaves those unstretched).
+    let (wrapped, ends): (Vec<String>, Vec<bool>) = wrapped_rows.into_iter().unzip();
+    // The width of wrapped line `i`, in user space.
+    let line_width = |i: usize, line: &str| -> f64 {
+        match (&measure, wrapped_looks.get(i)) {
+            (Some(measure), Some(looks)) => measure.line_looked(line, looks) * o_state.scale * k,
+            _ => advance(line),
+        }
+    };
     let mut substituted = None;
-    let new_font = !reuse;
+    let new_font = !reuse || shaped;
     let (show_font, encode): (String, Encoder) = if let Some(m) = metrics.clone().filter(|_| reuse) {
         let name = font_name.clone();
         (font_name.clone(), Box::new(move |s: &str| m.encode(s).map(|bytes| vec![(name.clone(), bytes)])))
@@ -2394,11 +2769,11 @@ fn rewrite_block_from(
         let first = fallback.names.first().cloned().ok_or_else(no_japanese_font)?;
         (first, Box::new(move |s: &str| type3_encode(&fallback, s)))
     } else {
-        let win = pdfcraft_fonts::win_ansi(&flat);
+        let win = pdfcraft_fonts::win_ansi(&fonts_text);
         let back: String = win.iter().map(|c| char::from_u32(u32::from(*c)).unwrap_or('?')).collect();
         let base = family.base_font(bold, italic);
-        if flat.chars().zip(back.chars()).any(|(a, c)| c == '?' && a != '?') {
-            return Err(EditError::Invalid(format!("\"{flat}\" has characters neither {} nor {base} can show", b.base_font)));
+        if fonts_text.chars().zip(back.chars()).any(|(a, c)| c == '?' && a != '?') {
+            return Err(EditError::Invalid(format!("\"{fonts_text}\" has characters neither {} nor {base} can show", b.base_font)));
         }
         let mut f = Dict::new();
         f.set(b"Type".to_vec(), Object::name("Font"));
@@ -2413,19 +2788,21 @@ fn rewrite_block_from(
         let shown = name.clone();
         (name, Box::new(move |s: &str| Some(vec![(shown.clone(), pdfcraft_fonts::win_ansi(s))])))
     };
-    // Line spacing in text space: the paragraph's own (scaled with the size), or 1.2 × the size.
+    // Where each row goes (as the styled rewrite places its rows): without a line spacing asked for, a row the source
+    // paragraph has sits on that source row's own baseline, its step from the row above scaled with the size (see
+    // `row_steps`), so uneven rows, or a larger first row with more leading, stay so; the rows after them are a `lead` apart.
+    // (A row's baseline is its first run's: a row may hold several runs.)
+    let source_steps = if style.line_spacing.is_some() {
+        Vec::new()
+    } else {
+        let across = b.rows.iter().map(|row| row.first().and_then(|i| lines.get(*i)).map(|line| line.frame_origin().1));
+        row_steps(across, k, size, old_size, wrapped.len().saturating_sub(1))
+    };
+    // Line spacing in text space past the source paragraph's rows: the one asked for (× the size), the step between its last
+    // two rows (scaled with the size), its own leading, or 1.2 × the size.
     let lead = match style.line_spacing {
         Some(m) => size * m.clamp(0.5, 5.0),
-        // From the first two rows (a row may hold several runs).
-        None if let Some((upper, lower)) = b
-            .rows
-            .first()
-            .zip(b.rows.get(1))
-            .and_then(|(upper, lower)| upper.first().zip(lower.first()))
-            .and_then(|(upper, lower)| lines.get(*upper).zip(lines.get(*lower))) =>
-        {
-            (upper.frame_origin().1 - lower.frame_origin().1) / k * size / old_size
-        }
+        None if let Some(step) = source_steps.last() => *step,
         None if o_state.leading > 0.0 => o_state.leading,
         None => size * 1.2,
     };
@@ -2449,50 +2826,111 @@ fn rewrite_block_from(
     block_ops.extend(state.ops());
     block_ops.push(Op::new("Tm", tm.iter().map(|v| n(*v)).collect()));
     // Alignment: each line's offset from the left edge, in text space.
-    let offset = |line: &str| -> f64 {
-        let free = (width - advance(line)).max(0.0) / k;
+    let offset = |line_width: f64| -> f64 {
+        let free = (width - line_width).max(0.0) / k;
         match align {
             Some(crate::added::Align::Center) => free / 2.0,
             // A right-to-left line anchored at its right edge may start left of the old box.
-            Some(crate::added::Align::Right) if anchored_right => (right_edge - advance(line)) / k,
+            // (`anchored_right` is only so for right-to-left text, a justified one among it.)
+            Some(crate::added::Align::Right | crate::added::Align::Justify) if anchored_right => (right_edge - line_width) / k,
             Some(crate::added::Align::Right) => free,
-            // A justified right-to-left paragraph ends its last line at the right edge.
+            // A justified right-to-left paragraph ends the lines it does not stretch (its last) at the right edge.
             Some(crate::added::Align::Justify) if rtl => free,
             _ => 0.0,
         }
     };
-    // Justify: each line but the last fills the width. Word spacing reaches only single-byte code 32
-    // (ISO 32000-1 §9.3.3), so where a space is shown with another code (a composite font, a
-    // generated Type 3 font, a subset without a space) the extra space follows each space as a
-    // TJ adjustment instead, and code 32, which may then be a letter, gets none.
+    // Justify: each line the wrap broke fills the width (the last of a paragraph, or one before a line break, does not).
+    // Word spacing reaches only single-byte code 32 (ISO 32000-1 §9.3.3), so where a space is shown with another code (a
+    // composite font, a generated Type 3 font, a subset without a space) the extra space follows each space as a TJ
+    // adjustment instead, and code 32, which may then be a letter, gets none. Shaped Arabic is always stretched that way:
+    // its glyphs are generated Type 3 codes (the planner's own `TJ` adjustments, see `ShapedPlan::line_ops_stretched`).
+    // (A justified right-to-left line that is not stretched is right-aligned, see `offset`.)
     let justify = align == Some(crate::added::Align::Justify);
     let word_spacing_reaches_spaces = match metrics.as_ref().filter(|_| reuse) {
         Some(m) => m.encode(" ").is_some_and(|b| m.codes(&b).iter().all(|(c, len)| m.is_space(*c, *len))),
         None => type3.is_none(),
     };
     let mut x = 0.0;
+    // The baseline of the row being written, from the first's, in text space.
+    let mut y = 0.0;
     let mut tw_set = 0.0;
     let mut underlines: Vec<(f64, f64, f64)> = Vec::new(); // (x0, x1, y) in text space
+    // Shaped Arabic: every line is laid out and every font made now, before the document is changed;
+    // the Latin pieces of a line use the font the paragraph would use for them.
+    let latin_ops = |s: &str| -> Result<Vec<Op>, EditError> { first_look.show(s) };
+    let other_shows: Vec<_> = other_looks.iter().map(|(_, look, _)| move |s: &str| look.show(s)).collect();
+    let shows: Vec<text_shaped::ShowLatin> =
+        std::iter::once(&latin_ops as text_shaped::ShowLatin).chain(other_shows.iter().map(|show| show as text_shaped::ShowLatin)).collect();
+    let shaped_plan = if shaped {
+        let plan = if looked.is_some() {
+            let fonts = std::iter::once(shown_font.as_str()).chain(other_looks.iter().map(|(font, _, _)| font.as_str()));
+            let latins: Vec<text_shaped::LatinShow> = fonts.zip(&shows).map(|(font, show)| text_shaped::LatinShow { font, show: *show }).collect();
+            let lines: Vec<(String, Vec<usize>)> = wrapped.iter().cloned().zip(wrapped_looks.iter().cloned()).collect();
+            text_shaped::plan_looked(doc, &mut fonts_res, &lines, rtl, max_glyphs, &latins, &weights, &slants)?
+        } else {
+            let latin = text_shaped::LatinShow { font: &shown_font, show: &latin_ops };
+            text_shaped::plan(doc, &mut fonts_res, &wrapped, rtl, max_glyphs, &latin, first_look.weight, first_look.slant)?
+        };
+        substituted = Some(format!("{} Type3", plan.family()));
+        Some(plan)
+    } else {
+        None
+    };
+    // A paragraph of several looks: each look's size and fill colour, and the text state the runs are drawn from. A look
+    // in the initial colour (black) sets it, so a run after one of another colour goes back to it.
+    let fill_of = |fill: &[Op]| if fill.is_empty() { vec![Op::new("g", vec![Object::Int(0)])] } else { fill.to_vec() };
+    let run_looks: Vec<text_shaped::RunLook> = std::iter::once(text_shaped::RunLook { size, fill: fill_of(&state.fill) })
+        .chain(other_looks.iter().map(|(_, look, fill)| text_shaped::RunLook { size: look.size, fill: fill_of(fill) }))
+        .collect();
+    let mut pen = looked.as_ref().map(|_| text_shaped::pen(&shown_font, size, &fill_of(&state.fill)));
     for (i, line) in wrapped.iter().enumerate() {
-        let spaces = line.matches(' ').count();
-        let tw =
-            if justify && i + 1 < wrapped.len() && spaces > 0 { (width - advance(line)).max(0.0) / k / o_state.scale / spaces as f64 } else { 0.0 };
-        // A stretched line fills the width from the left edge.
-        let dx = if tw > 0.0 { 0.0 } else { offset(line) };
+        let line_w = line_width(i, line);
+        // The spaces between words a stretch widens (a shaped line says how many it draws).
+        let spaces = shaped_plan.as_ref().map_or_else(|| line.matches(' ').count(), |plan| plan.gaps(i));
+        let tw = if justify && !ends.get(i).copied().unwrap_or(true) && spaces > 0 {
+            (width - line_w).max(0.0) / k / o_state.scale / spaces as f64
+        } else {
+            0.0
+        };
+        // A stretched line fills the width: from the left edge, or back from the right edge a right-to-left line is anchored at.
+        let dx = if tw > 0.0 { (right_edge - width) / k } else { offset(line_w) };
+        // The step down from the row above (none for the first).
+        let step = match i.checked_sub(1) {
+            Some(above) => source_steps.get(above).copied().unwrap_or(lead),
+            None => 0.0,
+        };
+        y -= step;
         if i > 0 || dx != 0.0 {
-            block_ops.push(Op::new("Td", vec![n(dx - x), n(if i > 0 { -lead } else { 0.0 })]));
+            block_ops.push(Op::new("Td", vec![n(dx - x), n(-step)]));
         }
         x = dx;
-        let stretch = if word_spacing_reaches_spaces { 0.0 } else { tw };
+        let stretch = if word_spacing_reaches_spaces && shaped_plan.is_none() { 0.0 } else { tw };
         let tw = tw - stretch;
         if tw != tw_set {
             block_ops.push(Op::new("Tw", vec![n(tw)]));
             tw_set = tw;
         }
         // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
-        let visual = crate::bidi::to_visual(line);
+        // (Shaped Arabic is laid out already: one span per line, or per look of a line of several, in drawing order.)
+        if let Some(plan) = &shaped_plan {
+            if let Some(pen) = &mut pen {
+                // Each run in its own look (a gap that is not positive stretches nothing).
+                block_ops.extend(plan.looked_line_ops(i, &run_looks, pen, stretch, &shows)?);
+            } else if stretch > 0.0 {
+                block_ops.extend(plan.line_ops_stretched(i, size, &mut shown_font, stretch, &latin_ops)?);
+            } else {
+                block_ops.extend(plan.line_ops(i, size, &mut shown_font));
+            }
+        }
+        let visual = if shaped_plan.is_some() { String::new() } else { crate::bidi::to_visual(line) };
         // Stretched without word spacing: shown up to and including each space, then moved on.
-        let pieces = if stretch > 0.0 { visual.split_inclusive(' ').collect() } else { vec![visual.as_str()] };
+        let pieces = if shaped_plan.is_some() {
+            Vec::new()
+        } else if stretch > 0.0 {
+            visual.split_inclusive(' ').collect()
+        } else {
+            vec![visual.as_str()]
+        };
         for piece in pieces {
             if let Some(metrics) = metrics.as_ref().filter(|_| reuse) {
                 let indic_piece = if metrics.visual_order { crate::indic::to_visual(piece) } else { piece.to_owned() };
@@ -2511,8 +2949,8 @@ fn rewrite_block_from(
             }
         }
         let tw = tw + stretch;
-        let w = (advance(line) + tw * spaces as f64 * o_state.scale * k) / k;
-        underlines.push((dx, dx + w, -(i as f64) * lead - size * 0.12));
+        let w = (line_w + tw * spaces as f64 * o_state.scale * k) / k;
+        underlines.push((dx, dx + w, y - size * 0.12));
     }
     block_ops.push(Op::new("ET", vec![]));
     if style.underline == Some(true) {

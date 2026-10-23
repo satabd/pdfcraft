@@ -12,7 +12,7 @@ use crate::canvas::DocView;
 use crate::comments::{CommentPrefs, CommentTool, SortBy, color32, status_badge};
 use crate::panels::Nav;
 use crate::theme::{self, Tokens};
-use crate::{icons, widgets};
+use crate::{icons, rtl, widgets};
 
 /// Accent bar of the selected card (11-visual-spec §3: `#0165DD`).
 const CARD_ACCENT: Color32 = Color32::from_rgb(0x01, 0x65, 0xDD);
@@ -424,10 +424,11 @@ fn card(
     // The header row selects the card (and shows the comment on the page); unselected cards are
     // clickable everywhere.
     let hit = if selected { frame.inner } else { rect };
-    let click = ui
-        .interact(hit, ui.id().with(("card", key)), Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(crate::i18n::fmt(tl!("{kind} — click to show it on the page"), &[("kind", tl!(kind_label(a)))]));
+    let click = ui.interact(hit, ui.id().with(("card", key)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let click = widgets::hover_text(
+        click,
+        &crate::i18n::fmt_logical(&tl_logical!("{kind} — click to show it on the page"), &[("kind", &tl_logical!(kind_label(a)))]),
+    );
     if click.clicked() {
         view.comments.selected = Some(key);
         view.comments.reply.clear();
@@ -449,36 +450,36 @@ fn card(
         .show(|ui| {
             ui.set_min_width(160.0);
             crate::comments::attachment_items(ui, view, info, a);
-            if ui.button(tl_ctx!("comment menu", "Edit")).clicked() {
+            if widgets::menu_entry(ui, true, tl_ctx!("comment menu", "Edit"), None).clicked() {
                 view.comments.editing = Some((a.page, a.index, a.contents.clone().unwrap_or_default()));
                 ui.close();
             }
-            ui.menu_button(tl!("Set status"), |ui| {
+            widgets::sub_menu(ui, tl!("Set status"), |ui| {
                 for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
-                    if ui.button(tl!(s.name())).clicked() {
+                    if widgets::menu_entry(ui, true, tl!(s.name()), None).clicked() {
                         edit = Some(Edit::SetAnnotationStatus { page: a.page, index: a.index, state: s, author: prefs.author.clone() });
                         ui.close();
                     }
                 }
             });
-            if ui.button(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" })).clicked() {
+            if widgets::menu_entry(ui, true, tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }), None).clicked() {
                 edit = Some(Edit::MarkAnnotation { page: a.page, index: a.index, marked: !marked, author: prefs.author.clone() });
                 ui.close();
             }
-            if ui.button(tl!("Copy text")).clicked() {
+            if widgets::menu_entry(ui, true, tl!("Copy text"), None).clicked() {
                 ui.ctx().copy_text(a.contents.clone().unwrap_or_default());
                 ui.close();
             }
-            if ui.button(tl!("Properties…")).clicked() {
+            if widgets::menu_entry(ui, true, tl!("Properties…"), None).clicked() {
                 view.comments.props_request = Some((a.page, a.index));
                 ui.close();
             }
-            if ui.add_enabled(crate::comments::tool_for(a).is_some(), egui::Button::new(tl!("Make Current Properties Default"))).clicked() {
+            if widgets::menu_entry(ui, crate::comments::tool_for(a).is_some(), tl!("Make Current Properties Default"), None).clicked() {
                 view.comments.default_request = Some((a.page, a.index));
                 ui.close();
             }
             ui.separator();
-            if ui.add_enabled(!a.locked, egui::Button::new(tl!("Delete"))).clicked() {
+            if widgets::menu_entry(ui, !a.locked, tl!("Delete"), None).clicked() {
                 view.comments.selected = None;
                 edit = Some(Edit::DeleteAnnotation { page: a.page, index: a.index });
                 ui.close();
@@ -535,7 +536,7 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
     let more = icons::button(ui, "ellipsis", 26.0, false, tl!("More options"));
     egui::Popup::menu(&more).show(|ui| {
         ui.set_min_width(220.0);
-        ui.label(egui::RichText::new(tl!("Sort by")).small());
+        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Sort by")).small()));
         for (s, label) in [
             (SortBy::Page, tl!("Page")),
             (SortBy::Author, tl!("Author")),
@@ -543,7 +544,7 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
             (SortBy::Type, tl!("Type")),
             (SortBy::Color, tl!("Colour")),
         ] {
-            if ui.add(widgets::radio(cv.sort == s, label)).clicked() {
+            if widgets::menu_choice(ui, |ui| ui.add(widgets::radio(cv.sort == s, label))).clicked() {
                 cv.sort = s;
                 ui.close();
             }
@@ -551,13 +552,13 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
         // Only the page sort has folding groups.
         if cv.sort == SortBy::Page {
             ui.separator();
-            if ui.button(tl!("Collapse all pages")).clicked() {
+            if widgets::menu_entry(ui, true, tl!("Collapse all pages"), None).clicked() {
                 cv.collapsed_pages = info.annotations.iter().map(|a| a.page).collect();
                 cv.collapsed_pages.sort_unstable();
                 cv.collapsed_pages.dedup();
                 ui.close();
             }
-            if ui.button(tl!("Expand all pages")).clicked() {
+            if widgets::menu_entry(ui, true, tl!("Expand all pages"), None).clicked() {
                 cv.collapsed_pages.clear();
                 ui.close();
             }
@@ -569,7 +570,7 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
             ("comment.export", tl!("Export all to data file…")),
             ("comment.import", tl!("Import comments…")),
         ] {
-            if ui.button(tl!(label)).clicked() {
+            if widgets::menu_entry(ui, true, tl!(label), None).clicked() {
                 command = Some(id);
                 ui.close();
             }
@@ -588,25 +589,25 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
                 }
             }
         };
-        ui.label(egui::RichText::new(tl!("Type")).small());
+        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Type")).small()));
         for ty in &types {
-            toggle(ui, &mut cv.hidden_types, ty, tl!(ty));
+            widgets::menu_choice(ui, |ui| toggle(ui, &mut cv.hidden_types, ty, tl!(ty)));
         }
         ui.separator();
-        ui.label(egui::RichText::new(tl!("Author")).small());
+        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Author")).small()));
         for a in &authors {
             let name = crate::bidi::visual_auto(a);
-            toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { &name });
+            widgets::menu_choice(ui, |ui| toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { &name }));
         }
         ui.separator();
-        ui.label(egui::RichText::new(tl!("Status")).small());
+        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Status")).small()));
         for s in ["None", "Accepted", "Rejected", "Cancelled", "Completed"] {
-            toggle(ui, &mut cv.hidden_statuses, s, tl!(s));
+            widgets::menu_choice(ui, |ui| toggle(ui, &mut cv.hidden_statuses, s, tl!(s)));
         }
         ui.separator();
-        ui.label(egui::RichText::new(tl!("Colour")).small());
+        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Colour")).small()));
         for (key, c) in &colors {
-            ui.horizontal(|ui| {
+            rtl::horizontal(ui, |ui| {
                 let name = crate::comments::SWATCHES
                     .iter()
                     .find(|(_, s)| c.is_some_and(|c| (0..3).all(|i| (s[i] as f32 - c[i]).abs() < 0.02)))
@@ -624,11 +625,11 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
             });
         }
         ui.separator();
-        ui.label(egui::RichText::new(tl!("Checkmark")).small());
+        widgets::menu_choice(ui, |ui| ui.label(egui::RichText::new(tl!("Checkmark")).small()));
         for s in ["Checked", "Unchecked"] {
-            toggle(ui, &mut cv.hidden_checks, s, tl!(s));
+            widgets::menu_choice(ui, |ui| toggle(ui, &mut cv.hidden_checks, s, tl!(s)));
         }
-        if active && ui.button(tl!("Show all")).clicked() {
+        if active && widgets::menu_entry(ui, true, tl!("Show all"), None).clicked() {
             cv.hidden_types.clear();
             cv.hidden_authors.clear();
             cv.hidden_statuses.clear();

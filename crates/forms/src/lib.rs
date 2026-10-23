@@ -32,6 +32,8 @@ pub use scripting::{
 };
 
 #[cfg(test)]
+mod shaped_tests;
+#[cfg(test)]
 mod tests;
 
 #[derive(Debug, thiserror::Error, PartialEq)]

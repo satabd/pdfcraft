@@ -13,6 +13,7 @@ use pdfcraft_engine::{Edit, FieldValue, FormField, FormFieldKind, FormWidget, fi
 use pdfcraft_render::DocInfo;
 
 use crate::canvas::{DocView, PageXform};
+use crate::rtl;
 use crate::theme::Tokens;
 
 const FOCUS_BLUE: Color32 = Color32::from_rgb(0x14, 0x73, 0xE6);
@@ -254,6 +255,16 @@ pub(crate) fn commit(view: &mut DocView, form: &[FormField]) {
 
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
+/// The month after (`later`) or before month `m` (1 to 12) of year `y`.
+fn shift_month(y: i32, m: u32, later: bool) -> (i32, u32) {
+    match (later, m) {
+        (true, 12) => (y.saturating_add(1), 1),
+        (true, m) => (y, m.saturating_add(1)),
+        (false, 1) => (y.saturating_sub(1), 12),
+        (false, m) => (y, m.saturating_sub(1)),
+    }
+}
+
 /// The date picker under a focused date field. Returns the picked date, formatted with the
 /// field's own format.
 fn calendar(ctx: &egui::Context, view: &mut DocView, field: egui::Rect, fmt: &str, today: (i64, u32, u32)) -> Option<String> {
@@ -278,9 +289,17 @@ fn calendar(ctx: &egui::Context, view: &mut DocView, field: egui::Rect, fmt: &st
         .fixed_pos(field.left_bottom() + vec2(0.0, 2.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
+                // The arrows keep their places and their glyphs; what they do follows the reading
+                // direction: ‹ goes back a month in English and forward when mirrored, where the
+                // months run from the right.
+                let (left_arrow, right_arrow) = if rtl::mirrored() {
+                    (("‹", tl!("Next month"), true), ("›", tl!("Previous month"), false))
+                } else {
+                    (("‹", tl!("Previous month"), false), ("›", tl!("Next month"), true))
+                };
                 ui.horizontal(|ui| {
-                    if ui.small_button("‹").on_hover_text(tl!("Previous month")).clicked() {
-                        (y, m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+                    if ui.small_button(left_arrow.0).on_hover_text(left_arrow.1).clicked() {
+                        (y, m) = shift_month(y, m, left_arrow.2);
                     }
                     ui.label(
                         egui::RichText::new(crate::i18n::fmt(
@@ -289,8 +308,8 @@ fn calendar(ctx: &egui::Context, view: &mut DocView, field: egui::Rect, fmt: &st
                         ))
                         .strong(),
                     );
-                    if ui.small_button("›").on_hover_text(tl!("Next month")).clicked() {
-                        (y, m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+                    if ui.small_button(right_arrow.0).on_hover_text(right_arrow.1).clicked() {
+                        (y, m) = shift_month(y, m, right_arrow.2);
                     }
                 });
                 // Weekday of the 1st (0 = Sunday), Zeller-style via days since 1970-01-01 (a Thursday).
@@ -303,40 +322,46 @@ fn calendar(ctx: &egui::Context, view: &mut DocView, field: egui::Rect, fmt: &st
                 };
                 let first = (days_from_civil(y, m, 1) + 4).rem_euclid(7) as usize;
                 let len = (days_from_civil(if m == 12 { y + 1 } else { y }, if m == 12 { 1 } else { m + 1 }, 1) - days_from_civil(y, m, 1)) as usize;
+                // The week runs from the start edge: Sunday is the leftmost column in English and the
+                // rightmost when mirrored.
+                let week = rtl::run_order(7);
                 egui::Grid::new(("date-grid", view.id.0)).spacing([4.0, 2.0]).show(ui, |ui| {
-                    for d in ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] {
-                        ui.label(egui::RichText::new(tl_ctx!("calendar weekday", d)).small());
+                    for &col in &week {
+                        if let Some(d) = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].get(col) {
+                            ui.label(egui::RichText::new(tl_ctx!("calendar weekday", d)).small());
+                        }
                     }
                     ui.end_row();
-                    for cell in 0..(first + len).div_ceil(7) * 7 {
-                        if cell >= first && cell < first + len {
-                            let day = (cell - first + 1) as u32;
-                            let selected = current.is_some_and(|c| (c.y, c.m, c.d) == (y, m, day));
-                            let is_today = (today.0 as i32, today.1, today.2) == (y, m, day);
-                            let mut text = egui::RichText::new(day.to_string());
-                            if is_today {
-                                text = text.strong();
+                    for row in 0..(first + len).div_ceil(7) {
+                        for &col in &week {
+                            let cell = row * 7 + col;
+                            if cell >= first && cell < first + len {
+                                let day = (cell - first + 1) as u32;
+                                let selected = current.is_some_and(|c| (c.y, c.m, c.d) == (y, m, day));
+                                let is_today = (today.0 as i32, today.1, today.2) == (y, m, day);
+                                let mut text = egui::RichText::new(day.to_string());
+                                if is_today {
+                                    text = text.strong();
+                                }
+                                if ui
+                                    .selectable_label(selected, text)
+                                    .on_hover_text(crate::i18n::fmt(
+                                        tl!("{month} {day}, {y}"),
+                                        &[
+                                            ("month", tl_ctx!("calendar date", MONTHS[(m - 1) as usize])),
+                                            ("day", &day.to_string()),
+                                            ("y", &y.to_string()),
+                                        ],
+                                    ))
+                                    .clicked()
+                                {
+                                    picked = Some(format_date(DateTime { y, m, d: day, hh: 0, mm: 0, ss: 0 }, fmt));
+                                }
+                            } else {
+                                ui.label("");
                             }
-                            if ui
-                                .selectable_label(selected, text)
-                                .on_hover_text(crate::i18n::fmt(
-                                    tl!("{month} {day}, {y}"),
-                                    &[
-                                        ("month", tl_ctx!("calendar date", MONTHS[(m - 1) as usize])),
-                                        ("day", &day.to_string()),
-                                        ("y", &y.to_string()),
-                                    ],
-                                ))
-                                .clicked()
-                            {
-                                picked = Some(format_date(DateTime { y, m, d: day, hh: 0, mm: 0, ss: 0 }, fmt));
-                            }
-                        } else {
-                            ui.label("");
                         }
-                        if cell % 7 == 6 {
-                            ui.end_row();
-                        }
+                        ui.end_row();
                     }
                 });
             });
@@ -504,7 +529,8 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
                 let font = (field_text_size(ui.painter(), f, w, &fx.text) * zoom).clamp(3.0, 64.0);
                 // The field is pale yellow in every theme, so the caret must not follow the theme (pale in dark mode) (#655).
                 ui.visuals_mut().text_cursor.stroke.color = crate::edit_text_ui::caret_color_on(FIELD_FILL);
-                let mut te = if multiline { egui::TextEdit::multiline(&mut fx.text) } else { egui::TextEdit::singleline(&mut fx.text) };
+                let mut te =
+                    if multiline { crate::widgets::BidiEdit::multiline(&mut fx.text) } else { crate::widgets::BidiEdit::singleline(&mut fx.text) };
                 te = te
                     // Wraps (inside the 3 px side margins) at the width the size was fitted to:
                     // the box less 3 pt each side, scaled.
@@ -545,7 +571,9 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
                     if std::mem::take(&mut fx.select_all)
                         && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id)
                     {
-                        let n = fx.text.chars().count();
+                        // To the end of what is drawn: a wrapped field draws a line break for the text's
+                        // own and for each soft wrap (at most one per character), so twice its length is past the end.
+                        let n = fx.text.chars().count().saturating_mul(2);
                         st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
                         st.store(ui.ctx(), r.id);
                     }
@@ -587,11 +615,11 @@ pub(crate) fn overlay(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, f
                 .show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_min_width(rect.width().max(160.0));
-                        ui.label(egui::RichText::new(&f.name).small().color(t.text_faint));
-                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        ui.label(egui::RichText::new(crate::bidi::visual_auto(&f.name)).small().color(t.text_faint));
+                        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(260.0), |ui| {
                             for (export, display) in &f.options {
                                 let on = f.value.first() == Some(export);
-                                if ui.selectable_label(on, display).clicked() {
+                                if ui.selectable_label(on, crate::bidi::visual_auto(display).as_ref()).clicked() {
                                     edit = Some(Edit::SetFieldValue { name: f.name.clone(), value: FieldValue::Choice(vec![export.clone()]) });
                                     close = true;
                                 }
@@ -681,4 +709,22 @@ pub fn field_screen_rect(view: &DocView, info: &DocInfo, f: &FormField, widget: 
     let page = w.page?;
     let xf = view.page_xform(page)?;
     Some(widget_rect(&xf, info, page, w.rect))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shift_month;
+
+    #[test]
+    fn months_turn_over_the_year_in_both_directions() {
+        assert_eq!(shift_month(2026, 10, true), (2026, 11));
+        assert_eq!(shift_month(2026, 10, false), (2026, 9));
+        assert_eq!(shift_month(2026, 12, true), (2027, 1));
+        assert_eq!(shift_month(2026, 1, false), (2025, 12));
+        // Past either end of the years there is nothing further, and nothing overflows.
+        assert_eq!(shift_month(i32::MAX, 12, true), (i32::MAX, 1));
+        assert_eq!(shift_month(i32::MIN, 1, false), (i32::MIN, 12));
+        // A month outside 1 to 12 (never produced) still gives a month.
+        assert_eq!(shift_month(2026, 0, false), (2026, 0));
+    }
 }

@@ -13,6 +13,7 @@ mod encodings;
 pub mod fallback;
 pub mod pdf;
 mod script;
+pub mod shaped_text;
 mod shaping;
 pub mod source_shaping;
 mod std14;
@@ -26,7 +27,8 @@ pub use script::{
     GlyphError, GlyphOutline, INTER_REGULAR, MAX_SIGNATURE_CHARS, ScriptOutline, japanese_glyph, japanese_glyph_from, script_missing, script_outline,
 };
 pub use shaping::{
-    ShapedCluster, ShapedScript, arabic_glyph, arabic_has, hebrew_has, shape_arabic, shape_hebrew, shape_thai, shaped_glyph, thai_has,
+    ShapedCluster, ShapedScript, Slant, Weight, arabic_bold_available, arabic_glyph, arabic_has, hebrew_has, shape_arabic, shape_arabic_at,
+    shape_hebrew, shape_thai, shaped_glyph, thai_has,
 };
 pub use std14::Std14;
 

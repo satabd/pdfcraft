@@ -40,6 +40,18 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
 - `shape_hebrew` / `hebrew_has`: the Regular `Hebr` face shaped with harfrust for Hebrew Add
   Text content, one cluster per letter with its points and cantillation marks (positioned by the
   face), drawn by the same Type 3 writer as Arabic and Thai. `GlyphError::NoFont` without the face.
+- `shaped_text` (pub module): the shaped-text layout shared by every writer that draws Arabic
+  (and Hebrew/Thai pieces) itself, so Add text and Edit text (`pdfcraft-edit`), form-field
+  appearances (`pdfcraft-forms`) and later annotations agree. `shaped_pieces` orders a line with
+  UAX #9 and cuts it into Latin pieces and shaped clusters; `type3_shaped` builds one Type 3
+  font per 240 distinct clusters (ToUnicode = the cluster's text); `plan` / `plan_directed` lay
+  out lines (at most 4,096 distinct clusters, every outline read before the document is touched,
+  fonts added in chunks with collision-free resource names) and `ShapedPlan::line_ops` returns the
+  operators of one line as a `/Span <</ActualText …>> BDC … EMC` of `Tf`/`Tj` runs, as `TextOp`s
+  (this crate sits below the content-stream crate); `Measure` gives line widths for wrapping and
+  alignment (`cluster_width` is one cluster's advance); `first_strong_is_rtl` gives a paragraph's direction. `comb_cells` cuts a line into one piece per comb-field cell (a cluster, or one character of Latin text, in drawing order), `plan_pieces` plans lines already laid out like that, and `ShapedPlan::bare_ops` gives a planned line's operators without its span, for a caller that wraps several of them in one. `cluster_paths` and `actual_text_bdc` draw clusters as filled paths inside a `/Span <</ActualText …>>` for writers that can add no font (annotation appearances built from a dictionary alone, `pdfcraft-annot`). `Shaper` holds the face
+  functions as plain pointers; `set_test_shaper` (feature `test-shaper`, enabled by the
+  dev-dependencies of the crates that test with a stand-in face) swaps them on a thread.
 - `document_japanese_font` / `japanese_glyph`: the face (Shippori Mincho, then BIZ UDMincho) whose
   outlines become the Type 3 fallback font for Japanese text written into PDFs. Without it,
   `japanese_glyph` returns `GlyphError::NoFont` and the editor reports a clear error.
@@ -52,6 +64,25 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
   harfrust (joining forms, ligatures, mark positions) into clusters for Arabic text written into
   PDFs; the editor draws each cluster as one Type 3 glyph with a ToUnicode entry and per-line ActualText for logical copy/search order. Without the face
   they return `GlyphError::NoFont` and the editor reports a clear error.
+- `Weight` / `shape_arabic_at` / `ShapedScript::ArabicBold` / `arabic_bold_available`: bold
+  Arabic. The face is variable (`wght` 100–900 in craft-fonts' Noto Sans Arabic); bold text is
+  shaped by harfrust at its `wght` 700 instance (`ShaperInstance::from_variations`) and its
+  advances and outlines are read by skrifa at the same location, so `ArabicBold` clusters and
+  glyphs are a face of their own for every cache. A face without a `wght` axis (or one that goes
+  no heavier than its default) has no bold instance: bold is then shaped and drawn regular, its
+  clusters `Arabic`'s. In `shaped_text`, each look has a `Weight` (`shaped_pieces_weighted`,
+  `Measure::weighted`, the `weights` of `plan_looked`); a bold look's clusters go in Type 3 fonts
+  of their own (resource name `<prefix><object number>B`, `FontName` ending `-Bold`, `FontWeight`
+  700). No weight, or all regular, plans byte for byte as before; every other writer passes none.
+- `Slant` (`Upright`, `Italic`) / `shaped_text::type3_shaped_slanted`: italic shaped text. No
+  shaped-script face has an italic (no `ital` or `slnt` axis), so an italic look's glyphs are the
+  upright ones in Type 3 fonts whose `FontMatrix` shears them by 12° (`[0.001 0 0.0002126 0.001 0
+  0]`, ISO 32000-2 §9.6.5): a synthesized oblique, with `ItalicAngle -12`, the Italic flag and a
+  `FontName` ending `-Italic` (`-BoldItalic`). A slant changes no advance, so it is no input of
+  shaping or `Measure`; `plan_looked` takes the `slants` of its looks, and an italic look's clusters
+  go in fonts of their own (resource name ending `I`, or `BI` with bold). No slant, or all upright,
+  plans byte for byte as before; every other writer passes none (Add text passes its italic flag
+  to `type3_shaped_slanted`).
 - `document_japanese_fonts_for_style`: every `Jpan` face in that order of preference, so the
   editor can use the first one that has all of the replacement's glyphs (the faces differ in
   coverage, e.g. of Cyrillic).

@@ -10,14 +10,23 @@ Comments (annotations), ISO 32000-2 §12.5. Layer L3, depends on `pdfcraft-cos`,
 - **Appearance streams** (`appearance::build`) generated from the annotation dictionary, so new
   and restyled comments look the same in every viewer. Highlights multiply (`/BM /Multiply`).
   Note icons are PdfCraft's own drawings. Text boxes use standard Helvetica (WinAnsi), with
-  line breaking by approximate Helvetica proportions (no font program is bundled). Text it can't
-  draw (in a text box, callout, Fill & Sign text, measurement label or dynamic stamp's by-line;
+  line breaking by Helvetica's advance widths (no font program is bundled). **Arabic** in a text
+  box, callout, Typewriter or Fill & Sign text is drawn shaped instead (`shaped.rs`, on
+  `pdfcraft_fonts::shaped_text`): `build` is pure and can add no font to a document, so the
+  glyphs of the craft-fonts `Arab` face are filled paths in the appearance stream, one
+  `/Span <</ActualText …>> BDC … EMC` per line in typing order (copy and search read that), Latin
+  letters and digits `/Helv` runs in UAX #9 order, wrapped on shaped widths and right-aligned when
+  the paragraph runs right to left and the annotation has no `/Q` (new right-to-left text boxes
+  are created without one, and `/RC` says `dir="rtl"`). Up to 1,500 characters; shaped text is
+  not marked, so it flattens. Text it can't draw (in a text box, callout, Fill & Sign text, measurement label or dynamic stamp's by-line;
   `appearance::undrawable_text`) is kept as typed and drawn as `?`, and the comment is marked with
   the first such character (`pdfcraft_fonts::UNDRAWN_MARK`) so the engine reports the edit and
   flattening refuses to make it permanent. Two refusals (`AnnotError::Undrawable`): a redaction
   mark's overlay text, which becomes page content when applied; and a restyle or resize of a
   comment another program drew with a font that has those characters, whose appearance is kept
-  rather than redrawn with `?` (new text for it is taken).
+  rather than redrawn with `?` (new text for it is taken). A measurement's value label and a
+  dynamic stamp's By line are shaped the same way (`shaped::centred_line`: one line, centred, the
+  stamp's shrunk to fit like Latin text; line breaks in the label are spaces) and are not marked.
 - **Edits:** reply (`/IRT`), set review status (a `/State` reply, as Acrobat's "Set status"
   does), change text, move, resize, restyle, delete (with pop-up and replies).
 

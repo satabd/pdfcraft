@@ -180,16 +180,16 @@ pub(crate) fn bar(ctx: &egui::Context, view: &mut DocView, area: Rect, t: &Token
                                 view.pending_action = Some(ViewAction::CameraLevel);
                             }
                             ui.separator();
-                            let icon = |ui: &mut egui::Ui, name: &str, tip: &str| {
+                            let icon = |ui: &mut egui::Ui, name: &str, tip: &crate::i18n::Logical<'_>| {
                                 let r = ui.add_enabled(allowed, egui::Button::image(crate::icons::image(name, 18.0, t.text)).frame(false));
                                 // Named for screen readers (and tests), not only on hover.
-                                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, allowed, tip));
-                                r.on_hover_text(tip).clicked()
+                                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, allowed, tip.as_str()));
+                                crate::widgets::hover_text(r, tip).clicked()
                             };
-                            if icon(ui, "rotate-ccw", tl!("Rotate counterclockwise")) {
+                            if icon(ui, "rotate-ccw", &tl_logical!("Rotate counterclockwise")) {
                                 view.pending_action = Some(ViewAction::CameraRotate { clockwise: false });
                             }
-                            if icon(ui, "rotate-cw", tl!("Rotate clockwise")) {
+                            if icon(ui, "rotate-cw", &tl_logical!("Rotate clockwise")) {
                                 view.pending_action = Some(ViewAction::CameraRotate { clockwise: true });
                             }
                             if crate::widgets::pill_button(ui, tl!("Crop pages"), false).clicked() {

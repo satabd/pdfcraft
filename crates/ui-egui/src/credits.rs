@@ -5,8 +5,9 @@
 
 use std::cmp::Ordering;
 
-use egui::RichText;
+use egui::{Align, Layout, RichText, Sense, TextWrapMode, Ui, UiBuilder, WidgetText, vec2};
 
+use crate::rtl;
 use crate::theme::Tokens;
 
 /// The About dialog is a modal that sizes to its content; the lists scroll inside this height.
@@ -266,57 +267,110 @@ pub fn contributors_ui(ui: &mut egui::Ui) {
     let counts = crate::i18n::fmt(crate::i18n::t("{n} contributors · {c} commits"), &[("n", &list.len().to_string()), ("c", &group(TOTAL_COMMITS))]);
     ui.label(RichText::new(counts).small().color(t.text_muted));
     ui.separator();
-    egui::ScrollArea::both().id_salt("credits_list").max_height(LIST_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
-        if list.is_empty() {
-            ui.label(crate::i18n::t("No contributor data was built into this copy."));
-        } else if v.table {
-            table(ui, &list, &mut v);
-        } else {
-            ui.horizontal_wrapped(|ui| {
-                for (i, c) in list.iter().enumerate() {
-                    if i > 0 {
-                        ui.label(RichText::new("·").color(t.text_faint));
+    // A mirrored table is as wide as this at least, and its name column takes what the rest leaves.
+    let view_width = ui.available_width();
+    // A table wider than the window starts at its right edge, where a mirrored table begins.
+    let area = egui::ScrollArea::both().id_salt("credits_list").max_height(LIST_HEIGHT).auto_shrink([false, true]);
+    crate::widgets::scroll_area_with(ui, area.stick_to_right(rtl::mirrored()), true, |area, ui| {
+        area.show(ui, |ui| {
+            if list.is_empty() {
+                ui.label(crate::i18n::t("No contributor data was built into this copy."));
+            } else if v.table {
+                table(ui, &list, &mut v, view_width);
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for (i, c) in list.iter().enumerate() {
+                        if i > 0 {
+                            ui.label(RichText::new("·").color(t.text_faint));
+                        }
+                        ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
                     }
-                    ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
-                }
-            });
-        }
+                });
+            }
+        })
     });
     ui.data_mut(|d| d.insert_temp(id, v));
 }
 
-fn table(ui: &mut egui::Ui, list: &[&Contributor], v: &mut View) {
+/// The text of the columns after the name in a contributor's table row.
+fn figures(c: &Contributor) -> [String; 9] {
+    [
+        group(c.prs),
+        group(c.commits),
+        group(c.lines_added),
+        group(c.lines_deleted),
+        signed(c.lines_delta()),
+        group(c.binary_added),
+        group(c.binary_deleted),
+        day(c.first_commit).to_string(),
+        day(c.last_commit).to_string(),
+    ]
+}
+
+/// A sort header: its text with the arrow of the current sort.
+fn header_text(k: SortKey, v: &View) -> String {
+    let arrow = if v.key == k { if v.ascending { " ▲" } else { " ▼" } } else { "" };
+    format!("{}{arrow}", crate::i18n::t(k.label().1))
+}
+
+/// A header was clicked: sort by it, or reverse the sort when it already is the key.
+fn sort_by(v: &mut View, k: SortKey) {
+    if v.key == k {
+        v.ascending = !v.ascending;
+    } else {
+        v.key = k;
+        v.ascending = k.default_ascending();
+    }
+}
+
+fn table(ui: &mut egui::Ui, list: &[&Contributor], v: &mut View, view_width: f32) {
+    if rtl::mirrored() {
+        let heads: Vec<Head> = SortKey::ALL
+            .iter()
+            .map(|k| Head { text: header_text(*k, v), tip: Some(crate::i18n::t(k.label().0).to_string()), button: true })
+            .collect();
+        let rows: Vec<Vec<Cell>> = list
+            .iter()
+            .map(|c| {
+                let mut row = vec![Cell::Link { text: c.name(v.names), url: format!("https://github.com/{}", c.login), tip: c.summary() }];
+                row.extend(figures(c).into_iter().map(Cell::Text));
+                row
+            })
+            .collect();
+        if let Some(column) = mirrored_table(ui, "credits_table", &heads, &rows, view_width)
+            && let Some(k) = SortKey::ALL.get(column)
+        {
+            sort_by(v, *k);
+        }
+        return;
+    }
     egui::Grid::new("credits_table").striped(true).num_columns(SortKey::ALL.len()).show(ui, |ui| {
         for k in SortKey::ALL {
-            let arrow = if v.key == k { if v.ascending { " ▲" } else { " ▼" } } else { "" };
-            if ui
-                .button(RichText::new(format!("{}{arrow}", crate::i18n::t(k.label().1))).strong())
-                .on_hover_text(crate::i18n::t(k.label().0))
-                .clicked()
-            {
-                if v.key == k {
-                    v.ascending = !v.ascending;
-                } else {
-                    v.key = k;
-                    v.ascending = k.default_ascending();
-                }
+            if ui.button(RichText::new(header_text(k, v)).strong()).on_hover_text(crate::i18n::t(k.label().0)).clicked() {
+                sort_by(v, k);
             }
         }
         ui.end_row();
         for c in list {
             ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
-            ui.label(group(c.prs));
-            ui.label(group(c.commits));
-            ui.label(group(c.lines_added));
-            ui.label(group(c.lines_deleted));
-            ui.label(signed(c.lines_delta()));
-            ui.label(group(c.binary_added));
-            ui.label(group(c.binary_deleted));
-            ui.label(day(c.first_commit));
-            ui.label(day(c.last_commit));
+            for text in figures(c) {
+                ui.label(text);
+            }
             ui.end_row();
         }
     });
+}
+
+/// The text of a model's table row.
+fn model_cells(m: &Model, assisted: u64) -> [String; 6] {
+    [
+        m.company.to_string(),
+        m.model.to_string(),
+        m.version.to_string(),
+        group(m.commits),
+        format!("{:.0}%", 100.0 * m.commits as f64 / TOTAL_COMMITS.max(assisted) as f64),
+        format!("+{} / −{}", group(m.lines_added), group(m.lines_deleted)),
+    ]
 }
 
 /// About ▸ Models: AI models credited in Co-Authored-By trailers.
@@ -326,23 +380,126 @@ pub fn models_ui(ui: &mut egui::Ui) {
         return;
     }
     let assisted: u64 = MODELS.iter().map(|m| m.commits).max().unwrap_or(0).max(1);
-    egui::ScrollArea::both().id_salt("credits_models").max_height(LIST_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
-        egui::Grid::new("credits_models").striped(true).num_columns(6).show(ui, |ui| {
-            for h in MODEL_COLUMNS {
-                ui.label(RichText::new(crate::i18n::t(h)).strong());
+    let view_width = ui.available_width();
+    let area = egui::ScrollArea::both().id_salt("credits_models").max_height(LIST_HEIGHT).auto_shrink([false, true]);
+    crate::widgets::scroll_area_with(ui, area.stick_to_right(rtl::mirrored()), true, |area, ui| {
+        area.show(ui, |ui| {
+            if rtl::mirrored() {
+                let heads: Vec<Head> = MODEL_COLUMNS.iter().map(|h| Head { text: crate::i18n::t(h).to_string(), tip: None, button: false }).collect();
+                let rows: Vec<Vec<Cell>> = MODELS.iter().map(|m| model_cells(m, assisted).into_iter().map(Cell::Text).collect()).collect();
+                mirrored_table(ui, "credits_models", &heads, &rows, view_width);
+                return;
+            }
+            egui::Grid::new("credits_models").striped(true).num_columns(6).show(ui, |ui| {
+                for h in MODEL_COLUMNS {
+                    ui.label(RichText::new(crate::i18n::t(h)).strong());
+                }
+                ui.end_row();
+                for m in MODELS {
+                    for text in model_cells(m, assisted) {
+                        ui.label(text);
+                    }
+                    ui.end_row();
+                }
+            });
+        })
+    });
+}
+
+/// A header of a [`mirrored_table`].
+struct Head {
+    text: String,
+    /// Shown on hover.
+    tip: Option<String>,
+    /// A sort button; otherwise a label.
+    button: bool,
+}
+
+/// A cell of a [`mirrored_table`].
+enum Cell {
+    Text(String),
+    Link { text: String, url: String, tip: String },
+}
+
+/// A table whose columns run from the right when the interface is mirrored: the first column is at
+/// the right edge and the cells are right-aligned in their columns. `egui::Grid` places a cell at
+/// the left of its column, so each cell is an exactly sized slot with a right-to-left layout in
+/// it, and the columns are added in [`rtl::run_order`]. The widths come from the text itself, and
+/// the first column takes whatever `view_width` has left so the striped rows span the view. Returns
+/// the column of the header button that was clicked.
+fn mirrored_table(ui: &mut Ui, id: &str, heads: &[Head], rows: &[Vec<Cell>], view_width: f32) -> Option<usize> {
+    let measure = |text: &str, strong: bool| {
+        let text = RichText::new(text);
+        let text = if strong { text.strong() } else { text };
+        WidgetText::from(text).into_galley(ui, Some(TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size()
+    };
+    let padding = ui.spacing().button_padding;
+    let spacing = ui.spacing().item_spacing;
+    let minimum = ui.spacing().interact_size.y;
+    let mut widths = vec![0.0f32; heads.len()];
+    let mut head_height = minimum;
+    for (width, head) in widths.iter_mut().zip(heads) {
+        let size = measure(&head.text, true);
+        let (extra_x, extra_y) = if head.button { (2.0 * padding.x, 2.0 * padding.y) } else { (0.0, 0.0) };
+        *width = size.x + extra_x;
+        head_height = head_height.max(size.y + extra_y);
+    }
+    let mut row_height = minimum;
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            let (Cell::Text(text) | Cell::Link { text, .. }) = cell;
+            let size = measure(text, false);
+            *width = width.max(size.x);
+            row_height = row_height.max(size.y);
+        }
+    }
+    let between = spacing.x * heads.len().saturating_sub(1) as f32;
+    let natural = widths.iter().sum::<f32>() + between;
+    if let Some(first) = widths.first_mut()
+        && view_width.is_finite()
+        && view_width > natural
+    {
+        *first += view_width - natural;
+    }
+    // A slot of the table: `width` wide, with its content against the right.
+    let slot = |ui: &mut Ui, width: f32, height: f32, add: &mut dyn FnMut(&mut Ui)| {
+        let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        let mut cell = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)));
+        add(&mut cell);
+    };
+    let mut clicked = None;
+    egui::Grid::new(id).striped(true).num_columns(heads.len()).show(ui, |ui| {
+        for column in rtl::run_order(heads.len()) {
+            let (Some(head), Some(width)) = (heads.get(column), widths.get(column)) else { continue };
+            slot(ui, *width, head_height, &mut |ui| {
+                let text = RichText::new(&head.text).strong();
+                if head.button {
+                    let response = ui.button(text);
+                    let response = match &head.tip {
+                        Some(tip) => response.on_hover_text(tip),
+                        None => response,
+                    };
+                    if response.clicked() {
+                        clicked = Some(column);
+                    }
+                } else {
+                    ui.label(text);
+                }
+            });
+        }
+        ui.end_row();
+        for row in rows {
+            for column in rtl::run_order(heads.len()) {
+                let (Some(cell), Some(width)) = (row.get(column), widths.get(column)) else { continue };
+                slot(ui, *width, row_height, &mut |ui| match cell {
+                    Cell::Text(text) => _ = ui.label(text),
+                    Cell::Link { text, url, tip } => _ = ui.hyperlink_to(text, url).on_hover_text(tip),
+                });
             }
             ui.end_row();
-            for m in MODELS {
-                ui.label(m.company);
-                ui.label(m.model);
-                ui.label(m.version);
-                ui.label(group(m.commits));
-                ui.label(format!("{:.0}%", 100.0 * m.commits as f64 / TOTAL_COMMITS.max(assisted) as f64));
-                ui.label(format!("+{} / −{}", group(m.lines_added), group(m.lines_deleted)));
-                ui.end_row();
-            }
-        });
+        }
     });
+    clicked
 }
 
 #[cfg(test)]

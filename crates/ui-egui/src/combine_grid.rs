@@ -610,141 +610,144 @@ pub(crate) fn grid(
     let over_grid = ui.rect_contains_pointer(viewport);
     let mut width = viewport.width();
     let mut focused_card = None;
-    let output = egui::ScrollArea::vertical().id_salt("combine-grid").auto_shrink([false, false]).show_viewport(ui, |ui, clip| {
-        // Dragging near the top or bottom edge scrolls.
-        if drag.is_some()
-            && let Some(p) = pointer
-            && viewport.contains(p)
-        {
-            let edge = 40.0;
-            let delta = if p.y < viewport.top() + edge {
-                12.0
-            } else if p.y > viewport.bottom() - edge {
-                -12.0
-            } else {
-                0.0
-            };
-            if delta != 0.0 {
-                ui.scroll_with_delta(vec2(0.0, delta));
-                ctx.request_repaint();
-            }
-        }
-        ui.add_space(TOP);
-        width = ui.available_width();
-        let cols = columns_in(width, cell);
-        *columns = cols;
-        let rows = places.len().div_ceil(cols);
-        let left = ((width - cols as f32 * cell.x) / 2.0).max(0.0);
-        let (area, _) = ui.allocate_exact_size(vec2(width, rows as f32 * cell.y), Sense::hover());
-        let cell_rect = |i: usize| {
-            let (row, col) = (i / cols, i % cols);
-            Rect::from_min_size(pos2(area.left() + left + col as f32 * cell.x, area.top() + row as f32 * cell.y), cell)
-        };
-        if let Some(i) = reveal.and_then(|id| files.iter().position(|f| f.id == id)) {
-            ui.scroll_to_rect(cell_rect(first_place.get(i).copied().unwrap_or(0)), None);
-        }
-        for row in crate::canvas::thumbnail_rows(clip.top() - TOP, clip.bottom() - TOP, cell.y, rows) {
-            let first = row.saturating_mul(cols);
-            let in_row = places.get(first..first.saturating_add(cols).min(places.len())).unwrap_or_default();
-            // An expanded file's pages on this row share a tinted band, so they read as one file.
-            let mut run = 0;
-            while run < in_row.len() {
-                let Some(start) = in_row.get(run).copied() else { break };
-                let mut end = run;
-                while in_row.get(end.saturating_add(1)).is_some_and(|c| c.file == start.file && c.page.is_some()) {
-                    end = end.saturating_add(1);
-                }
-                if start.page.is_some() {
-                    let band = cell_rect(first.saturating_add(run)).union(cell_rect(first.saturating_add(end))).shrink2(vec2(2.0, 4.0));
-                    ui.painter().rect_filled(band, CornerRadius::same(10), t.accent_soft.gamma_multiply(0.45));
-                }
-                run = end.saturating_add(1);
-            }
-            for (col, place) in in_row.iter().enumerate() {
-                let i = first.saturating_add(col);
-                let Some(f) = files.get_mut(place.file) else { break };
-                let c = cell_rect(i);
-                cells.push((i, c));
-                let card = Card {
-                    i: place.file,
-                    page: place.page,
-                    rect: c,
-                    check: checks.get(place.file).cloned().unwrap_or(Ok(f.pages)),
-                    selected: selected.get(place.file).copied().unwrap_or(false)
-                        || place.page.is_some_and(|(nth, ..)| picked_pages.contains(&(f.id, nth))),
-                    twice: twice.get(place.file).copied().unwrap_or(false),
-                    revision,
-                    ppp,
-                    fit,
-                };
-                let card_id = card.id(ui, f);
-                if let Some(a) = card.show(ui, t, f, thumbs) {
-                    action = Some(a);
-                }
-                if ui.memory(|m| m.has_focus(card_id)) {
-                    focused_card = Some((card_id, f.id, place.page.map_or(0, |p| p.0)));
-                }
-            }
-        }
-        // While a page card is dragged: the page gap it would go to (any place, between any two
-        // pages), drawn at the nearest card's edge, and how many pages go.
-        if let Some(d) = drag
-            && let Some(page) = d.page
-            && let Some(p) = pointer
-        {
-            let at = crate::canvas::drop_gap(&cells, p);
-            let nearest = cells.iter().min_by(|(_, a), (_, b)| a.distance_sq_to_pos(p).total_cmp(&b.distance_sq_to_pos(p)));
-            if let Some((_, r)) = nearest {
-                let x = if p.x < r.center().x { r.left() + 2.0 } else { r.right() - 2.0 };
-                ui.painter().line_segment([pos2(x, r.top() + 10.0), pos2(x, r.bottom() - 30.0)], Stroke::new(3.0, t.accent));
-            }
-            let moving = if picked_pages.contains(&page) { picked_pages.len() } else { 1 };
-            let label = if moving == 1 { tl!("1 page").to_string() } else { crate::i18n::fmt(tl!("{n} pages"), &[("n", &moving.to_string())]) };
-            ui.painter().text(p + vec2(14.0, 14.0), Align2::LEFT_TOP, label, theme::medium(12.0), t.accent_text);
-            if released
+    let area = egui::ScrollArea::vertical().id_salt("combine-grid").auto_shrink([false, false]);
+    let output = crate::widgets::scroll_area_with(ui, area, false, |area, ui| {
+        area.show_viewport(ui, |ui, clip| {
+            // Dragging near the top or bottom edge scrolls.
+            if drag.is_some()
+                && let Some(p) = pointer
                 && viewport.contains(p)
-                && let Some(at) = at
             {
-                let gap = page_at.get(at).copied().unwrap_or(total_pages);
-                action = Some(RowAction::MovePages { page, revision: d.revision, gap });
+                let edge = 40.0;
+                let delta = if p.y < viewport.top() + edge {
+                    12.0
+                } else if p.y > viewport.bottom() - edge {
+                    -12.0
+                } else {
+                    0.0
+                };
+                if delta != 0.0 {
+                    ui.scroll_with_delta(vec2(0.0, delta));
+                    ctx.request_repaint();
+                }
             }
-        } else if let Some(d) = drag
-            && let Some(p) = pointer
-        {
-            // A file's card: the file gap it would go to, drawn as a bar, and how many files go.
-            let gap = crate::canvas::drop_gap(&cells, p).map(|at| file_gap(&places, at, n));
-            // Drawn at the end of the file before the gap or the start of the one after (an
-            // expanded file's pages are never split), whichever is nearer the pointer.
-            if let Some(gap) = gap {
-                let before = gap
-                    .checked_sub(1)
-                    .and_then(|f| first_place.get(f.saturating_add(1)).map(|next| next.saturating_sub(1)).or(places.len().checked_sub(1)));
-                let after = first_place.get(gap).copied();
-                let ends = [before.map(|at| cell_rect(at).right() - 2.0).zip(before), after.map(|at| cell_rect(at).left() + 2.0).zip(after)];
-                let nearest = ends.into_iter().flatten().min_by(|(xa, a), (xb, b)| {
-                    let da = pos2(*xa, cell_rect(*a).center().y).distance_sq(p);
-                    let db = pos2(*xb, cell_rect(*b).center().y).distance_sq(p);
-                    da.total_cmp(&db)
-                });
-                if let Some((x, at)) = nearest {
-                    let r = cell_rect(at);
+            ui.add_space(TOP);
+            width = ui.available_width();
+            let cols = columns_in(width, cell);
+            *columns = cols;
+            let rows = places.len().div_ceil(cols);
+            let left = ((width - cols as f32 * cell.x) / 2.0).max(0.0);
+            let (area, _) = ui.allocate_exact_size(vec2(width, rows as f32 * cell.y), Sense::hover());
+            let cell_rect = |i: usize| {
+                let (row, col) = (i / cols, i % cols);
+                Rect::from_min_size(pos2(area.left() + left + col as f32 * cell.x, area.top() + row as f32 * cell.y), cell)
+            };
+            if let Some(i) = reveal.and_then(|id| files.iter().position(|f| f.id == id)) {
+                ui.scroll_to_rect(cell_rect(first_place.get(i).copied().unwrap_or(0)), None);
+            }
+            for row in crate::canvas::thumbnail_rows(clip.top() - TOP, clip.bottom() - TOP, cell.y, rows) {
+                let first = row.saturating_mul(cols);
+                let in_row = places.get(first..first.saturating_add(cols).min(places.len())).unwrap_or_default();
+                // An expanded file's pages on this row share a tinted band, so they read as one file.
+                let mut run = 0;
+                while run < in_row.len() {
+                    let Some(start) = in_row.get(run).copied() else { break };
+                    let mut end = run;
+                    while in_row.get(end.saturating_add(1)).is_some_and(|c| c.file == start.file && c.page.is_some()) {
+                        end = end.saturating_add(1);
+                    }
+                    if start.page.is_some() {
+                        let band = cell_rect(first.saturating_add(run)).union(cell_rect(first.saturating_add(end))).shrink2(vec2(2.0, 4.0));
+                        ui.painter().rect_filled(band, CornerRadius::same(10), t.accent_soft.gamma_multiply(0.45));
+                    }
+                    run = end.saturating_add(1);
+                }
+                for (col, place) in in_row.iter().enumerate() {
+                    let i = first.saturating_add(col);
+                    let Some(f) = files.get_mut(place.file) else { break };
+                    let c = cell_rect(i);
+                    cells.push((i, c));
+                    let card = Card {
+                        i: place.file,
+                        page: place.page,
+                        rect: c,
+                        check: checks.get(place.file).cloned().unwrap_or(Ok(f.pages)),
+                        selected: selected.get(place.file).copied().unwrap_or(false)
+                            || place.page.is_some_and(|(nth, ..)| picked_pages.contains(&(f.id, nth))),
+                        twice: twice.get(place.file).copied().unwrap_or(false),
+                        revision,
+                        ppp,
+                        fit,
+                    };
+                    let card_id = card.id(ui, f);
+                    if let Some(a) = card.show(ui, t, f, thumbs) {
+                        action = Some(a);
+                    }
+                    if ui.memory(|m| m.has_focus(card_id)) {
+                        focused_card = Some((card_id, f.id, place.page.map_or(0, |p| p.0)));
+                    }
+                }
+            }
+            // While a page card is dragged: the page gap it would go to (any place, between any two
+            // pages), drawn at the nearest card's edge, and how many pages go.
+            if let Some(d) = drag
+                && let Some(page) = d.page
+                && let Some(p) = pointer
+            {
+                let at = crate::canvas::drop_gap(&cells, p);
+                let nearest = cells.iter().min_by(|(_, a), (_, b)| a.distance_sq_to_pos(p).total_cmp(&b.distance_sq_to_pos(p)));
+                if let Some((_, r)) = nearest {
+                    let x = if p.x < r.center().x { r.left() + 2.0 } else { r.right() - 2.0 };
                     ui.painter().line_segment([pos2(x, r.top() + 10.0), pos2(x, r.bottom() - 30.0)], Stroke::new(3.0, t.accent));
                 }
-            }
-            let moving = files
-                .iter()
-                .position(|f| f.id == d.file)
-                .map_or(1, |i| if selected.get(i).copied().unwrap_or(false) { selected.iter().filter(|s| **s).count() } else { 1 });
-            let label = if moving == 1 { tl!("1 file").to_string() } else { crate::i18n::fmt(tl!("{n} files"), &[("n", &moving.to_string())]) };
-            ui.painter().text(p + vec2(14.0, 14.0), Align2::LEFT_TOP, label, theme::medium(12.0), t.accent_text);
-            // Dropped in the grid: there. Anywhere else: nothing moves.
-            if released
-                && viewport.contains(p)
-                && let Some(gap) = gap
+                let moving = if picked_pages.contains(&page) { picked_pages.len() } else { 1 };
+                let label = if moving == 1 { tl!("1 page").to_string() } else { crate::i18n::fmt(tl!("{n} pages"), &[("n", &moving.to_string())]) };
+                ui.painter().text(p + vec2(14.0, 14.0), Align2::LEFT_TOP, label, theme::medium(12.0), t.accent_text);
+                if released
+                    && viewport.contains(p)
+                    && let Some(at) = at
+                {
+                    let gap = page_at.get(at).copied().unwrap_or(total_pages);
+                    action = Some(RowAction::MovePages { page, revision: d.revision, gap });
+                }
+            } else if let Some(d) = drag
+                && let Some(p) = pointer
             {
-                action = Some(RowAction::DropAt { file: d.file, revision: d.revision, gap });
+                // A file's card: the file gap it would go to, drawn as a bar, and how many files go.
+                let gap = crate::canvas::drop_gap(&cells, p).map(|at| file_gap(&places, at, n));
+                // Drawn at the end of the file before the gap or the start of the one after (an
+                // expanded file's pages are never split), whichever is nearer the pointer.
+                if let Some(gap) = gap {
+                    let before = gap
+                        .checked_sub(1)
+                        .and_then(|f| first_place.get(f.saturating_add(1)).map(|next| next.saturating_sub(1)).or(places.len().checked_sub(1)));
+                    let after = first_place.get(gap).copied();
+                    let ends = [before.map(|at| cell_rect(at).right() - 2.0).zip(before), after.map(|at| cell_rect(at).left() + 2.0).zip(after)];
+                    let nearest = ends.into_iter().flatten().min_by(|(xa, a), (xb, b)| {
+                        let da = pos2(*xa, cell_rect(*a).center().y).distance_sq(p);
+                        let db = pos2(*xb, cell_rect(*b).center().y).distance_sq(p);
+                        da.total_cmp(&db)
+                    });
+                    if let Some((x, at)) = nearest {
+                        let r = cell_rect(at);
+                        ui.painter().line_segment([pos2(x, r.top() + 10.0), pos2(x, r.bottom() - 30.0)], Stroke::new(3.0, t.accent));
+                    }
+                }
+                let moving = files
+                    .iter()
+                    .position(|f| f.id == d.file)
+                    .map_or(1, |i| if selected.get(i).copied().unwrap_or(false) { selected.iter().filter(|s| **s).count() } else { 1 });
+                let label = if moving == 1 { tl!("1 file").to_string() } else { crate::i18n::fmt(tl!("{n} files"), &[("n", &moving.to_string())]) };
+                ui.painter().text(p + vec2(14.0, 14.0), Align2::LEFT_TOP, label, theme::medium(12.0), t.accent_text);
+                // Dropped in the grid: there. Anywhere else: nothing moves.
+                if released
+                    && viewport.contains(p)
+                    && let Some(gap) = gap
+                {
+                    action = Some(RowAction::DropAt { file: d.file, revision: d.revision, gap });
+                }
             }
-        }
+        })
     });
 
     app.combine_tab.card_focus = focused_card.map(|(id, ..)| id);
@@ -1051,9 +1054,7 @@ impl Card {
         let at = resp.rect.left_bottom();
         let locked = f.lock.is_some();
         resp.context_menu(|ui| {
-            let item = |ui: &mut egui::Ui, icon: &str, label: &str| {
-                ui.add(egui::Button::image_and_text(icons::image(icon, 15.0, ui.visuals().text_color()), label)).clicked()
-            };
+            let item = |ui: &mut egui::Ui, icon: &str, label: &str| crate::widgets::menu_icon_entry(ui, true, icon, label).clicked();
             for (icon, label, act) in buttons.iter().rev() {
                 // (Remove names its file, as the trash button does.)
                 if item(ui, icon, label) {
@@ -1200,10 +1201,10 @@ pub(crate) fn preview(app: &mut PdfCraftApp, ctx: &egui::Context, t: &Tokens) {
         // Previous and next, centred below.
         ui.horizontal(|ui| {
             ui.add_space((width - 2.0 * 30.0 - 6.0) / 2.0);
-            if ui.add_enabled_ui(at > 0, |ui| icons::button(ui, "chevron-left", 30.0, false, tl!("Previous page"))).inner.clicked() {
+            if ui.add_enabled_ui(at > 0, |ui| icons::button_fixed(ui, "chevron-left", 30.0, false, tl!("Previous page"))).inner.clicked() {
                 step = -1;
             }
-            if ui.add_enabled_ui(at + 1 < n, |ui| icons::button(ui, "chevron-right", 30.0, false, tl!("Next page"))).inner.clicked() {
+            if ui.add_enabled_ui(at + 1 < n, |ui| icons::button_fixed(ui, "chevron-right", 30.0, false, tl!("Next page"))).inner.clicked() {
                 step = 1;
             }
         });

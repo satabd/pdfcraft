@@ -1221,8 +1221,9 @@ fn long_german_tool_labels_stay_within_the_sidebar() {
     // A long sub-tool name must stop before its status chip, not paint over the PDF.
     h.state_mut().left = LeftPanel::Tool("protect");
     h.run_steps(4);
+    // Too long for its room, it is cut in logical order and ends in "…".
     let item =
-        painted_text(&h).into_iter().find(|(s, ..)| s == "Ausgeblendete Informationen entfernen").expect("long translated sub-tool is painted");
+        painted_text(&h).into_iter().find(|(s, ..)| s.starts_with("Ausgeblendete I")).expect("long translated sub-tool is painted, whole or cut");
     assert!(item.2.right() <= 272.0, "translated tool item runs past the sidebar: {:?}", item.2);
 }
 

@@ -155,7 +155,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
         MarkKind::Watermark => crate::i18n::fmt(tl!("{verb} Watermark"), &[("verb", verb)]),
         MarkKind::Background => crate::i18n::fmt(tl!("{verb} Background"), &[("verb", verb)]),
     };
-    ui.label(egui::RichText::new(title).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, title);
     ui.add_space(8.0);
     match kind {
         MarkKind::HeaderFooter => {
@@ -334,7 +334,13 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
                     egui::Stroke::new(1.0, Color32::GRAY),
                     egui::StrokeKind::Inside,
                 );
-                p.text(centre, egui::Align2::CENTER_CENTER, file_name.clone().unwrap_or_default(), egui::FontId::proportional(10.0), Color32::GRAY);
+                p.text(
+                    centre,
+                    egui::Align2::CENTER_CENTER,
+                    file_name.as_deref().map(|n| crate::bidi::visual(n).into_owned()).unwrap_or_default(),
+                    egui::FontId::proportional(10.0),
+                    Color32::GRAY,
+                );
             }
             MarkKind::Watermark => {
                 let text = if wm.text.trim().is_empty() { "CONFIDENTIAL" } else { wm.text.trim() };
@@ -356,7 +362,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
                 p.text(
                     r.center(),
                     egui::Align2::CENTER_CENTER,
-                    file_name.clone().unwrap_or_default(),
+                    file_name.as_deref().map(|n| crate::bidi::visual(n).into_owned()).unwrap_or_default(),
                     egui::FontId::proportional(10.0),
                     Color32::GRAY,
                 );
@@ -388,7 +394,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: M
     let undrawable = undrawable(kind, d);
     if let Some(c) = undrawable {
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(crate::content_ui::undrawable_message(c)).small().color(crate::content_ui::UNDRAWABLE));
+        crate::widgets::small_text(ui, &crate::content_ui::undrawable_message(c), crate::content_ui::UNDRAWABLE);
     }
     ui.add_space(10.0);
     let (mut apply, mut cancel) = (false, false);

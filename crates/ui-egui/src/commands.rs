@@ -76,6 +76,11 @@ pub(crate) fn command_tip(ctx: &egui::Context, template: &str, id: &str) -> Stri
     crate::i18n::fmt(template, &[("key", &command_shortcut_label(ctx, id))])
 }
 
+/// [`command_tip`] for a tooltip in logical order (see [`crate::widgets::hover_text`]).
+pub(crate) fn command_tip_logical(ctx: &egui::Context, template: &crate::i18n::Logical<'_>, id: &str) -> crate::i18n::Logical<'static> {
+    crate::i18n::fmt_logical(template, &[("key", &command_shortcut_label(ctx, id))])
+}
+
 impl PdfCraftApp {
     /// Whether a registered command can run now. The engine judges the document (security,
     /// contents, undo history); view state it can't see is checked here.
@@ -114,37 +119,37 @@ impl PdfCraftApp {
         let Some(spec) = commands::command(id) else { return false };
         if !self.command_enabled(spec) {
             let why = match spec.needs {
-                commands::Needs::Undo => tl!("Nothing to undo").to_string(),
-                commands::Needs::Redo => tl!("Nothing to redo").to_string(),
-                commands::Needs::FillForms if self.active.is_some() => tl!("This document has no form fields you can fill in").to_string(),
-                commands::Needs::HasComments if self.active.is_some() => tl!("This document has no comments to flatten").to_string(),
-                commands::Needs::HasFields if self.active.is_some() => tl!("This document has no form fields to flatten").to_string(),
+                commands::Needs::Undo => tl_logical!("Nothing to undo"),
+                commands::Needs::Redo => tl_logical!("Nothing to redo"),
+                commands::Needs::FillForms if self.active.is_some() => tl_logical!("This document has no form fields you can fill in"),
+                commands::Needs::HasComments if self.active.is_some() => tl_logical!("This document has no comments to flatten"),
+                commands::Needs::HasFields if self.active.is_some() => tl_logical!("This document has no form fields to flatten"),
                 commands::Needs::HasRedactions if self.active.is_some() => {
-                    tl!("There are no redaction marks (mark text, areas or pages first)").to_string()
+                    tl_logical!("There are no redaction marks (mark text, areas or pages first)")
                 }
                 commands::Needs::Marks(k) if self.active.is_some() => {
                     let kind = match k {
-                        pdfcraft_engine::MarkKind::HeaderFooter => tl!("header or footer"),
-                        pdfcraft_engine::MarkKind::Watermark => tl!("watermark"),
-                        pdfcraft_engine::MarkKind::Background => tl!("background"),
+                        pdfcraft_engine::MarkKind::HeaderFooter => tl_logical!("header or footer"),
+                        pdfcraft_engine::MarkKind::Watermark => tl_logical!("watermark"),
+                        pdfcraft_engine::MarkKind::Background => tl_logical!("background"),
                     };
-                    crate::i18n::fmt(tl!("This document has no {kind} to change"), &[("kind", kind)])
+                    crate::i18n::fmt_logical(&tl_logical!("This document has no {kind} to change"), &[("kind", &kind)])
                 }
                 // Restricted documents ask for their permissions password instead, so only an
                 // unprotected or a read-only document gets here.
                 commands::Needs::Security | commands::Needs::ProtectedSecurity if self.active.is_some() => {
                     match self.active_ids().and_then(|(_, id)| self.session.get(id)) {
-                        Some(d) if !d.allows_security_change() => crate::i18n::fmt(tl!("{name} is read-only"), &[("name", &d.name)]),
-                        _ => tl!("This document isn't password-protected").to_string(),
+                        Some(d) if !d.allows_security_change() => crate::i18n::fmt_logical(&tl_logical!("{name} is read-only"), &[("name", &d.name)]),
+                        _ => tl_logical!("This document isn't password-protected"),
                     }
                 }
-                commands::Needs::Unlock if self.active.is_some() => tl!("This document has no restrictions to lift").to_string(),
+                commands::Needs::Unlock if self.active.is_some() => tl_logical!("This document has no restrictions to lift"),
                 commands::Needs::Assembly | commands::Needs::Modification | commands::Needs::Annotate if self.active.is_some() => {
-                    tl!("The document's security settings don't allow this change").to_string()
+                    tl_logical!("The document's security settings don't allow this change")
                 }
-                commands::Needs::Copying if self.active.is_some() => crate::copy_refused().to_string(),
-                commands::Needs::TwoPageView if self.active.is_some() => tl!("Switch to two-page view first to show the cover page").to_string(),
-                _ => tl!("Open a document first").to_string(),
+                commands::Needs::Copying if self.active.is_some() => crate::copy_refused(),
+                commands::Needs::TwoPageView if self.active.is_some() => tl_logical!("Switch to two-page view first to show the cover page"),
+                _ => tl_logical!("Open a document first"),
             };
             self.notify(why);
             return false;
@@ -596,7 +601,7 @@ impl PdfCraftApp {
                 }
                 self.notify_fmt(
                     "Click on the page to add a {tool}, or drag to set its size",
-                    &[("tool", &crate::i18n::in_sentence(tl!(tool.label())))],
+                    &[("tool", &crate::i18n::in_sentence(&tl_logical!(tool.label())))],
                 );
             }
             "sign.fill.signature.remove" => self.signature = None,
@@ -773,21 +778,28 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
         // Clear Recent Files at the foot empties the list (#430).
         if spec.id == "file.open_recent" {
             if app.recent.is_empty() {
-                ui.add_enabled(false, egui::Button::new(label));
+                widgets::menu_entry(ui, false, &label, None);
                 continue;
             }
             let mut open: Option<String> = None;
             let mut clear = false;
-            ui.menu_button(label, |ui| {
+            widgets::sub_menu(ui, &label, |ui| {
                 crate::chrome::scroll_menu(ui, |ui| {
                     for r in &app.recent {
-                        if ui.button(&r.name).on_hover_text(&r.path).clicked() {
+                        let shown = crate::bidi::visual(&r.name);
+                        let reordered = matches!(shown, std::borrow::Cow::Owned(_));
+                        let resp = widgets::menu_entry(ui, true, shown.as_ref(), None);
+                        if reordered {
+                            // Painted in display order; the accessible name stays the file's own.
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &r.name));
+                        }
+                        if resp.on_hover_text(crate::bidi::visual(&r.path).into_owned()).clicked() {
                             open = Some(r.path.clone());
                             ui.close();
                         }
                     }
                     ui.separator();
-                    if ui.button(tl!("Clear Recent Files")).clicked() {
+                    if widgets::menu_entry(ui, true, tl!("Clear Recent Files"), None).clicked() {
                         clear = true;
                         ui.close();
                     }
@@ -805,7 +817,13 @@ pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str
         }
         let shortcut = spec.shortcut.or((spec.id == "edit.copy").then_some(COPY)).map(|s| shortcut_label(ui.ctx(), s)).unwrap_or_default();
         let enabled = app.command_enabled(spec);
-        let resp = ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut));
+        // Undo and Redo name the last action, which may be a document's text; painted in display order.
+        let painted = widgets::visual_sentence(&label);
+        let reordered = matches!(painted, std::borrow::Cow::Owned(_));
+        let resp = widgets::menu_entry(ui, enabled, painted.as_ref(), Some(&shortcut));
+        if reordered {
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label));
+        }
         if resp.clicked() {
             app.execute(spec.id);
             ui.close();

@@ -40,7 +40,7 @@ fn fixture() -> Document {
 }
 
 /// A PDF of the given objects (numbered from 1).
-fn document(objs: &[String]) -> Document {
+pub(crate) fn document(objs: &[String]) -> Document {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (i, o) in objs.iter().enumerate() {
@@ -56,7 +56,7 @@ fn document(objs: &[String]) -> Document {
     Document::open(Arc::new(out)).expect("opens")
 }
 
-fn reopen(doc: &Document) -> Document {
+pub(crate) fn reopen(doc: &Document) -> Document {
     let bytes = write_incremental(doc, &SaveOptions::default()).expect("writes");
     hayro_syntax::Pdf::new(bytes.clone()).expect("hayro-syntax parses the output");
     Document::open(Arc::new(bytes)).expect("reopens")
@@ -76,7 +76,7 @@ fn assert_combined_matches_legacy(doc: &Document, adopted: usize) {
     assert_eq!(adopted_page_fields(doc), old_adopted, "the compatibility wrapper keeps the old count");
 }
 
-fn field<'a>(all: &'a [Field], name: &str) -> &'a Field {
+pub(crate) fn field<'a>(all: &'a [Field], name: &str) -> &'a Field {
     all.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("no field {name}"))
 }
 

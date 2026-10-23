@@ -19,6 +19,7 @@ pub mod pdf;
 pub mod pkcs12;
 pub mod revocation;
 mod rsa_pad;
+mod shaped;
 pub mod timestamp;
 #[cfg(target_os = "windows")]
 pub mod windows;

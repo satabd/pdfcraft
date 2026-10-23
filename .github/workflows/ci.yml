@@ -47,6 +47,11 @@ jobs:
         run: |
           echo "CRAFT_FONTS_DIR=$GITHUB_WORKSPACE/craft-fonts" >> "$GITHUB_ENV"
           echo "CRAFT_FONTS_REQUIRED=1" >> "$GITHUB_ENV"
+          # A static Arabic-capable face for the tests that embed a page font (the craft-fonts
+          # Arabic face is variable, which embedding refuses); they skip when it is absent.
+          if [ -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ]; then
+            echo "PDFCRAFT_TEST_ARABIC_FONT=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" >> "$GITHUB_ENV"
+          fi
 
       - name: Install Linux system dependencies (egui/winit/rfd) and the oracles
         if: runner.os == 'Linux'

@@ -735,14 +735,14 @@ pub(crate) fn page(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             let open_docs: Vec<(usize, String)> =
                 app.views.iter().enumerate().filter_map(|(i, _)| crate::canvas::tab_label(app, i).map(|name| (i, name))).collect();
             let response = ui.add_enabled_ui(!open_docs.is_empty(), |ui| widgets::icon_pill(ui, "file-plus", tl!("Add open documents"), false)).inner;
-            response.clone().on_disabled_hover_text(tl!("No documents are open"));
+            widgets::disabled_hover_text(response.clone(), &tl_logical!("No documents are open"));
             egui::Popup::menu(&response).show(|ui| {
-                if open_docs.len() > 1 && ui.button(tl!("All open documents")).clicked() {
+                if open_docs.len() > 1 && widgets::menu_entry(ui, true, tl!("All open documents"), None).clicked() {
                     app.add_open_documents(&open_docs.iter().map(|(i, _)| *i).collect::<Vec<_>>());
                     ui.close();
                 }
                 for (i, name) in &open_docs {
-                    if ui.button(crate::bidi::visual(name).as_ref()).clicked() {
+                    if widgets::menu_entry(ui, true, crate::bidi::visual(name).as_ref(), None).clicked() {
                         app.add_open_documents(&[*i]);
                         ui.close();
                     }
@@ -789,7 +789,7 @@ pub(crate) fn page(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             group(ui, &t, edge, 2.0 * 30.0 + 6.0);
             // Thumbnails or the table; the choice is kept in the settings.
             for (view, icon, label) in [(CombineView::Grid, "layout-grid", tl!("Grid view")), (CombineView::List, "list", tl!("List view"))] {
-                if icons::button(ui, icon, 30.0, app.combine_view == view, label).clicked() {
+                if icons::button_fixed(ui, icon, 30.0, app.combine_view == view, label).clicked() {
                     app.combine_view = view;
                 }
             }
@@ -993,7 +993,8 @@ fn unlock_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 crate::widgets::begin_dialog(ui);
-                let field = ui.add(crate::widgets::line(&mut prompt.input.0).password(!prompt.show).hint_text(tl!("Password")).desired_width(290.0));
+                let field =
+                    ui.add(crate::widgets::plain_line(&mut prompt.input.0).password(!prompt.show).hint_text(tl!("Password")).desired_width(290.0));
                 if !prompt.focused {
                     field.request_focus();
                     prompt.focused = true;
@@ -1061,7 +1062,7 @@ fn group(ui: &mut egui::Ui, t: &Tokens, edge: f32, width: f32) {
 
 /// A toolbar icon button, disabled with a reason.
 fn tool(ui: &mut egui::Ui, enabled: bool, icon: &str, label: &str, disabled_why: &str) -> egui::Response {
-    ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, 30.0, false, label)).inner.on_disabled_hover_text(disabled_why)
+    ui.add_enabled_ui(enabled, |ui| icons::button_fixed(ui, icon, 30.0, false, label)).inner.on_disabled_hover_text(disabled_why)
 }
 
 /// Whether a file can be shown as its pages: readable, unlocked, and adding more than one.
@@ -1250,20 +1251,20 @@ fn add_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     }
     egui::Popup::menu(&more).show(|ui| {
         ui.set_min_width(220.0);
-        let item = |ui: &mut egui::Ui, icon: &str, label: &str| {
-            ui.add(egui::Button::image_and_text(icons::image(icon, 15.0, ui.visuals().text_color()), label))
-        };
+        let item = |ui: &mut egui::Ui, icon: &str, label: &str| widgets::menu_icon_entry(ui, true, icon, label);
         if item(ui, "file-plus", tl!("Add files…")).clicked() {
             app.combine_dialog();
             ui.close();
         }
-        if item(ui, "folder", tl!("Add folder…")).on_hover_text(tl!("Every PDF, image and text file in the folder")).clicked() {
+        if widgets::hover_text(item(ui, "folder", tl!("Add folder…")), &tl_logical!("Every PDF, image and text file in the folder")).clicked() {
             app.combine_add_folder(false);
             ui.close();
         }
-        if item(ui, "folder-open", tl!("Add folder and subfolders…"))
-            .on_hover_text(tl!("Every PDF, image and text file in the folder and the folders inside it"))
-            .clicked()
+        if widgets::hover_text(
+            item(ui, "folder-open", tl!("Add folder and subfolders…")),
+            &tl_logical!("Every PDF, image and text file in the folder and the folders inside it"),
+        )
+        .clicked()
         {
             app.combine_add_folder(true);
             ui.close();
@@ -1380,11 +1381,10 @@ fn heading(ui: &mut egui::Ui, t: &Tokens, key: SortKey, sort: Option<(SortKey, b
     {
         event = Some(HeadingEvent::Move { kind: dragged.0, to: key, after: after(&response) });
     }
-    let response = response
-        .on_hover_cursor(if being_dragged { egui::CursorIcon::Grabbing } else { egui::CursorIcon::PointingHand })
-        .on_hover_text(tl!("Click to sort, drag to move the column. Drag its edge to resize it."));
+    let response = response.on_hover_cursor(if being_dragged { egui::CursorIcon::Grabbing } else { egui::CursorIcon::PointingHand });
+    let response = widgets::hover_text(response, &tl_logical!("Click to sort, drag to move the column. Drag its edge to resize it."));
     response.context_menu(|ui| {
-        if ui.button(tl!("Reset columns")).clicked() {
+        if widgets::menu_entry(ui, true, tl!("Reset columns"), None).clicked() {
             event = Some(HeadingEvent::Reset);
             ui.close();
         }
@@ -1482,8 +1482,10 @@ fn table_body(
                                 if let Err(e) = &check {
                                     edit.clone().on_hover_text(e);
                                 } else {
-                                    edit.clone()
-                                        .on_hover_text(crate::i18n::fmt(tl!("Pages of {name} to combine, e.g. 1-3, 6"), &[("name", &f.name)]));
+                                    widgets::hover_text(
+                                        edit.clone(),
+                                        &crate::i18n::fmt_logical(&tl_logical!("Pages of {name} to combine, e.g. 1-3, 6"), &[("name", &f.name)]),
+                                    );
                                 }
                                 if edit.gained_focus() {
                                     events.range_focused = true;
@@ -1563,10 +1565,7 @@ fn table_body(
                     if f.lock.is_some() {
                         let at = response.rect.left_bottom();
                         response.context_menu(|ui| {
-                            if ui
-                                .add(egui::Button::image_and_text(icons::image("lock-open", 15.0, ui.visuals().text_color()), tl!("Unlock…")))
-                                .clicked()
-                            {
+                            if widgets::menu_icon_entry(ui, true, "lock-open", tl!("Unlock…")).clicked() {
                                 events.action = Some(RowAction::Unlock(Some(i), at));
                                 ui.close();
                             }
@@ -2583,8 +2582,8 @@ impl PdfCraftApp {
         match self.session.combine_grouped(&sources, &groups, &passwords) {
             Ok(bytes) => {
                 self.close_combine_tab();
-                let message = crate::i18n::fmt(tl!("Combined {n} files"), &[("n", &count.to_string())]);
-                self.open_created("Combined.pdf", bytes, &message)
+                let message = crate::i18n::fmt_logical(&tl_logical!("Combined {n} files"), &[("n", &count.to_string())]);
+                self.open_created("Combined.pdf", bytes, message)
             }
             // The list stays, so the user can fix it.
             Err(e) => self.notify_fmt("Couldn't combine files: {e}", &[("e", &e.to_string())]),

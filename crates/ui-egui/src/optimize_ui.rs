@@ -13,7 +13,7 @@ use pdfcraft_engine::optimizer::{OptimizeStage, Optimized};
 use pdfcraft_engine::{DocId, EditError, Hidden, OptimizeReport};
 
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, widgets};
+use crate::{PdfCraftApp, rtl, widgets};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptimizeTab {
@@ -156,7 +156,7 @@ fn discard_box(ui: &mut egui::Ui, list: &mut Vec<Hidden>, h: Hidden, label: &str
 
 /// Draw the dialog; returns (ok, cancel).
 pub(crate) fn body(ui: &mut egui::Ui, d: &mut OptimizeDraft, t: &Tokens) -> (bool, bool) {
-    ui.label(egui::RichText::new(tl!("PDF Optimizer")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("PDF Optimizer"));
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label(tl!("Settings"));
@@ -174,7 +174,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut OptimizeDraft, t: &Tokens) -> (boo
         });
     });
     ui.add_space(6.0);
-    ui.horizontal_wrapped(|ui| {
+    rtl::horizontal_wrapped(ui, |ui| {
         for (tab, label) in [
             (OptimizeTab::Images, tl!("Images")),
             (OptimizeTab::DiscardObjects, tl!("Discard Objects")),
@@ -194,10 +194,10 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut OptimizeDraft, t: &Tokens) -> (boo
             ui.add(widgets::checkbox(&mut s.merge_fragments, tl!("Merge image fragments")));
             image_row(ui, "color", "Color Images", &mut s.color);
             image_row(ui, "gray", "Grayscale Images", &mut s.gray);
-            ui.label(
-                egui::RichText::new(tl!("Each image is measured where pages draw it; an image is replaced only if the result is smaller."))
-                    .small()
-                    .color(t.text_muted),
+            widgets::small_text(
+                ui,
+                &tl_logical!("Each image is measured where pages draw it; an image is replaced only if the result is smaller."),
+                t.text_muted,
             );
         }
         OptimizeTab::DiscardObjects => {
@@ -247,7 +247,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut OptimizeDraft, t: &Tokens) -> (boo
 /// optimizing would save).
 pub(crate) fn audit_body(ui: &mut egui::Ui, rows: &[pdfcraft_engine::optimize::SpaceUse], t: &Tokens) -> bool {
     use egui::{RichText, TextWrapMode, WidgetText};
-    ui.label(RichText::new(tl!("Space Audit")).font(crate::theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Space Audit"));
     ui.add_space(4.0);
     ui.label(RichText::new(tl!("What takes up the space in this file, by kind of content.")).color(t.text_muted));
     ui.add_space(8.0);
@@ -281,9 +281,15 @@ pub(crate) fn audit_body(ui: &mut egui::Ui, rows: &[pdfcraft_engine::optimize::S
     let height = table.iter().flatten().map(|g| g.size().y).fold(ui.spacing().interact_size.y, f32::max);
     egui::Grid::new("space-audit").num_columns(3).striped(true).spacing([gap, 4.0]).show(ui, |ui| {
         for row in table {
-            for (column, (cell, width)) in row.into_iter().zip(widths).enumerate() {
+            // The description is the first column and sits at the start edge; mirrored, the
+            // columns run right to left, with the description at the right.
+            let mut cells: Vec<_> = row.into_iter().zip(widths).enumerate().collect();
+            if rtl::mirrored() {
+                cells.reverse();
+            }
+            for (column, (cell, width)) in cells {
                 // Numbers line up on their last digit.
-                let layout = if column == 0 { Layout::left_to_right(Align::Center) } else { Layout::right_to_left(Align::Center) };
+                let layout = if column == 0 { rtl::start_layout(Align::Center) } else { Layout::right_to_left(Align::Center) };
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
                 ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout)).label(cell);
             }
