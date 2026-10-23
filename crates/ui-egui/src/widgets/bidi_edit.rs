@@ -48,7 +48,7 @@
 //! making one (the job, laying it out with one glyph per character, placing the rows): a text box lays
 //! its rows out by its alignment ([`LayoutCtx::layout_aligned`]), an editor of styled text builds its own
 //! sections. The hook runs for a plain `TextEdit` too (the map is then the identity), so one hook serves
-//! text of either kind. [`BidiEdit::wrap_at`], [`BidiEdit::measure`] and [`BidiEdit::forced_rtl`] say
+//! text of either kind. [`BidiEdit::wrap_at`], [`BidiEdit::measure_in`] and [`BidiEdit::forced_rtl`] say
 //! where lines break, how they are measured and which way paragraphs read when the owner knows better,
 //! and [`BidiEdit::show_mapped`] hands back the map with [`BidiOutput::logical_range`].
 //!
@@ -1126,19 +1126,13 @@ impl<'t> BidiEdit<'t> {
         self
     }
 
-    /// Measure the lines of a multi-line text with `measure` (the width of a line, in logical
-    /// order) instead of the field's font, for an owner whose text is set in other fonts. The
-    /// answer must depend on the line alone (and what the owner keeps fixed): the field keeps the
-    /// wrapping it made of a text for as long as the text and the width stay the same.
-    pub fn measure(mut self, measure: impl Fn(&egui::Context, &str) -> f32 + 'static) -> Self {
-        self.s.measure = Some(Rc::new(move |ctx: &egui::Context, candidate: bidi::Candidate<'_>| measure(ctx, candidate.line)));
-        self
-    }
-
-    /// [`Self::measure`] for an owner that measures a line knowing the paragraph it is in ([`bidi::Candidate`]):
-    /// a page that sets an Arabic paragraph word by word measures the Latin line it begins with so too. The
-    /// unit is the owner's, the same as of [`Self::wrap_at`]'s width (which is compared with the answer to the
-    /// digit, not rounded to whole pixels).
+    /// Measure the lines of a multi-line text with `measure` (the width of a line, in logical order) instead of the
+    /// field's font, for an owner whose text is set in other fonts. It is given the line with the paragraph it is in
+    /// and the whole text ([`bidi::Candidate`]): a page that sets an Arabic paragraph word by word measures the Latin
+    /// line it begins with so too, and a text of several looks measures each character in its own. The unit is the
+    /// owner's, the same as of [`Self::wrap_at`]'s width (which is compared with the answer to the digit, not rounded to
+    /// whole pixels). The answer must depend on the line, its place in the text and what the owner keeps fixed: the
+    /// field keeps the wrapping it made of a text for as long as the text and the width stay the same.
     pub fn measure_in(mut self, measure: impl Fn(&egui::Context, bidi::Candidate<'_>) -> f32 + 'static) -> Self {
         self.s.measure = Some(Rc::new(measure));
         self
@@ -1161,7 +1155,7 @@ impl<'t> BidiEdit<'t> {
         self
     }
 
-    /// Say what the owner's wrapping ([`Self::measure`], [`Self::row_words`]) depends on besides the text and the width: the
+    /// Say what the owner's wrapping ([`Self::measure_in`], [`Self::row_words`]) depends on besides the text and the width: the
     /// field keeps the wrapping it made of a text until the key changes, and then keeps the caret and the selection at the
     /// same places of the text.
     pub fn wrap_key(mut self, key: impl std::hash::Hash) -> Self {
@@ -1173,7 +1167,7 @@ impl<'t> BidiEdit<'t> {
     }
 
     /// Wrap a multi-line text without right-to-left script itself too (`true`), at [`Self::wrap_at`]'s width
-    /// and by [`Self::measure`]'s widths, instead of leaving it to egui, which breaks lines by the field's own
+    /// and by [`Self::measure_in`]'s widths, instead of leaving it to egui, which breaks lines by the field's own
     /// font at the width it has. The field then shows the lines the text will be written in, the way it does
     /// for right-to-left script: a text box saved in another font than the one it is typed in.
     pub fn wrap_ltr(mut self, wrap: bool) -> Self {
@@ -4312,7 +4306,7 @@ mod tests {
         assert!((left + width - 150.0).abs() <= 1.0, "{left} {width}");
         // A measure of the owner's: ten units to a character, 55 to a line, so five characters (spaces
         // are measured with the line, as `wrapped_screen_map` asks for lines without their trailing spaces).
-        let measured = rig.frame(vec![], &|edit| edit.wrap_at(55.0).measure(|_, line| line.chars().count() as f32 * 10.0));
+        let measured = rig.frame(vec![], &|edit| edit.wrap_at(55.0).measure_in(|_, c| c.line.chars().count() as f32 * 10.0));
         let map = &measured.map;
         for row in map.shaper.split('\n') {
             // The spaces after the last word of a line belong to it but are not measured.

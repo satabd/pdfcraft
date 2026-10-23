@@ -247,6 +247,9 @@ pub struct Candidate<'a> {
     pub offset: usize,
     /// Where the line begins in the paragraph, in bytes.
     pub start: usize,
+    /// The whole text being wrapped (the paragraph is `text[offset..]` up to its separator), for an owner whose
+    /// measure depends on where in the text a line is.
+    pub text: &'a str,
 }
 
 /// [`wrapped_screen_map`] for a text whose owner has rules of its own for the lines (see [`WrapRules`]) and
@@ -301,7 +304,7 @@ pub fn wrapped_screen_map_with(
             let base = paragraph.as_ptr() as usize;
             break_rows(text, content.clone(), rules, &mut |line: &str| {
                 let start = (line.as_ptr() as usize).checked_sub(base).filter(|start| *start <= paragraph.len()).unwrap_or(0);
-                fits(Candidate { line, paragraph, offset: content.start, start })
+                fits(Candidate { line, paragraph, offset: content.start, start, text })
             })
         };
         for (k, row) in rows.into_iter().enumerate() {

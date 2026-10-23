@@ -104,7 +104,9 @@ outlines there) from Type 3 fonts of its own (`PCEdAr…B`, a `FontName` ending 
 ToUnicode maps are what a regular run's would be. A build whose Arabic face has no `wght` axis draws
 bold Arabic regular, as before. The Edit text box draws bold Arabic at the same instance (its bold
 font is the interface's semibold faces with the Arabic face at `wght` 700, `theme::EDITOR_BOLD`),
-so a bold Arabic word is as wide in the box as on the page. Still different: italic Arabic is
+so a bold Arabic word is as wide in the box as on the page. Where the rewrite refuses a draft the box
+cannot ask it for the page's rows, and breaks the lines by a measure of its own that sets each character in
+the font and size of its own source row (the looks the box draws by), not in the first row's. Still different: italic Arabic is
 drawn upright; a line that keeps one span (above) reads back as one run in the look of its
 leftmost run, so editing it again starts from one look for that line; a look whose spans read
 alike (the same generated font, size and colour, only the Latin font differing) reads back as the

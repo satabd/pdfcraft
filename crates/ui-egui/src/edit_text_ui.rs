@@ -1252,6 +1252,11 @@ fn line_look(ed: &LineEditor, line: &pdfcraft_engine::TextLine) -> pdfcraft_engi
     look
 }
 
+/// The interface font a source line of `look` is drawn in at `scale` screen points to the page's point.
+fn look_font(look: &pdfcraft_engine::AddedText, scale: f32) -> FontId {
+    editor_font(look, (look.size as f32 * scale).clamp(1.0, 300.0))
+}
+
 /// The two ways a source line is drawn in the editor: for ordinary text, and for the letters of a script
 /// that joins (Arabic), which the page writes in a face of its own, with no letter spacing.
 struct LineFormats {
@@ -1272,7 +1277,7 @@ fn line_formats(
     page_face: Option<&String>,
 ) -> LineFormats {
     let look = line_look(ed, line);
-    let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
+    let mut font = look_font(&look, scale);
     // Joined letters are drawn by the interface's Arabic face (the one the page's shaper uses): a source
     // subset may carry the letters' codes without the shaping that joins them. Where Apply shapes the draft in the page's own
     // face (it is a complete face with the letters), they are drawn in that face: the rows are then as wide as the page's.
@@ -1315,11 +1320,22 @@ fn line_formats(
 /// text engine shapes as a whole: the stretch takes the look of its first letter.
 fn shaper_styles(spans: &[(std::ops::Range<usize>, usize)], text: &str, map: &ScreenMap) -> Vec<usize> {
     let fallback = spans.first().map_or(0, |(_, line)| *line);
-    let mut stored: Vec<usize> = Vec::with_capacity(map.logical_len());
+    shaper_styles_of(&stored_styles(spans, text, map.logical_len()), fallback, map)
+}
+
+/// The source line of each character of the stored `text`, from its `spans`.
+fn stored_styles(spans: &[(std::ops::Range<usize>, usize)], text: &str, capacity: usize) -> Vec<usize> {
+    let mut stored: Vec<usize> = Vec::with_capacity(capacity);
     for (range, line) in spans {
         let count = text.get(range.clone()).map_or(0, |piece| piece.chars().count());
         stored.extend(std::iter::repeat_n(*line, count));
     }
+    stored
+}
+
+/// [`shaper_styles`] for the source line `stored` of each stored character (see [`stored_styles`]); `fallback` is the
+/// look of a character `stored` has no entry for.
+fn shaper_styles_of(stored: &[usize], fallback: usize, map: &ScreenMap) -> Vec<usize> {
     let mut styles: Vec<Option<usize>> = map
         .shaper_source()
         .into_iter()
@@ -1600,19 +1616,106 @@ fn natural_width(ctx: &egui::Context, ed: &LineEditor, scale: f32) -> f32 {
     ctx.fonts_mut(|f| f.layout_job(job)).size().x
 }
 
-/// How the page will wrap a line of the draft: the width of a line in the first source row's font and size,
-/// which is how the page writes a block that reads right to left (in the first row's look).
-fn line_measure(ed: &LineEditor, scale: f32) -> Option<impl Fn(&egui::Context, &str) -> f32 + 'static> {
+/// How the page will wrap a line of the draft when the engine has refused it (the fallback; see [`text_field`]): the
+/// width of the line as the editor would draw it, each character in the font and size of its own source row.
+///
+/// The looks are the editor's (see [`shaper_styles_of`]): a character has the look of the stored character it was
+/// drawn from, and a stretch of right-to-left script the look of its first letter. The line is measured in logical
+/// order, in the interface font of each look (bold at the Arabic face's bold instance, see [`editor_font`]) and
+/// without the letter spacing or page face of [`line_formats`], so a paragraph of one look is as wide as it always
+/// was: the width of its text in the first row's font and size.
+fn line_measure(ed: &LineEditor, scale: f32) -> Option<impl Fn(&egui::Context, bidi::Candidate<'_>) -> f32 + 'static> {
     let (block, lines) = ed.source.as_ref()?;
-    let first = block.lines.first().and_then(|i| lines.get(*i))?;
-    let look = line_look(ed, first);
-    let font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
-    Some(move |ctx: &egui::Context, line: &str| {
+    let first = block.lines.first().copied().filter(|i| lines.get(*i).is_some())?;
+    let measure = FallbackMeasure {
+        block: block.clone(),
+        fonts: lines.iter().map(|line| look_font(&line_look(ed, line), scale)).collect(),
+        other: editor_font(&ed.look, ed.size),
+        first,
+        stored: std::cell::RefCell::new(None),
+    };
+    Some(move |ctx: &egui::Context, candidate: bidi::Candidate<'_>| measure.width(ctx, candidate))
+}
+
+/// What [`line_measure`] measures with.
+struct FallbackMeasure {
+    block: pdfcraft_engine::TextBlock,
+    /// The font of each source line.
+    fonts: Vec<FontId>,
+    /// The font of a character whose source line is not known (the editor's own).
+    other: FontId,
+    /// The source line of a character the draft has no entry for: the first row's.
+    first: usize,
+    /// The draft last measured in, with the source line of each of its characters.
+    stored: std::cell::RefCell<Option<(String, Arc<Vec<usize>>)>>,
+}
+
+impl FallbackMeasure {
+    /// The source line of each character of `text`, kept while the draft is the same one (finding it aligns the
+    /// whole draft with the paragraph, which is too much work to do for every line the wrapping asks about).
+    fn stored(&self, text: &str) -> Arc<Vec<usize>> {
+        let compute = || Arc::new(stored_styles(&self.block.edited_spans(text), text, text.len()));
+        let Ok(mut slot) = self.stored.try_borrow_mut() else { return compute() };
+        match slot.as_ref() {
+            Some((seen, styles)) if seen == text => styles.clone(),
+            _ => {
+                let styles = compute();
+                *slot = Some((text.to_owned(), styles.clone()));
+                styles
+            }
+        }
+    }
+
+    /// The source line of each character of `candidate.line`, in logical order.
+    fn looks(&self, candidate: &bidi::Candidate<'_>) -> Vec<usize> {
+        let count = candidate.line.chars().count();
+        let stored = self.stored(candidate.text);
+        let fallback = stored.first().copied().unwrap_or(self.first);
+        // The characters of the draft before the line, and the line's own.
+        let from = candidate.offset.checked_add(candidate.start).and_then(|at| candidate.text.get(..at)).map_or(0, |before| before.chars().count());
+        let mut looks: Vec<usize> =
+            from.checked_add(count).and_then(|end| stored.get(from..end)).map_or_else(|| vec![fallback; count], <[usize]>::to_vec);
+        if bidi::has_rtl(candidate.line) {
+            // The shaper text has the characters in another order, and a stretch of right-to-left script takes the
+            // look of its first letter: the looks of the shaper text, each put back at the character it came from.
+            let map =
+                bidi::wrapped_screen_map(candidate.line, crate::rtl::mirrored(), Some(pdfcraft_engine::rtl_base(candidate.paragraph)), |_| true);
+            let in_shaper_order = shaper_styles_of(&looks, fallback, &map);
+            for (at, style) in map.shaper_source().into_iter().zip(in_shaper_order) {
+                if let Some(slot) = looks.get_mut(at) {
+                    *slot = style;
+                }
+            }
+        }
+        looks
+    }
+
+    /// The width of `candidate.line`: its characters laid out in one row, each in the font of its look.
+    fn width(&self, ctx: &egui::Context, candidate: bidi::Candidate<'_>) -> f32 {
+        let looks = self.looks(&candidate);
+        let mut job = egui::text::LayoutJob::default();
+        let mut run = String::new();
+        let mut look = None;
+        let mut flush = |run: &mut String, look: Option<usize>| {
+            if let Some(index) = look.filter(|_| !run.is_empty()) {
+                let font_id = self.fonts.get(index).unwrap_or(&self.other).clone();
+                job.append(run, 0.0, egui::TextFormat { font_id, color: Color32::WHITE, ..Default::default() });
+            }
+            run.clear();
+        };
+        for (c, index) in candidate.line.chars().zip(looks.iter().copied().chain(std::iter::repeat(self.first))) {
+            if look != Some(index) {
+                flush(&mut run, look);
+                look = Some(index);
+            }
+            run.push(c);
+        }
+        flush(&mut run, look);
         ctx.fonts_mut(|f| {
-            let galley = f.layout_no_wrap(line.to_owned(), font.clone(), Color32::WHITE);
+            let galley = f.layout_job(job);
             galley.rows.first().map_or(0.0, |row| row.glyphs.iter().map(|g| g.pos.x + g.advance_width).fold(0.0, f32::max))
         })
-    })
+    }
 }
 
 /// The selection `chars`, a range of the draft's characters (what `BidiOutput::logical_range`
@@ -1635,7 +1738,7 @@ fn editor_wrap(ed: &LineEditor, text: &str, width: f32) -> f32 {
 fn text_field<'t>(text: &'t mut String, ed: LineEditor, scale: f32, width: f32, wrap: f32, font: FontId, color: Color32) -> widgets::BidiEdit<'t> {
     // The direction the page writes the block in: the one most of its letters read in.
     let rtl = pdfcraft_engine::rtl_base(text);
-    // Lines break where the page will break them (`wrap`), measured in the font it writes a block in.
+    // Lines break where the page will break them (`wrap`), measured in the font of each character's own look.
     let measure = line_measure(&ed, scale);
     // Once the paragraph has changed, the rows the page will lay it out in are asked of the engine (the rewrite Apply
     // runs), for text of either direction: that is where the page breaks it, in whatever fonts it is set in.
@@ -1661,7 +1764,7 @@ fn text_field<'t>(text: &'t mut String, ed: LineEditor, scale: f32, width: f32, 
         .wrap_key(key)
         .layout(move |ui, map, ctx| editor_galley(ui, &ed, ctx, map, scale));
     let field = match measure {
-        Some(measure) => field.measure(measure),
+        Some(measure) => field.measure_in(measure),
         None => field,
     };
     match rows {
@@ -1854,7 +1957,16 @@ mod tests {
 
     /// "Hi there everyone" in red over "Yo there everyone" in blue, in Helvetica 12 pt: one paragraph of two rows.
     fn two_style_pdf() -> Vec<u8> {
-        let body = "BT /F1 12 Tf 1 0 0 rg 20 150 Td (Hi there everyone) Tj ET\nBT /F1 12 Tf 0 0 1 rg 20 135 Td (Yo there everyone) Tj ET";
+        pdf_of("BT /F1 12 Tf 1 0 0 rg 20 150 Td (Hi there everyone) Tj ET\nBT /F1 12 Tf 0 0 1 rg 20 135 Td (Yo there everyone) Tj ET")
+    }
+
+    /// "Hi there everyone" at 12 pt over "Yo there everyone" at 18 pt, in Helvetica: one paragraph of two rows of two sizes.
+    fn two_size_pdf() -> Vec<u8> {
+        pdf_of("BT /F1 12 Tf 20 170 Td (Hi there everyone) Tj ET\nBT /F1 18 Tf 20 150 Td (Yo there everyone) Tj ET")
+    }
+
+    /// A one-page PDF whose content stream is `body`, with Helvetica as `/F1`.
+    fn pdf_of(body: &str) -> Vec<u8> {
         let objs = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
             "<< /Type /Pages /Kids [4 0 R] /Count 1 /MediaBox [0 0 200 300] >>".to_owned(),
@@ -1880,8 +1992,13 @@ mod tests {
     /// An editor on the two-row paragraph of [`two_style_pdf`], holding `draft`, at 3 screen points to the
     /// page's point; `pristine`: the draft is also what the paragraph was.
     fn styled_editor(draft: &str, pristine: bool) -> (crate::PdfCraftApp, LineEditor) {
+        editor_on(two_style_pdf(), draft, pristine)
+    }
+
+    /// [`styled_editor`] on the PDF `pdf`, a paragraph of the two rows of [`ORIGINAL`].
+    fn editor_on(pdf: Vec<u8>, draft: &str, pristine: bool) -> (crate::PdfCraftApp, LineEditor) {
         let mut app = crate::PdfCraftApp::new();
-        app.open_bytes("styled.pdf", None, two_style_pdf()).unwrap();
+        app.open_bytes("styled.pdf", None, pdf).unwrap();
         let doc = app.session.get(app.views[0].id).unwrap();
         let block = doc.text_blocks(0).remove(0);
         let lines = doc.text_lines(0);
@@ -2352,6 +2469,99 @@ mod tests {
         let phrase = format!("{SALAM} {BIL_ALAM} \u{627}\u{644}\u{633}\u{644}\u{627}\u{645} {ALAYKUM}");
         let (_, out, map) = bold_rig(&phrase, true).expect("the Arabic face");
         assert_eq!(drawn(&out.galley), map.drawn.iter().copied().filter(|c| *c != '\n').collect::<Vec<_>>(), "a glyph for every drawn character");
+    }
+
+    /// The widest extent of the glyphs of `line` laid out in `font`, as the wrapping measures a line.
+    fn width_in(ctx: &egui::Context, font: FontId, line: &str) -> f32 {
+        ctx.fonts_mut(|f| {
+            let galley = f.layout_no_wrap(line.to_owned(), font, Color32::WHITE);
+            galley.rows.first().map_or(0.0, |row| row.glyphs.iter().map(|g| g.pos.x + g.advance_width).fold(0.0, f32::max))
+        })
+    }
+
+    /// What the fallback measure gave before it followed each character's look, spelled out: `line` in the first source row's font and size.
+    fn first_look_width(ctx: &egui::Context, ed: &LineEditor, line: &str) -> f32 {
+        let (block, lines) = ed.source.as_ref().expect("a source");
+        let look = line_look(ed, &lines[block.lines[0]]);
+        width_in(ctx, editor_font(&look, (look.size as f32 * SCALE).clamp(1.0, 300.0)), line)
+    }
+
+    /// The fallback measure's width of the part `range` of `ed`'s draft, a single paragraph.
+    fn fallback_width(ctx: &egui::Context, ed: &LineEditor, range: std::ops::Range<usize>) -> f32 {
+        let measure = line_measure(ed, SCALE).expect("the editor has a source");
+        let text = ed.text.as_str();
+        measure(ctx, bidi::Candidate { line: &text[range.clone()], paragraph: text, offset: 0, start: range.start, text })
+    }
+
+    /// A rig on `ed` with the interface fonts, the Arabic face too where this build has one.
+    fn rig_with_fonts(ed: LineEditor) -> Rig {
+        Rig::new(bidi::arabic_test_fonts().unwrap_or_else(crate::theme::font_definitions), 1.0, ed)
+    }
+
+    /// A paragraph of two looks (12 pt and 18 pt rows) measured by the fallback is as wide as its pieces, each in its own look, and
+    /// wider than the first look alone would give.
+    #[test]
+    fn the_fallback_measure_follows_each_characters_look() {
+        let draft = "Hi there everyone Yo there everyone";
+        let (_app, ed) = editor_on(two_size_pdf(), draft, false);
+        let (block, lines) = ed.source.as_ref().expect("a source");
+        assert_eq!((lines[block.lines[0]].size, lines[block.lines[1]].size), (12.0, 18.0), "the fixture has two sizes");
+        let spans = block.edited_spans(draft);
+        assert_eq!(spans.iter().map(|(_, line)| *line).collect::<std::collections::BTreeSet<_>>().len(), 2, "the draft has both looks: {spans:?}");
+        let rig = rig_with_fonts(ed.clone());
+        let pieces: f32 =
+            spans.iter().map(|(range, index)| width_in(&rig.ctx, look_font(&line_look(&ed, &lines[*index]), SCALE), &draft[range.clone()])).sum();
+        let whole = fallback_width(&rig.ctx, &ed, 0..draft.len());
+        let first_only = first_look_width(&rig.ctx, &ed, draft);
+        assert!((whole - pieces).abs() <= 0.5, "the pieces measured one by one: {pieces}, the line {whole}");
+        assert!(whole > first_only * 1.2, "the 18 pt part is wider than the first look gives: {whole} against {first_only}");
+        // A line that begins in the second look is in that look entirely, wherever the draft's text it belongs to begins.
+        let start = draft.find("Yo").expect("the second row's words");
+        let tail = fallback_width(&rig.ctx, &ed, start..draft.len());
+        let big = width_in(&rig.ctx, look_font(&line_look(&ed, &lines[block.lines[1]]), SCALE), &draft[start..]);
+        assert!((tail - big).abs() <= 0.01, "the second row's words are 18 pt: {tail} against {big}");
+    }
+
+    /// Where every character has the first row's look the fallback measure is what it always was, for Latin and Arabic, and a changed
+    /// look (the Format panel's size) is every row's.
+    #[test]
+    fn the_fallback_measure_of_one_look_is_unchanged() {
+        let arabic = format!("{SALAM} {ALAYKUM}");
+        for draft in ["Good day to all of you", "Ok", "", "Ok well \u{e9}\u{4e2d}", arabic.as_str(), &format!("Ok {arabic} Bo")] {
+            let (_app, ed) = styled_editor(draft, false);
+            let rig = rig_with_fonts(ed.clone());
+            let (block, lines) = ed.source.as_ref().expect("a source");
+            // Both rows are 12 pt; the draft is one new text, which inherits the first row's look throughout.
+            assert!(block.edited_spans(draft).iter().all(|(_, line)| *line == block.lines[0]), "one look: {draft:?}");
+            assert_eq!(lines[block.lines[0]].size, lines[block.lines[1]].size);
+            assert_eq!(fallback_width(&rig.ctx, &ed, 0..draft.len()), first_look_width(&rig.ctx, &ed, draft), "{draft:?}");
+        }
+        let draft = "Hi there everyone Yo there everyone";
+        let (_app, mut ed) = editor_on(two_size_pdf(), draft, false);
+        ed.look.size = 20.0;
+        let rig = rig_with_fonts(ed.clone());
+        assert_eq!(
+            fallback_width(&rig.ctx, &ed, 0..draft.len()),
+            first_look_width(&rig.ctx, &ed, draft),
+            "a size chosen in the panel is every row's"
+        );
+    }
+
+    /// A bold Arabic look is measured at the face's bold instance: wider than the regular one.
+    #[test]
+    fn the_fallback_measure_of_bold_arabic_is_wider_than_regular() {
+        if !pdfcraft_fonts::arabic_bold_available() {
+            eprintln!("skipping: this build's Arabic face has no bold instance (build with CRAFT_FONTS_DIR)");
+            return;
+        }
+        let width = |bold: bool| -> Option<f32> {
+            let (_app, mut ed) = styled_editor(BIL_ALAM, false);
+            ed.look.bold = bold;
+            let rig = Rig::arabic(ed.clone())?;
+            Some(fallback_width(&rig.ctx, &ed, 0..BIL_ALAM.len()))
+        };
+        let (Some(regular), Some(bold)) = (width(false), width(true)) else { return };
+        assert!(bold > regular * 1.05, "bold {bold} against regular {regular}");
     }
 
     #[test]
