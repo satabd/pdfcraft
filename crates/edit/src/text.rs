@@ -2423,6 +2423,21 @@ pub(crate) fn rewrite_block_with_limit(
     rewrite_block_from(doc, page, lines, block, text, style, max_glyphs)
 }
 
+/// The steps down from each row of a paragraph to the next, in text space, for at most `limit` steps: `across` is each row's
+/// baseline across the text's direction in user space, top to bottom (`None` where a row has none), `k` the text-to-user
+/// scale, and a step is scaled from the source's font size `old_size` to the `size` the rows are written at. The steps stop
+/// at the first that is not a positive number at most the largest page (14 400 pt) long: the rows after it are placed by
+/// the paragraph's pitch instead.
+pub(crate) fn row_steps(across: impl Iterator<Item = Option<f64>>, k: f64, size: f64, old_size: f64, limit: usize) -> Vec<f64> {
+    let across: Vec<Option<f64>> = across.take(limit.saturating_add(1)).collect();
+    across
+        .iter()
+        .zip(across.iter().skip(1))
+        .map(|(upper, lower)| upper.zip(*lower).map(|(upper, lower)| (upper - lower) / k * size / old_size))
+        .map_while(|step| step.filter(|step| step.is_finite() && *step > 0.0 && (*step * k).abs() <= 14_400.0))
+        .collect()
+}
+
 /// [`rewrite_block_with_limit`] with the page's [`text_lines`], read from `doc` as it is now.
 fn rewrite_block_from(
     doc: &mut Document,
@@ -2767,19 +2782,21 @@ fn rewrite_block_from(
         let shown = name.clone();
         (name, Box::new(move |s: &str| Some(vec![(shown.clone(), pdfcraft_fonts::win_ansi(s))])))
     };
-    // Line spacing in text space: the paragraph's own (scaled with the size), or 1.2 × the size.
+    // Where each row goes (as the styled rewrite places its rows): without a line spacing asked for, a row the source
+    // paragraph has sits on that source row's own baseline, its step from the row above scaled with the size (see
+    // `row_steps`), so uneven rows, or a larger first row with more leading, stay so; the rows after them are a `lead` apart.
+    // (A row's baseline is its first run's: a row may hold several runs.)
+    let source_steps = if style.line_spacing.is_some() {
+        Vec::new()
+    } else {
+        let across = b.rows.iter().map(|row| row.first().and_then(|i| lines.get(*i)).map(|line| line.frame_origin().1));
+        row_steps(across, k, size, old_size, wrapped.len().saturating_sub(1))
+    };
+    // Line spacing in text space past the source paragraph's rows: the one asked for (× the size), the step between its last
+    // two rows (scaled with the size), its own leading, or 1.2 × the size.
     let lead = match style.line_spacing {
         Some(m) => size * m.clamp(0.5, 5.0),
-        // From the first two rows (a row may hold several runs).
-        None if let Some((upper, lower)) = b
-            .rows
-            .first()
-            .zip(b.rows.get(1))
-            .and_then(|(upper, lower)| upper.first().zip(lower.first()))
-            .and_then(|(upper, lower)| lines.get(*upper).zip(lines.get(*lower))) =>
-        {
-            (upper.frame_origin().1 - lower.frame_origin().1) / k * size / old_size
-        }
+        None if let Some(step) = source_steps.last() => *step,
         None if o_state.leading > 0.0 => o_state.leading,
         None => size * 1.2,
     };
@@ -2828,6 +2845,8 @@ fn rewrite_block_from(
         None => type3.is_none(),
     };
     let mut x = 0.0;
+    // The baseline of the row being written, from the first's, in text space.
+    let mut y = 0.0;
     let mut tw_set = 0.0;
     let mut underlines: Vec<(f64, f64, f64)> = Vec::new(); // (x0, x1, y) in text space
     // Shaped Arabic: every line is laid out and every font made now, before the document is changed;
@@ -2869,8 +2888,14 @@ fn rewrite_block_from(
         };
         // A stretched line fills the width: from the left edge, or back from the right edge a right-to-left line is anchored at.
         let dx = if tw > 0.0 { (right_edge - width) / k } else { offset(line_w) };
+        // The step down from the row above (none for the first).
+        let step = match i.checked_sub(1) {
+            Some(above) => source_steps.get(above).copied().unwrap_or(lead),
+            None => 0.0,
+        };
+        y -= step;
         if i > 0 || dx != 0.0 {
-            block_ops.push(Op::new("Td", vec![n(dx - x), n(if i > 0 { -lead } else { 0.0 })]));
+            block_ops.push(Op::new("Td", vec![n(dx - x), n(-step)]));
         }
         x = dx;
         let stretch = if word_spacing_reaches_spaces && shaped_plan.is_none() { 0.0 } else { tw };
@@ -2919,7 +2944,7 @@ fn rewrite_block_from(
         }
         let tw = tw + stretch;
         let w = (line_w + tw * spaces as f64 * o_state.scale * k) / k;
-        underlines.push((dx, dx + w, -(i as f64) * lead - size * 0.12));
+        underlines.push((dx, dx + w, y - size * 0.12));
     }
     block_ops.push(Op::new("ET", vec![]));
     if style.underline == Some(true) {

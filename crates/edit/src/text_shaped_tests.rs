@@ -681,6 +681,195 @@ fn shaped_lines_are_read_in_typing_order_without_reordering() {
     assert_eq!(line(&reopen(&doc)).text, typed);
 }
 
+// ---- where the rows go ----
+
+/// A paragraph of `BAB` rows (مسم) at 12 pt from x = 300, one on each of `baselines`, top to bottom.
+fn rows_at(baselines: &[f64]) -> Document {
+    let mut content = String::from("BT /F1 12 Tf");
+    let mut at = 0.0;
+    for (i, baseline) in baselines.iter().enumerate() {
+        let (x, y) = if i == 0 { (300.0, *baseline) } else { (0.0, baseline - at) };
+        content.push_str(&format!(" {x} {y} Td (BAB) Tj"));
+        at = *baseline;
+    }
+    content.push_str(" ET");
+    arabic_ligature_page(&content, false)
+}
+
+/// The baseline of each row the page reads back, top to bottom (the runs on one baseline being one row).
+fn baselines(doc: &Document) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    for line in text::text_lines(&reopen(doc), 0).expect("lines") {
+        if out.last().is_none_or(|b| (b - line.origin_baseline()).abs() > 1.0) {
+            out.push(line.origin_baseline());
+        }
+    }
+    out
+}
+
+/// Each row's box as the page reads it back (the runs on one baseline being one row).
+fn row_boxes(doc: &Document) -> Vec<[f64; 4]> {
+    let mut out: Vec<(f64, [f64; 4])> = Vec::new();
+    for line in text::text_lines(&reopen(doc), 0).expect("lines") {
+        match out.last_mut() {
+            Some((baseline, r)) if (*baseline - line.origin_baseline()).abs() <= 1.0 => {
+                *r = [r[0].min(line.rect[0]), r[1].min(line.rect[1]), r[2].max(line.rect[2]), r[3].max(line.rect[3])];
+            }
+            _ => out.push((line.origin_baseline(), line.rect)),
+        }
+    }
+    out.into_iter().map(|(_, r)| r).collect()
+}
+
+/// The steps down from each of `heights` to the next.
+fn steps_of(heights: &[f64]) -> Vec<f64> {
+    heights.windows(2).map(|w| w[0] - w[1]).collect()
+}
+
+/// Whether the rows `text_edit_layout` reported are the rows the page reads back, a step apart as `want`'s baselines are.
+fn reported_where_written(row_rects: &[[f64; 4]], doc: &Document, want: &[f64]) -> bool {
+    let bottoms: Vec<f64> = row_rects.iter().map(|r| r[1]).collect();
+    let read = row_boxes(doc);
+    read.len() == row_rects.len()
+        && read.iter().zip(row_rects).all(|(a, b)| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.01))
+        && close(&steps_of(&bottoms), &steps_of(want))
+}
+
+fn close(got: &[f64], want: &[f64]) -> bool {
+    got.len() == want.len() && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.01)
+}
+
+/// A paragraph whose larger first gap (22 pt, then 16) is a heading's leading.
+const UNEVEN: [f64; 3] = [720.0, 698.0, 682.0];
+
+/// (Wide enough that no row wraps.)
+fn wide() -> BlockStyle {
+    BlockStyle { width: Some(200.0), ..Default::default() }
+}
+
+#[test]
+fn a_retyped_paragraph_of_uneven_rows_writes_each_row_on_its_source_rows_baseline() {
+    let _face = fake();
+    let mut doc = rows_at(&UNEVEN);
+    let blocks = text::text_blocks(&doc, 0).expect("blocks");
+    assert_eq!((blocks.len(), blocks[0].rows.len()), (1, 3), "one paragraph of three rows");
+    let typed = "مرحبا\nبالعالم\nسلام";
+    // What the editor is told: the rows where the rewrite writes them.
+    let layout = text::text_edit_layout(&doc, 0, 0, typed, &wide()).expect("layout");
+    text::rewrite_block(&mut doc, 0, 0, Some(typed), &wide()).expect("writes");
+    assert_eq!(actual_texts(&doc), typed.split('\n').collect::<Vec<_>>());
+    let written = baselines(&doc);
+    assert!(close(&written, &UNEVEN), "{written:?}");
+    assert_eq!(layout.rows, typed.split('\n').collect::<Vec<_>>());
+    assert!(reported_where_written(&layout.row_rects, &doc, &UNEVEN), "{:?} against {:?}", layout.row_rects, row_boxes(&doc));
+}
+
+#[test]
+fn a_row_added_past_the_source_rows_continues_at_the_last_two_rows_step() {
+    let _face = fake();
+    let mut doc = rows_at(&UNEVEN);
+    let typed = "مرحبا\nبالعالم\nسلام\nمرحبا";
+    let layout = text::text_edit_layout(&doc, 0, 0, typed, &wide()).expect("layout");
+    text::rewrite_block(&mut doc, 0, 0, Some(typed), &wide()).expect("writes");
+    // The fourth row is 16 pt under the third, as the third is under the second (not 22, the first step).
+    let want = [720.0, 698.0, 682.0, 666.0];
+    assert!(close(&baselines(&doc), &want), "{:?}", baselines(&doc));
+    assert!(reported_where_written(&layout.row_rects, &doc, &want), "{:?} against {:?}", layout.row_rects, row_boxes(&doc));
+    // Two more rows past them step on at 16 pt each.
+    let mut doc = rows_at(&UNEVEN);
+    text::rewrite_block(&mut doc, 0, 0, Some("مرحبا\nبالعالم\nسلام\nمرحبا\nسلام"), &wide()).expect("writes");
+    assert!(close(&baselines(&doc), &[720.0, 698.0, 682.0, 666.0, 650.0]), "{:?}", baselines(&doc));
+}
+
+#[test]
+fn a_row_removed_leaves_the_rows_kept_on_their_source_baselines() {
+    let _face = fake();
+    let source = [720.0, 698.0, 682.0, 670.0];
+    let mut doc = rows_at(&source);
+    assert_eq!(text::text_blocks(&doc, 0).expect("blocks")[0].rows.len(), 4);
+    let typed = "مرحبا\nبالعالم\nسلام";
+    let layout = text::text_edit_layout(&doc, 0, 0, typed, &wide()).expect("layout");
+    text::rewrite_block(&mut doc, 0, 0, Some(typed), &wide()).expect("writes");
+    assert!(close(&baselines(&doc), &source[..3]), "{:?}", baselines(&doc));
+    assert!(reported_where_written(&layout.row_rects, &doc, &source[..3]), "{:?} against {:?}", layout.row_rects, row_boxes(&doc));
+}
+
+#[test]
+fn a_line_spacing_asked_for_still_spaces_every_row_evenly() {
+    let _face = fake();
+    let mut doc = rows_at(&UNEVEN);
+    let style = BlockStyle { line_spacing: Some(2.0), ..wide() };
+    text::rewrite_block(&mut doc, 0, 0, Some("مرحبا\nبالعالم\nسلام"), &style).expect("writes");
+    assert!(close(&baselines(&doc), &[720.0, 696.0, 672.0]), "{:?}", baselines(&doc));
+}
+
+#[test]
+fn row_steps_stop_at_the_first_step_that_is_not_a_sane_number() {
+    let steps = |across: &[Option<f64>], limit| text::row_steps(across.iter().copied(), 1.0, 12.0, 12.0, limit);
+    assert_eq!(steps(&[Some(720.0), Some(698.0), Some(682.0)], 10), [22.0, 16.0]);
+    // As many steps as rows are written, less one.
+    assert_eq!(steps(&[Some(720.0), Some(698.0), Some(682.0)], 1), [22.0]);
+    assert!(steps(&[Some(720.0), Some(698.0)], 0).is_empty());
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e300, 698.0 - 14_400.5, 720.0, 730.0] {
+        assert_eq!(steps(&[Some(720.0), Some(698.0), Some(bad), Some(670.0)], 10), [22.0], "{bad}");
+    }
+    assert!(steps(&[Some(f64::NAN), Some(698.0)], 10).is_empty());
+    assert!(steps(&[Some(720.0), None, Some(682.0)], 10).is_empty());
+    // A zero or non-finite scale or size gives no steps rather than a non-number.
+    for (k, size, old) in [(0.0, 12.0, 12.0), (1.0, 12.0, 0.0), (f64::NAN, 12.0, 12.0), (1.0, f64::INFINITY, 12.0), (1.0, 0.0, 12.0)] {
+        assert!(text::row_steps([Some(720.0), Some(698.0)].into_iter(), k, size, old, 10).is_empty(), "{k} {size} {old}");
+    }
+    // A step is scaled with the size: 22 pt at 12 pt is 33 at 18.
+    assert_eq!(text::row_steps([Some(720.0), Some(698.0)].into_iter(), 1.0, 18.0, 12.0, 10), [33.0]);
+    // Bounded by the rows written, not by the source's.
+    let many = (0..1_000_000).map(|i| Some(-f64::from(i) * 12.0));
+    assert_eq!(text::row_steps(many, 1.0, 12.0, 12.0, 300).len(), 300);
+}
+
+#[test]
+fn a_paragraph_of_hundreds_of_rows_with_absurd_moves_retypes_bounded_and_never_panics() {
+    let _face = fake();
+    // 400 rows stepping 12 and 14 pt in turn, an absurd move after the 200th (a paragraph of its own then follows, at a
+    // baseline that rounds away every step), and a row in a zero-size font.
+    let mut content = String::from("BT /F1 12 Tf 300 790 Td");
+    for i in 0..400 {
+        let step = match i {
+            200 => -1e300,
+            _ if i % 2 == 0 => -12.0,
+            _ => -14.0,
+        };
+        content.push_str(&format!(" (BAB) Tj 0 {step} Td"));
+    }
+    content.push_str(" /F1 0 Tf (BAB) Tj ET");
+    let page = || arabic_ligature_page(&content, false);
+    let blocks = text::text_blocks(&page(), 0).expect("blocks");
+    let rows = blocks.first().map_or(0, |b| b.rows.len());
+    assert!(rows >= 100, "{rows} rows");
+    let started = std::time::Instant::now();
+    for count in [1, 2, rows / 2, rows, rows + 50] {
+        let typed = vec!["مرحبا"; count].join("\n");
+        for style in [wide(), BlockStyle { size: Some(30.0), ..wide() }, BlockStyle { line_spacing: Some(1.0), ..wide() }] {
+            let mut doc = page();
+            text::rewrite_block(&mut doc, 0, 0, Some(&typed), &style).expect("writes");
+            // Every move written is a number.
+            let moves: Vec<f64> = ops(&doc).iter().filter(|o| o.is("Td")).flat_map(|o| o.operands.iter().filter_map(Object::as_f64)).collect();
+            assert!(moves.iter().all(|v| v.is_finite()), "{count} {style:?}");
+            let written = baselines(&doc);
+            assert!(written.len() >= count.min(rows), "{count} {style:?}: {}", written.len());
+            if style == wide() {
+                // The rows the source has keep its steps: 12 and 14 pt in turn from 790.
+                let want: Vec<f64> = (0..count.min(rows)).map(|i| 790.0 - (i / 2) as f64 * 26.0 - (i % 2) as f64 * 12.0).collect();
+                assert!(close(written.get(..want.len()).unwrap_or_default(), &want), "{count}: {:?}", written.get(..4));
+            }
+        }
+        for block in 1..blocks.len().min(4) {
+            let mut doc = page();
+            let _ = text::rewrite_block(&mut doc, 0, block, Some(&typed), &wide());
+        }
+    }
+    assert!(started.elapsed().as_secs() < 120, "took {:?}", started.elapsed());
+}
+
 // ---- the real face ----
 
 fn real_face() -> bool {

@@ -110,8 +110,20 @@ the font and size of its own source row (the looks the box draws by), not in the
 drawn upright; a line that keeps one span (above) reads back as one run in the look of its
 leftmost run, so editing it again starts from one look for that line; a look whose spans read
 alike (the same generated font, size and colour, only the Latin font differing) reads back as the
-look of the first; the rows keep the paragraph's first line spacing; past 256 looks in one
-paragraph the rest take the first.
+look of the first; past 256 looks in one paragraph the rest take the first.
+
+Where the rows of a retyped paragraph go is one rule on every route (the single-style rewrite,
+shaped Arabic of one look or several, and the styled rewrite): unless a line spacing is asked for,
+each row the source paragraph has sits on that source row's own baseline (the first run's, for a
+row of several), so a paragraph whose rows were unevenly spaced, or whose larger first row has more
+leading, keeps them so; rows past the source's last continue at the step between its last two rows
+(under a paragraph of one row, at its own leading or 1.2 × the size on the single-style and shaped
+routes, 1.5 × the size on the styled one). The single-style and shaped routes scale each step with a
+new size (`text::row_steps`; the styled route goes to an even 1.5 × the size then), and stop
+following the source at the first step that is not a positive number at most 14 400 pt, placing
+the rows after it at the last step they kept. A line spacing asked for spaces every row evenly at
+that multiple of the size. `text_edit_layout` reports the rows (`TextEditLayout::row_rects`) where
+they are written.
 
 A justified paragraph stretches every row the wrap breaks to the paragraph's width by widening the
 spaces between its words, on every route. The last row of a paragraph, a row before a line break
