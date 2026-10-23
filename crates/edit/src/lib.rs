@@ -937,4 +937,6 @@ mod text_justify_tests;
 #[cfg(test)]
 mod text_layout_tests;
 #[cfg(test)]
+mod text_shaped_multilook_tests;
+#[cfg(test)]
 mod text_shaped_tests;

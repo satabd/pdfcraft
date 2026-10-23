@@ -13,7 +13,9 @@
 //!   the document is touched, the fonts added in chunks of [`GLYPHS_PER_FONT`] glyphs, and for
 //!   each line the content-stream operators of a `/Span <</ActualText …>> BDC … EMC` that holds
 //!   the line in typing order;
-//! - [`Measure`]: the width of a line as it will be drawn, for wrapping and alignment.
+//! - [`Measure`]: the width of a line as it will be drawn, for wrapping and alignment;
+//! - lines drawn in several looks (sizes, fill colours, Latin fonts): [`shaped_pieces_looked`], [`Measure::with_looks`],
+//!   [`plan_looked`] and [`ShapedPlan::looked_line_ops`], each piece and run in one look, the text state kept in a [`Pen`].
 //!
 //! Operators are returned as [`TextOp`] (an operator and its operands) because this crate sits
 //! below the content-stream crate; callers turn them into their own operator type.
@@ -252,24 +254,44 @@ pub fn script_error(script: ShapedScript, e: GlyphError, text: &str) -> ShapedTe
 /// for Arabic, Hebrew and Thai. `rtl` is the paragraph's direction. Widths are the caller's to
 /// measure, so each writer uses its own fonts for the Latin.
 pub fn shaped_pieces(line: &str, rtl: bool, shaper: &Shaper) -> Result<Vec<Piece>, ShapedTextError> {
+    Ok(shaped_pieces_looked(line, &[], rtl, shaper)?.into_iter().map(|(_, piece)| piece).collect())
+}
+
+/// [`shaped_pieces`] for a line drawn in several looks (sizes, colours, fonts): `looks` holds the look of each
+/// character of `line` (a character past its end has look 0), and a piece ends where the look changes, so each
+/// piece is drawn in one look, given with it. A look that changes inside a word of a script that joins cuts the
+/// word in two shaped runs; a caller keeps the looks of such a word one (Edit text does).
+pub fn shaped_pieces_looked(line: &str, looks: &[usize], rtl: bool, shaper: &Shaper) -> Result<Vec<(usize, Piece)>, ShapedTextError> {
     // unicode-bidi indexes the first level of a line, so an empty one would panic.
     if line.is_empty() {
         return Ok(Vec::new());
     }
+    // Where each character starts, with its look, to find a run's characters by their bytes (none: one look).
+    let starts: Vec<(usize, usize)> = if looks.is_empty() {
+        Vec::new()
+    } else {
+        line.char_indices().map(|(at, _)| at).zip(looks.iter().copied().chain(std::iter::repeat(0))).collect()
+    };
     let base = if rtl { Level::rtl() } else { Level::ltr() };
     let info = ParagraphBidiInfo::new(line, Some(base));
     let (levels, runs) = info.visual_runs(0..line.len());
     let mut pieces = Vec::new();
     for run in runs {
         let run_rtl = levels.get(run.start).is_some_and(Level::is_rtl);
+        let mut next = starts.partition_point(|(at, _)| *at < run.start);
         // Runs lie on character boundaries; a missing slice is skipped, never a panic.
         let Some(text) = line.get(run) else { continue };
         // Arabic and Hebrew letters take their face; so do spaces and punctuation between them
         // (Hebrew's when they follow Hebrew), which the shaper then mirrors. Latin text (and what
         // the faces lack) keeps the caller's font.
-        let mut segments: Vec<(Option<ShapedScript>, String)> = Vec::new();
-        for c in text.chars().filter(|c| !is_bidi_control(*c)) {
-            let after_hebrew = segments.last().is_some_and(|(kind, _)| *kind == Some(ShapedScript::Hebrew));
+        let mut segments: Vec<(Option<ShapedScript>, usize, String)> = Vec::new();
+        for c in text.chars() {
+            let look = starts.get(next).map_or(0, |(_, look)| *look);
+            next = next.saturating_add(1);
+            if is_bidi_control(c) {
+                continue;
+            }
+            let after_hebrew = segments.last().is_some_and(|(kind, _, _)| *kind == Some(ShapedScript::Hebrew));
             let script = if is_thai(c) {
                 Some(ShapedScript::Thai)
             } else if is_hebrew(c) || (run_rtl && after_hebrew && !c.is_alphanumeric() && (shaper.has)(ShapedScript::Hebrew, c)) {
@@ -280,22 +302,25 @@ pub fn shaped_pieces(line: &str, rtl: bool, shaper: &Shaper) -> Result<Vec<Piece
                 None
             };
             match segments.last_mut() {
-                Some((kind, s)) if *kind == script => s.push(c),
-                _ => segments.push((script, c.to_string())),
+                Some((kind, was, s)) if *kind == script && *was == look => s.push(c),
+                _ => segments.push((script, look, c.to_string())),
             }
         }
         if run_rtl {
             segments.reverse();
         }
-        for (script, s) in segments {
-            pieces.push(if let Some(script) = script {
-                let shaped = (shaper.shape)(script, &s, run_rtl).map_err(|e| script_error(script, e, &s))?;
-                Piece::Shaped(shaped)
-            } else if run_rtl {
-                Piece::Latin(s.chars().rev().map(mirrored).collect())
-            } else {
-                Piece::Latin(s)
-            });
+        for (script, look, s) in segments {
+            pieces.push((
+                look,
+                if let Some(script) = script {
+                    let shaped = (shaper.shape)(script, &s, run_rtl).map_err(|e| script_error(script, e, &s))?;
+                    Piece::Shaped(shaped)
+                } else if run_rtl {
+                    Piece::Latin(s.chars().rev().map(mirrored).collect())
+                } else {
+                    Piece::Latin(s)
+                },
+            ));
         }
     }
     Ok(pieces)
@@ -328,40 +353,81 @@ pub fn comb_cells(line: &str, rtl: bool, shaper: &Shaper) -> Result<Vec<Piece>, 
     Ok(cells)
 }
 
+/// The width of Latin text in the font that draws it (at the size it is drawn).
+pub type LatinWidth<'a> = &'a dyn Fn(&str) -> f64;
+
+/// The operators that show Latin text in a font, or why the font can't.
+pub type LatinOps<'a> = &'a dyn Fn(&str) -> Result<Vec<TextOp>, ShapedTextError>;
+
+/// A line measured, and its looks as runs of characters of one look (`(count, look)`; none for one look).
+type MeasureKey = (String, Vec<(usize, usize)>);
+
 /// Measures lines of shaped text, in text space before the horizontal scale.
 pub struct Measure<'a> {
     shaper: Shaper,
     rtl: bool,
-    size: f64,
-    /// The width of Latin text in the font that draws it.
-    latin: &'a dyn Fn(&str) -> f64,
-    cache: RefCell<HashMap<String, f64>>,
+    /// Each look's size, and the width of Latin text in the font that draws it (at that size).
+    looks: Vec<(f64, LatinWidth<'a>)>,
+    /// Widths by line and its looks.
+    cache: RefCell<HashMap<MeasureKey, f64>>,
 }
 
 impl<'a> Measure<'a> {
     /// Lines of a paragraph that runs `rtl` or not, at `size`; `latin` measures what the caller's
     /// own font draws (at the same size).
-    pub fn new(rtl: bool, size: f64, latin: &'a dyn Fn(&str) -> f64) -> Self {
-        Measure { shaper: current_shaper(), rtl, size, latin, cache: RefCell::new(HashMap::new()) }
+    pub fn new(rtl: bool, size: f64, latin: LatinWidth<'a>) -> Self {
+        Self::with_looks(rtl, vec![(size, latin)])
+    }
+
+    /// Lines drawn in several looks (see [`shaped_pieces_looked`]): look `i` is drawn at `looks[i].0`, its Latin text
+    /// measured by `looks[i].1` (at that size). A look past the end is measured as look 0, and with no look at all a
+    /// line measures nothing.
+    pub fn with_looks(rtl: bool, looks: Vec<(f64, LatinWidth<'a>)>) -> Self {
+        Measure { shaper: current_shaper(), rtl, looks, cache: RefCell::new(HashMap::new()) }
+    }
+
+    fn look(&self, look: usize) -> Option<&(f64, LatinWidth<'a>)> {
+        self.looks.get(look).or_else(|| self.looks.first())
     }
 
     /// The width of `line` laid out as it will be drawn. A line that can't be shaped is measured as
     /// Latin (drawing then reports why).
     pub fn line(&self, line: &str) -> f64 {
+        self.line_looked(line, &[])
+    }
+
+    /// [`Self::line`] for a line drawn in several looks: `looks` holds the look of each character (see
+    /// [`shaped_pieces_looked`]; empty for look 0 throughout).
+    pub fn line_looked(&self, line: &str, looks: &[usize]) -> f64 {
+        // The looks as runs, `(characters, look)`: the cache's key with the line.
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for look in looks {
+            match runs.last_mut() {
+                Some((count, was)) if was == look => *count = count.saturating_add(1),
+                _ => runs.push((1, *look)),
+            }
+        }
+        let key: MeasureKey = (line.to_owned(), runs);
         if let Ok(cache) = self.cache.try_borrow()
-            && let Some(w) = cache.get(line)
+            && let Some(w) = cache.get(&key)
         {
             return *w;
         }
-        let w = match shaped_pieces(line, self.rtl, &self.shaper) {
+        let latin = |look: usize, s: &str| self.look(look).map_or(0.0, |(_, latin)| latin(s));
+        let w = match shaped_pieces_looked(line, looks, self.rtl, &self.shaper) {
             Ok(pieces) => pieces
                 .iter()
-                .map(|p| match p {
-                    Piece::Latin(s) => (self.latin)(s),
-                    Piece::Shaped(clusters) => clusters.iter().map(width_em).sum::<f64>() * self.size,
+                .map(|(look, p)| match p {
+                    Piece::Latin(s) => latin(*look, s),
+                    Piece::Shaped(clusters) => clusters.iter().map(width_em).sum::<f64>() * self.look(*look).map_or(0.0, |(size, _)| *size),
                 })
                 .sum(),
-            Err(_) => (self.latin)(line),
+            Err(_) if key.1.is_empty() => latin(0, line),
+            // Each run of one look as Latin in its own font.
+            Err(_) => {
+                let mut chars = line.chars();
+                key.1.iter().map(|(count, look)| latin(*look, &chars.by_ref().take(*count).collect::<String>())).sum()
+            }
         };
         let w = if w.is_finite() { w } else { 0.0 };
         if let Ok(mut cache) = self.cache.try_borrow_mut() {
@@ -369,7 +435,7 @@ impl<'a> Measure<'a> {
             if cache.len() >= 50_000 {
                 cache.clear();
             }
-            cache.insert(line.to_owned(), w);
+            cache.insert(key, w);
         }
         w
     }
@@ -377,11 +443,31 @@ impl<'a> Measure<'a> {
     /// The width of a candidate line while wrapping: exact for ordinary lines, the sum of its words
     /// for very long ones.
     pub fn approx(&self, candidate: &str) -> f64 {
+        self.approx_looked(candidate, &[])
+    }
+
+    /// [`Self::approx`] for a candidate drawn in several looks (see [`Self::line_looked`]): each word and each space in its own.
+    pub fn approx_looked(&self, candidate: &str, looks: &[usize]) -> f64 {
         if candidate.len() <= EXACT_MEASURE {
-            return self.line(candidate);
+            return self.line_looked(candidate, looks);
         }
-        let words: f64 = candidate.split(' ').map(|w| self.line(w)).sum();
-        words + candidate.matches(' ').count() as f64 * self.line(" ")
+        // The character each word starts at.
+        let mut at = 0usize;
+        let words: f64 = candidate
+            .split(' ')
+            .map(|word| {
+                let count = word.chars().count();
+                let w = self.line_looked(word, looks.get(at..at.saturating_add(count)).unwrap_or_default());
+                at = at.saturating_add(count).saturating_add(1);
+                w
+            })
+            .sum();
+        let spaces: f64 = if looks.is_empty() {
+            candidate.matches(' ').count() as f64 * self.line(" ")
+        } else {
+            candidate.chars().zip(looks).filter(|(c, _)| *c == ' ').map(|(_, look)| self.line_looked(" ", std::slice::from_ref(look))).sum()
+        };
+        words + spaces
     }
 }
 
@@ -580,7 +666,7 @@ pub fn cluster_paths(out: &mut Vec<u8>, clusters: &[ShapedCluster], shaper: &Sha
 /// gives (or an error when the font can't show a piece).
 pub struct LatinShow<'a> {
     pub font: &'a str,
-    pub show: &'a dyn Fn(&str) -> Result<Vec<TextOp>, ShapedTextError>,
+    pub show: LatinOps<'a>,
 }
 
 /// What the generated fonts are called.
@@ -597,11 +683,19 @@ pub struct PlanFonts<'a> {
 }
 
 enum Run {
-    /// Operators that show Latin text in the Latin font, and the text they show.
-    Latin(Vec<TextOp>, String),
-    /// Codes of the generated font at this index of `names`, and for each code whether it draws a space between words
-    /// (a gap [`ShapedPlan::line_ops_stretched`] widens).
-    Shaped(usize, Vec<u8>, Vec<bool>),
+    /// Operators that show Latin text in the Latin font of a look, the look, and the text they show.
+    Latin(usize, Vec<TextOp>, String),
+    /// A look, codes of the generated font at this index of `names`, and for each code whether it draws a space between
+    /// words (a gap [`ShapedPlan::line_ops_stretched`] widens).
+    Shaped(usize, usize, Vec<u8>, Vec<bool>),
+}
+
+impl Run {
+    fn look(&self) -> usize {
+        match self {
+            Run::Latin(look, ..) | Run::Shaped(look, ..) => *look,
+        }
+    }
 }
 
 struct PlannedLine {
@@ -614,15 +708,49 @@ struct PlannedLine {
 pub struct ShapedPlan {
     /// The generated fonts' resource names.
     names: Vec<String>,
-    latin_font: String,
+    /// The resource name of the font each look shows its Latin text in.
+    latin_fonts: Vec<String>,
     lines: Vec<PlannedLine>,
     family: String,
 }
 
 enum Staged {
-    Latin(Vec<TextOp>, String),
-    /// Indexes into the distinct clusters, and whether each is a space.
-    Shaped(Vec<(usize, bool)>),
+    Latin(usize, Vec<TextOp>, String),
+    /// A look, and indexes into the distinct clusters with whether each is a space.
+    Shaped(usize, Vec<(usize, bool)>),
+}
+
+/// The look a run of a planned line is drawn in (see [`ShapedPlan::looked_line_ops`]): its font size and the
+/// operators that set its fill colour (none: the colour the text state has).
+#[derive(Clone, Copy, Debug)]
+pub struct RunLook<'a> {
+    pub size: f64,
+    pub fill: &'a [TextOp],
+}
+
+/// The text state while planned lines are drawn: the font and size the last `Tf` set, and the fill colour operators
+/// last given (those the text state was given before the lines, to start with).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pen {
+    pub font: String,
+    pub size: f64,
+    pub fill: Vec<TextOp>,
+}
+
+impl Pen {
+    /// Brings the text state to `font` in `look`: the look's fill where it differs from the one given last, and a `Tf`
+    /// where the font or the size does.
+    fn select(&mut self, ops: &mut Vec<TextOp>, font: &str, look: &RunLook) {
+        if self.fill.as_slice() != look.fill {
+            ops.extend(look.fill.iter().cloned());
+            self.fill = look.fill.to_vec();
+        }
+        if self.font != font || self.size.to_bits() != look.size.to_bits() {
+            ops.push(TextOp::new("Tf", vec![Object::name(font), number(look.size)]));
+            font.clone_into(&mut self.font);
+            self.size = look.size;
+        }
+    }
 }
 
 /// Why a paragraph with more than one script can't be drawn (Arabic is the only script drawn here
@@ -662,6 +790,25 @@ pub fn plan_directed(
     plan_pieces(doc, fonts_res, laid, fonts, latin)
 }
 
+/// [`plan`] for lines drawn in several looks: each line is its text in typing order with the look of each of its
+/// characters (see [`shaped_pieces_looked`]), and look `i` shows its Latin text with `latins[i]` (a look past the end
+/// with the first). Everything that can fail does so before `doc` is touched.
+pub fn plan_looked(
+    doc: &mut Document,
+    fonts_res: &mut Dict,
+    lines: &[(String, Vec<usize>)],
+    rtl: bool,
+    fonts: PlanFonts,
+    latins: &[LatinShow],
+) -> Result<ShapedPlan, ShapedTextError> {
+    let shaper = current_shaper();
+    let mut laid = Vec::with_capacity(lines.len());
+    for (line, looks) in lines {
+        laid.push((line.clone(), shaped_pieces_looked(line, looks, rtl, &shaper)?));
+    }
+    plan_looked_pieces(doc, fonts_res, laid, fonts, latins)
+}
+
 /// [`plan_directed`] for lines already laid out: each is its text in typing order and its pieces
 /// in drawing order (from [`shaped_pieces`], or one cell at a time from [`comb_cells`]). Pieces
 /// with a script other than Arabic are refused; everything that can fail does so before `doc` is
@@ -673,15 +820,31 @@ pub fn plan_pieces(
     fonts: PlanFonts,
     latin: &LatinShow,
 ) -> Result<ShapedPlan, ShapedTextError> {
+    let laid = laid.into_iter().map(|(line, pieces)| (line, pieces.into_iter().map(|piece| (0, piece)).collect())).collect();
+    plan_looked_pieces(doc, fonts_res, laid, fonts, std::slice::from_ref(latin))
+}
+
+/// [`plan_pieces`] with each piece in a look of its own (see [`plan_looked`]).
+fn plan_looked_pieces(
+    doc: &mut Document,
+    fonts_res: &mut Dict,
+    laid: Vec<(String, Vec<(usize, Piece)>)>,
+    fonts: PlanFonts,
+    latins: &[LatinShow],
+) -> Result<ShapedPlan, ShapedTextError> {
     let shaper = current_shaper();
     let mut keys: Vec<&ShapedCluster> = Vec::new();
     let mut index: HashMap<ClusterKey, usize> = HashMap::new();
     let mut staged: Vec<Vec<Staged>> = Vec::with_capacity(laid.len());
     for (_, pieces) in &laid {
         let mut row = Vec::with_capacity(pieces.len());
-        for piece in pieces {
+        for (look, piece) in pieces {
             match piece {
-                Piece::Latin(s) => row.push(Staged::Latin((latin.show)(s)?, s.clone())),
+                Piece::Latin(s) => {
+                    let latin =
+                        latins.get(*look).or_else(|| latins.first()).ok_or_else(|| ShapedTextError("no font to show Latin text in".into()))?;
+                    row.push(Staged::Latin(*look, (latin.show)(s)?, s.clone()));
+                }
                 Piece::Shaped(clusters) => {
                     let mut ks = Vec::with_capacity(clusters.len());
                     for c in clusters {
@@ -704,7 +867,7 @@ pub fn plan_pieces(
                         };
                         ks.push((k, c.text == " "));
                     }
-                    row.push(Staged::Shaped(ks));
+                    row.push(Staged::Shaped(*look, ks));
                 }
             }
         }
@@ -742,18 +905,18 @@ pub fn plan_pieces(
         let mut runs: Vec<Run> = Vec::new();
         for item in row {
             match item {
-                Staged::Latin(ops, text) => runs.push(Run::Latin(ops, text)),
-                Staged::Shaped(ks) => {
+                Staged::Latin(look, ops, text) => runs.push(Run::Latin(look, ops, text)),
+                Staged::Shaped(look, ks) => {
                     for (k, space) in ks {
                         let font = k / per_font;
                         // Codes start at 1; `k % per_font + 1` is at most 240.
                         let code = u8::try_from(k % per_font + 1).unwrap_or(1);
                         match runs.last_mut() {
-                            Some(Run::Shaped(f, codes, spaces)) if *f == font => {
+                            Some(Run::Shaped(l, f, codes, spaces)) if *f == font && *l == look => {
                                 codes.push(code);
                                 spaces.push(space);
                             }
-                            _ => runs.push(Run::Shaped(font, vec![code], vec![space])),
+                            _ => runs.push(Run::Shaped(look, font, vec![code], vec![space])),
                         }
                     }
                 }
@@ -762,7 +925,7 @@ pub fn plan_pieces(
         planned.push(PlannedLine { logical: line.clone(), runs });
     }
     let family = ShapedScript::Arabic.font().map_or("Arabic", |f| f.family).to_owned();
-    Ok(ShapedPlan { names, latin_font: latin.font.to_owned(), lines: planned, family })
+    Ok(ShapedPlan { names, latin_fonts: latins.iter().map(|l| l.font.to_owned()).collect(), lines: planned, family })
 }
 
 impl ShapedPlan {
@@ -775,9 +938,22 @@ impl ShapedPlan {
     /// and shaped runs in drawing order. `current` is the font the text state holds, and holds the
     /// last one used afterwards. A line with nothing to draw gives no operators.
     pub fn line_ops(&self, i: usize, size: f64, current: &mut String) -> Vec<TextOp> {
+        let mut pen = Pen { font: std::mem::take(current), size, fill: Vec::new() };
+        let ops = self.looked_line_ops(i, &[RunLook { size, fill: &[] }], &mut pen);
+        *current = pen.font;
+        ops
+    }
+
+    /// [`Self::line_ops`] for a plan of several looks ([`plan_looked`]): each run is drawn in `looks[its look]` (a look
+    /// past the end in the first), its fill colour and size set where they change. `pen` is the text state, and holds the
+    /// last font, size and fill afterwards. No look at all draws nothing.
+    pub fn looked_line_ops(&self, i: usize, looks: &[RunLook], pen: &mut Pen) -> Vec<TextOp> {
         let Some(line) = self.lines.get(i).filter(|l| !l.runs.is_empty()) else { return Vec::new() };
+        if looks.is_empty() {
+            return Vec::new();
+        }
         let mut ops = vec![Self::span(line)];
-        ops.extend(self.run_ops(line, size, current));
+        ops.extend(self.run_ops(line, looks, pen));
         ops.push(TextOp::new("EMC", vec![]));
         ops
     }
@@ -793,14 +969,14 @@ impl ShapedPlan {
     }
 
     /// How many spaces between words planned line `i` draws: the gaps [`Self::line_ops_stretched`] widens (a space of
-    /// Latin text, or a shaped space).
+    /// Latin text, or a shaped space), whatever their looks.
     pub fn gaps(&self, i: usize) -> usize {
         let Some(line) = self.lines.get(i) else { return 0 };
         line.runs
             .iter()
             .map(|run| match run {
-                Run::Latin(_, text) => text.matches(' ').count(),
-                Run::Shaped(_, _, spaces) => spaces.iter().filter(|s| **s).count(),
+                Run::Latin(_, _, text) => text.matches(' ').count(),
+                Run::Shaped(_, _, _, spaces) => spaces.iter().filter(|s| **s).count(),
             })
             .sum()
     }
@@ -811,44 +987,55 @@ impl ShapedPlan {
     /// the space: the shaped codes are shown as the strings of a `TJ` array, and Latin text is shown by `show` word by
     /// word (up to and including each space) followed by the adjustment. A `gap` that is not positive, a `size` that is
     /// not, or no gap in the line gives the operators of [`Self::line_ops`].
-    pub fn line_ops_stretched(
+    pub fn line_ops_stretched(&self, i: usize, size: f64, current: &mut String, gap: f64, show: LatinOps) -> Result<Vec<TextOp>, ShapedTextError> {
+        let mut pen = Pen { font: std::mem::take(current), size, fill: Vec::new() };
+        let ops = self.looked_line_ops_stretched(i, &[RunLook { size, fill: &[] }], &mut pen, gap, &[show]);
+        *current = pen.font;
+        ops
+    }
+
+    /// [`Self::line_ops_stretched`] for a plan of several looks (see [`Self::looked_line_ops`]): the gap is the same in
+    /// every look, each adjustment in the size of the run it follows, and the Latin text of look `i` is shown by
+    /// `shows[i]` (a look past the end by the first). A look whose size is not positive gives the plain line.
+    pub fn looked_line_ops_stretched(
         &self,
         i: usize,
-        size: f64,
-        current: &mut String,
+        looks: &[RunLook],
+        pen: &mut Pen,
         gap: f64,
-        show: &dyn Fn(&str) -> Result<Vec<TextOp>, ShapedTextError>,
+        shows: &[LatinOps],
     ) -> Result<Vec<TextOp>, ShapedTextError> {
-        let adjustment = -1000.0 * gap / size;
-        if !(gap > 0.0 && size > 0.0 && adjustment.is_finite()) || self.gaps(i) == 0 {
-            return Ok(self.line_ops(i, size, current));
+        let adjustment = |size: f64| -1000.0 * gap / size;
+        let stretches = gap > 0.0 && !looks.is_empty() && looks.iter().all(|l| l.size > 0.0 && adjustment(l.size).is_finite());
+        if !stretches || self.gaps(i) == 0 {
+            return Ok(self.looked_line_ops(i, looks, pen));
         }
         let Some(line) = self.lines.get(i).filter(|l| !l.runs.is_empty()) else { return Ok(Vec::new()) };
         let mut ops = vec![Self::span(line)];
-        let mut select = |ops: &mut Vec<TextOp>, font: &str| {
-            if current != font {
-                ops.push(TextOp::new("Tf", vec![Object::name(font), number(size)]));
-                *current = font.to_owned();
-            }
-        };
         for run in &line.runs {
+            // (`looks` is not empty, checked above)
+            let Some(look) = looks.get(run.look()).or_else(|| looks.first()) else { continue };
             match run {
-                Run::Latin(shown, text) => {
-                    select(&mut ops, &self.latin_font);
+                Run::Latin(look_index, shown, text) => {
+                    pen.select(&mut ops, self.latin_font(*look_index), look);
                     if text.contains(' ') {
+                        let show = shows
+                            .get(*look_index)
+                            .or_else(|| shows.first())
+                            .ok_or_else(|| ShapedTextError("no font to show Latin text in".into()))?;
                         for word in text.split_inclusive(' ') {
                             ops.extend(show(word)?);
                             if word.ends_with(' ') {
-                                ops.push(TextOp::new("TJ", vec![Object::Array(vec![number(adjustment)])]));
+                                ops.push(TextOp::new("TJ", vec![Object::Array(vec![number(adjustment(look.size))])]));
                             }
                         }
                     } else {
                         ops.extend(shown.iter().cloned());
                     }
                 }
-                Run::Shaped(font, codes, spaces) => {
+                Run::Shaped(_, font, codes, spaces) => {
                     let Some(name) = self.names.get(*font) else { continue };
-                    select(&mut ops, name);
+                    pen.select(&mut ops, name, look);
                     if spaces.iter().any(|s| *s) {
                         let mut array = Vec::new();
                         let mut word = Vec::new();
@@ -856,7 +1043,7 @@ impl ShapedPlan {
                             word.push(*code);
                             if *space {
                                 array.push(Object::String(PdfString::literal(std::mem::take(&mut word))));
-                                array.push(number(adjustment));
+                                array.push(number(adjustment(look.size)));
                             }
                         }
                         if !word.is_empty() {
@@ -876,26 +1063,30 @@ impl ShapedPlan {
     /// [`Self::line_ops`] without the span: the operators that show planned line `i`, for a caller
     /// that wraps several of them (the cells of a comb field) in one span of its own.
     pub fn bare_ops(&self, i: usize, size: f64, current: &mut String) -> Vec<TextOp> {
-        self.lines.get(i).map(|line| self.run_ops(line, size, current)).unwrap_or_default()
+        let Some(line) = self.lines.get(i) else { return Vec::new() };
+        let mut pen = Pen { font: std::mem::take(current), size, fill: Vec::new() };
+        let ops = self.run_ops(line, &[RunLook { size, fill: &[] }], &mut pen);
+        *current = pen.font;
+        ops
     }
 
-    fn run_ops(&self, line: &PlannedLine, size: f64, current: &mut String) -> Vec<TextOp> {
+    /// The font look `look` shows its Latin text in (a look past the end, the first's).
+    fn latin_font(&self, look: usize) -> &str {
+        self.latin_fonts.get(look).or_else(|| self.latin_fonts.first()).map_or("", String::as_str)
+    }
+
+    fn run_ops(&self, line: &PlannedLine, looks: &[RunLook], pen: &mut Pen) -> Vec<TextOp> {
         let mut ops = Vec::new();
-        let mut select = |ops: &mut Vec<TextOp>, font: &str| {
-            if current != font {
-                ops.push(TextOp::new("Tf", vec![Object::name(font), number(size)]));
-                *current = font.to_owned();
-            }
-        };
         for run in &line.runs {
+            let Some(look) = looks.get(run.look()).or_else(|| looks.first()) else { continue };
             match run {
-                Run::Latin(shown, _) => {
-                    select(&mut ops, &self.latin_font);
+                Run::Latin(look_index, shown, _) => {
+                    pen.select(&mut ops, self.latin_font(*look_index), look);
                     ops.extend(shown.iter().cloned());
                 }
-                Run::Shaped(font, codes, _) => {
+                Run::Shaped(_, font, codes, _) => {
                     let Some(name) = self.names.get(*font) else { continue };
-                    select(&mut ops, name);
+                    pen.select(&mut ops, name, look);
                     ops.push(TextOp::new("Tj", vec![Object::String(PdfString::literal(codes.clone()))]));
                 }
             }
@@ -1027,5 +1218,67 @@ mod stretch_tests {
         assert!(plan.line_ops_stretched(9, 10.0, &mut String::new(), 2.0, &latin).expect("no line").is_empty());
         // A line without a space is the plain line whatever the gap.
         assert_eq!(plan.line_ops_stretched(1, 10.0, &mut String::new(), 2.0, &latin).expect("plain"), plan.line_ops(1, 10.0, &mut String::new()));
+    }
+
+    fn looked(lines: &[(&str, Vec<usize>)]) -> ShapedPlan {
+        set_test_shaper(Some(LETTERS));
+        let mut doc = Document::new_empty();
+        let mut fonts = Dict::new();
+        let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
+        let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|(l, looks)| ((*l).to_owned(), looks.clone())).collect();
+        let latins = [LatinShow { font: "F9", show: &latin }, LatinShow { font: "F8", show: &latin }];
+        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins).expect("plans");
+        set_test_shaper(None);
+        plan
+    }
+
+    #[test]
+    fn pieces_end_where_the_look_changes_and_one_look_cuts_nothing() {
+        let shaper = LETTERS;
+        let latin = |pieces: Vec<(usize, Piece)>| -> Vec<(usize, String)> {
+            pieces.into_iter().filter_map(|(look, p)| if let Piece::Latin(s) = p { Some((look, s)) } else { None }).collect()
+        };
+        assert_eq!(latin(shaped_pieces_looked("abcd", &[0, 0, 1, 1], false, &shaper).expect("lays out")), [(0, "ab".into()), (1, "cd".into())]);
+        // A right-to-left line draws the later look first; missing looks are look 0.
+        let pieces = shaped_pieces_looked("\u{627}\u{628} \u{627}\u{628}", &[0, 0, 0, 1], true, &shaper).expect("lays out");
+        assert_eq!(pieces.iter().map(|(look, _)| *look).collect::<Vec<_>>(), [0, 1, 0]);
+        assert_eq!(
+            shaped_pieces_looked("ab \u{627}", &[], false, &shaper).expect("lays out").into_iter().map(|(_, p)| p).collect::<Vec<_>>(),
+            shaped_pieces("ab \u{627}", false, &shaper).expect("lays out")
+        );
+        assert!(shaped_pieces_looked("", &[3], true, &shaper).expect("nothing").is_empty());
+    }
+
+    #[test]
+    fn a_line_of_two_looks_sets_each_looks_size_and_fill_where_it_changes() {
+        // (The second word in look 1: drawn first, right to left.)
+        let plan = looked(&[("\u{627}\u{628} \u{627}\u{628} ab", vec![0, 0, 0, 1, 1, 1, 1, 1])]);
+        let (black, red) = ([TextOp::new("g", vec![Object::Int(0)])], [TextOp::new("rg", vec![Object::Int(1), Object::Int(0), Object::Int(0)])]);
+        let looks = [RunLook { size: 10.0, fill: &black }, RunLook { size: 20.0, fill: &red }];
+        let mut pen = Pen { font: String::new(), size: 10.0, fill: black.to_vec() };
+        let ops = plan.looked_line_ops(0, &looks, &mut pen);
+        let states: Vec<String> = ops
+            .iter()
+            .filter(|op| matches!(op.operator.as_slice(), b"Tf" | b"g" | b"rg"))
+            .map(|op| format!("{} {:?}", name(op), op.operands.iter().map(|o| o.as_f64().unwrap_or(-1.0)).collect::<Vec<_>>()))
+            .collect();
+        // The Latin word of look 1 in its font F8 at 20, in red; its shaped word; then look 0 at 10 in black.
+        assert_eq!(states, ["rg [1.0, 0.0, 0.0]", "Tf [-1.0, 20.0]", "Tf [-1.0, 20.0]", "g [0.0]", "Tf [-1.0, 10.0]"], "{ops:?}");
+        assert!(pen.font.starts_with("PCT") && pen.size == 10.0 && pen.fill == black, "{pen:?}");
+        // One span; the gaps of the whole line, whatever their looks.
+        assert_eq!(ops.iter().filter(|op| op.operator == b"BDC").count(), 1);
+        assert_eq!(plan.gaps(0), 2);
+        // Stretched, each gap is the same distance: an adjustment in the size of the run it follows.
+        let mut pen = Pen { font: String::new(), size: 10.0, fill: black.to_vec() };
+        let ops = plan.looked_line_ops_stretched(0, &looks, &mut pen, 2.0, &[&latin, &latin]).expect("stretches");
+        let adjustments: Vec<f64> = ops
+            .iter()
+            .filter(|op| op.operator == b"TJ")
+            .flat_map(|op| match op.operands.first() {
+                Some(Object::Array(items)) => items.iter().filter_map(Object::as_f64).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(adjustments, [-100.0, -200.0], "{ops:?}");
     }
 }

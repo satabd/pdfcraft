@@ -10,7 +10,8 @@
 //! Each line is one marked-content span with `/ActualText` holding the line in typing order, so
 //! copy, search and a later Edit text read the line as it was typed. Latin text and digits in the
 //! line are drawn with the paragraph's own font when it has them and with Helvetica otherwise,
-//! between the shaped runs, in the same span.
+//! between the shaped runs, in the same span. In a paragraph of several looks (sizes, colours, fonts) each line is drawn as
+//! runs of one look, each character in the look of the stored character it came from (`text_looks`, [`plan_looked`]).
 //!
 //! The paragraph's text state keeps no character or word spacing here (spacing would pull joined
 //! letters apart; word spacing reaches only a single-byte code 32, which these fonts' codes are not). A justified
@@ -69,13 +70,16 @@ pub(crate) fn unsupported_with_arabic(latin: &str) -> EditError {
     ))
 }
 
-pub(crate) use shaped_text::Measure;
+pub(crate) use shaped_text::{LatinWidth, Measure};
+
+/// The operators that show Latin text in a font, or why the font can't.
+pub(crate) type ShowLatin<'a> = &'a dyn Fn(&str) -> Result<Vec<Op>, EditError>;
 
 /// How the Latin pieces of a line are drawn: in the resource `font`, with the operators `show`
 /// gives (or an error when the font can't show a piece).
 pub(crate) struct LatinShow<'a> {
     pub font: &'a str,
-    pub show: &'a dyn Fn(&str) -> Result<Vec<Op>, EditError>,
+    pub show: ShowLatin<'a>,
 }
 
 /// Wrapped lines laid out, with the fonts they need already added to the document.
@@ -91,7 +95,7 @@ fn to_op(op: TextOp) -> Op {
 
 /// `show`, in the planner's own operator and error types; an error of `show`'s is kept in `failure`.
 fn adapted<'a>(
-    show: &'a dyn Fn(&str) -> Result<Vec<Op>, EditError>,
+    show: ShowLatin<'a>,
     failure: &'a std::cell::RefCell<Option<EditError>>,
 ) -> impl Fn(&str) -> Result<Vec<TextOp>, ShapedTextError> + 'a {
     move |s: &str| {
@@ -116,16 +120,45 @@ pub(crate) fn plan(
     max_glyphs: usize,
     latin: &LatinShow,
 ) -> Result<ShapedPlan, EditError> {
+    let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|line| (line.clone(), Vec::new())).collect();
+    plan_looked(doc, fonts_res, &lines, rtl, max_glyphs, std::slice::from_ref(latin))
+}
+
+/// [`plan`] for a paragraph of several looks: each line with the look of each of its characters (an index into
+/// `latins`, which shows the Latin text of each look; see [`shaped_text::shaped_pieces_looked`]).
+pub(crate) fn plan_looked(
+    doc: &mut Document,
+    fonts_res: &mut Dict,
+    lines: &[(String, Vec<usize>)],
+    rtl: bool,
+    max_glyphs: usize,
+    latins: &[LatinShow],
+) -> Result<ShapedPlan, EditError> {
     // An error of the writer's own is kept as it is; the planner's is turned into an `EditError`.
     let failure: std::cell::RefCell<Option<EditError>> = std::cell::RefCell::new(None);
-    let show = adapted(latin.show, &failure);
+    let shows: Vec<_> = latins.iter().map(|latin| adapted(latin.show, &failure)).collect();
+    let planner: Vec<shaped_text::LatinShow> =
+        latins.iter().zip(&shows).map(|(latin, show)| shaped_text::LatinShow { font: latin.font, show }).collect();
     let fonts = PlanFonts { max_glyphs, name_prefix: FONT_PREFIX, font_name: Some(ARABIC_FONT_NAME) };
-    let planned = shaped_text::plan(doc, fonts_res, lines, rtl, fonts, &shaped_text::LatinShow { font: latin.font, show: &show });
-    drop(show);
+    let planned = shaped_text::plan_looked(doc, fonts_res, lines, rtl, fonts, &planner);
+    drop(planner);
+    drop(shows);
     match planned {
         Ok(p) => Ok(ShapedPlan(p)),
         Err(e) => Err(failure.into_inner().unwrap_or_else(|| e.into())),
     }
+}
+
+/// The text state a paragraph of several looks starts drawing from (see [`ShapedPlan::looked_line_ops`]): `font` at
+/// `size`, filled as `fill` sets.
+pub(crate) fn pen(font: &str, size: f64, fill: &[Op]) -> shaped_text::Pen {
+    shaped_text::Pen { font: font.to_owned(), size, fill: fill.iter().map(to_text_op).collect() }
+}
+
+/// The look a run of a planned line is drawn in: its size in text space and the operators that set its fill colour.
+pub(crate) struct RunLook {
+    pub size: f64,
+    pub fill: Vec<Op>,
 }
 
 impl ShapedPlan {
@@ -148,16 +181,34 @@ impl ShapedPlan {
 
     /// [`Self::line_ops`] with each gap widened by `gap` (text space units before the horizontal scale, as word spacing is),
     /// the Latin text of the line shown by `show` word by word.
-    pub(crate) fn line_ops_stretched(
-        &self,
-        i: usize,
-        size: f64,
-        current: &mut String,
-        gap: f64,
-        show: &dyn Fn(&str) -> Result<Vec<Op>, EditError>,
-    ) -> Result<Vec<Op>, EditError> {
+    pub(crate) fn line_ops_stretched(&self, i: usize, size: f64, current: &mut String, gap: f64, show: ShowLatin) -> Result<Vec<Op>, EditError> {
         let failure: std::cell::RefCell<Option<EditError>> = std::cell::RefCell::new(None);
         let ops = self.0.line_ops_stretched(i, size, current, gap, &adapted(show, &failure));
+        match ops {
+            Ok(ops) => Ok(ops.into_iter().map(to_op).collect()),
+            Err(e) => Err(failure.into_inner().unwrap_or_else(|| e.into())),
+        }
+    }
+
+    /// The operators that draw wrapped line `i` of a plan of several looks ([`plan_looked`]), each run in its look of
+    /// `looks`, with each gap widened by `gap` (none when it is not positive) and the Latin text of look `l` then shown
+    /// by `shows[l]` word by word. `pen` is the text state (font, size and fill), and holds the last ones afterwards.
+    pub(crate) fn looked_line_ops(
+        &self,
+        i: usize,
+        looks: &[RunLook],
+        pen: &mut shaped_text::Pen,
+        gap: f64,
+        shows: &[ShowLatin],
+    ) -> Result<Vec<Op>, EditError> {
+        let fills: Vec<Vec<TextOp>> = looks.iter().map(|look| look.fill.iter().map(to_text_op).collect()).collect();
+        let looks: Vec<shaped_text::RunLook> = looks.iter().zip(&fills).map(|(look, fill)| shaped_text::RunLook { size: look.size, fill }).collect();
+        let failure: std::cell::RefCell<Option<EditError>> = std::cell::RefCell::new(None);
+        let adapted: Vec<_> = shows.iter().map(|show| adapted(*show, &failure)).collect();
+        let shows: Vec<shaped_text::LatinOps> = adapted.iter().map(|show| show as shaped_text::LatinOps).collect();
+        let ops = self.0.looked_line_ops_stretched(i, &looks, pen, gap, &shows);
+        drop(shows);
+        drop(adapted);
         match ops {
             Ok(ops) => Ok(ops.into_iter().map(to_op).collect()),
             Err(e) => Err(failure.into_inner().unwrap_or_else(|| e.into())),

@@ -20,6 +20,8 @@ use pdfcraft_fonts::{CraftFont, GlyphError, japanese_glyph_from};
 
 use crate::EditError;
 
+#[path = "text_looks.rs"]
+mod looks;
 #[path = "text_regions.rs"]
 mod regions;
 use crate::text_shaped;
@@ -2260,28 +2262,85 @@ fn wrap(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<String> {
 /// [`wrap`] with whether each line ends its paragraph: it is the last, or a `\n` follows it. A justified text stretches
 /// the other lines, those the wrap broke.
 fn wrap_rows(text: &str, width: f64, advance: impl Fn(&str) -> f64) -> Vec<(String, bool)> {
-    let mut out: Vec<(String, bool)> = Vec::new();
+    let text = collapse(text, &[]).0;
+    wrap_ranges(&text, width, |range| advance(text.get(range).unwrap_or_default()))
+        .into_iter()
+        .map(|(range, ends)| (text.get(range).unwrap_or_default().to_owned(), ends))
+        .collect()
+}
+
+/// `text` as a rewrite lays it out: each line (between `\n`s) with its runs of white space as one space and none at
+/// either end (an ideographic space stays, see [`paragraph_separator`]). With `looks` (one for each character of
+/// `text`), also the look of each character kept: a space that stands for a run of them has the first one's.
+fn collapse(text: &str, looks: &[usize]) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(text.len());
+    let mut kept = Vec::with_capacity(if looks.is_empty() { 0 } else { text.len() });
+    // The look of the space owed before the next word of the line, and whether the line has a word yet.
+    let mut space: Option<usize> = None;
+    let mut started = false;
+    for (i, c) in text.chars().enumerate() {
+        let look = looks.get(i).copied().unwrap_or(0);
+        if c == '\n' {
+            out.push('\n');
+            kept.push(look);
+            (space, started) = (None, false);
+        } else if paragraph_separator(c) {
+            if started && space.is_none() {
+                space = Some(look);
+            }
+        } else {
+            if let Some(look) = space.take() {
+                out.push(' ');
+                kept.push(look);
+            }
+            out.push(c);
+            kept.push(look);
+            started = true;
+        }
+    }
+    if looks.is_empty() {
+        kept.clear();
+    }
+    (out, kept)
+}
+
+/// Greedy word wrapping of `text`, already [`collapse`]d, to `width` with `advance` giving the width of a byte range of
+/// it: each line as a byte range of `text`, with whether it ends its paragraph (it is the last, or a `\n` follows it).
+/// Each `\n` starts a new line. A row may also end inside a word of Chinese or Japanese text ([`crate::linebreak`]);
+/// those pieces join without a space.
+fn wrap_ranges(text: &str, width: f64, advance: impl Fn(std::ops::Range<usize>) -> f64) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut out: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+    let mut row_start = 0;
     for row in text.split('\n') {
-        let mut line = String::new();
         let start = out.len();
-        for word in row.split(paragraph_separator).filter(|word| !word.is_empty()) {
-            for (i, piece) in crate::linebreak::pieces(word).into_iter().enumerate() {
-                let candidate = match (line.is_empty(), i) {
-                    (true, _) => piece.to_string(),
-                    (false, 0) => format!("{line} {piece}"),
-                    (false, _) => format!("{line}{piece}"),
-                };
-                if !line.is_empty() && advance(&candidate) > width {
-                    out.push((std::mem::take(&mut line), false));
-                    line = piece.to_string();
-                } else {
-                    line = candidate;
-                }
+        // The line being filled, as a byte range of `text`; empty until it has a piece.
+        let mut line: Option<std::ops::Range<usize>> = None;
+        for (at, word) in row.split(' ').scan(0, |at, word| {
+            let here = *at;
+            *at += word.len() + 1;
+            Some((here, word))
+        }) {
+            if word.is_empty() {
+                continue;
+            }
+            let mut offset = row_start + at;
+            for piece in crate::linebreak::pieces(word) {
+                let piece_range = offset..offset + piece.len();
+                offset = piece_range.end;
+                line = Some(match line.take() {
+                    None => piece_range,
+                    Some(current) if advance(current.start..piece_range.end) > width => {
+                        out.push((current, false));
+                        piece_range
+                    }
+                    Some(current) => current.start..piece_range.end,
+                });
             }
         }
-        if !line.is_empty() || out.len() == start {
-            out.push((line, true));
+        if line.is_some() || out.len() == start {
+            out.push((line.unwrap_or(row_start..row_start), true));
         }
+        row_start += row.len() + 1;
     }
     out
 }
@@ -2440,16 +2499,19 @@ fn rewrite_block_from(
     let pieces = Pieces::join(&streams.iter().map(|(_, d)| d.as_slice()).collect::<Vec<_>>());
     let ops = pieces.parse().ops;
     // Explicit line breaks stay (#1443); within a line, runs of white space become one space.
-    let text = text
-        .unwrap_or(&b.text)
-        .split('\n')
-        .map(|row| row.split(paragraph_separator).filter(|word| !word.is_empty()).collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = collapse(text.unwrap_or(&b.text), &[]).0;
+    // Shaped Arabic in a paragraph of several looks keeps each character's own look (see `looks`); `None` when the whole
+    // draft is in the paragraph's first look, which is written as a paragraph of one look is.
+    let looked = if shaped { looks::looked_text(&b, &lines, draft, style) } else { None };
     // The characters to show, for choosing fonts: the breaks are moves, not glyphs.
     let flat = text.replace('\n', " ");
     // What the page font or Helvetica has to show: with shaped Arabic, the rest of the text.
-    let fonts_text = if shaped { text_shaped::latin_of(&flat) } else { flat.clone() };
+    // (In a paragraph of several looks, that of the first look: each look shows its own in its own font.)
+    let fonts_text = match &looked {
+        _ if !shaped => flat.clone(),
+        Some(looked) => text_shaped::latin_of(&looked.text_of(0)),
+        None => text_shaped::latin_of(&flat),
+    };
     let o = &first.origin;
     let last = members.last().copied().unwrap_or(first);
     let emit = &last.origin;
@@ -2493,7 +2555,9 @@ fn rewrite_block_from(
     // Right-to-left text (more Hebrew or Arabic letters than Latin) is right-aligned unless an
     // alignment is asked for, and a single right-to-left line keeps its right edge as it grows.
     let rtl = crate::bidi::rtl_base(&flat);
-    let anchored_right = rtl && upright && style.width.is_none() && members.len() == 1;
+    // (A paragraph of several looks is a single line when it is one row of runs, as the styled rewrite counts it.)
+    let single_line = if looked.is_some() { b.rows.len() == 1 } else { members.len() == 1 };
+    let anchored_right = rtl && upright && style.width.is_none() && single_line;
     // The paragraph's width along its lines: in user space unless it is turned.
     let frame = if upright {
         b.rect
@@ -2509,7 +2573,7 @@ fn rewrite_block_from(
         // Turned text: the page's margins are along another axis. A single line grows (below).
         None if !upright => (frame[2] - frame[0]).max(size * k),
         None if anchored_right => (b.rect[2] - b.rect[0]).max(size * k).max(b.rect[2] + dx - (p.crop(doc)[0] + 36.0)),
-        None if members.len() == 1 => (b.rect[2] - b.rect[0]).max(size * k).max(p.crop(doc)[2] - 36.0 - (b.rect[0] + dx)),
+        None if single_line => (b.rect[2] - b.rect[0]).max(size * k).max(p.crop(doc)[2] - 36.0 - (b.rect[0] + dx)),
         None => (b.rect[2] - b.rect[0]).max(size * k),
     };
     if !width.is_finite() {
@@ -2545,13 +2609,39 @@ fn rewrite_block_from(
         None
     };
     // Shaped Arabic is measured by laying a line out; Latin pieces by the font that draws them.
-    let latin_width = |s: &str| -> f64 {
-        match (&metrics, reuse) {
-            (Some(m), true) => source_width(m, s, size, space, 0.0, 0.0),
-            _ => std_width(s, size),
+    // (The Latin pieces of a line: the paragraph's own font where it has them, the standard font of its family otherwise.)
+    let first_look = looks::LatinLook { metrics: metrics.clone().filter(|_| reuse), space, face, size };
+    let latin_width = |s: &str| -> f64 { first_look.width(s) };
+    // The other looks of a paragraph of several (see `looks`): each in its run's size and fill colour, its Latin text in its
+    // run's own font where that has it. Settled before anything is written.
+    let mut other_looks: Vec<(String, looks::LatinLook, Vec<Op>)> = Vec::new();
+    if let Some(looked) = &looked {
+        for (look, source) in looked.sources.iter().enumerate().skip(1) {
+            let line = lines.get(*source).unwrap_or(first);
+            let look_size = match style.size {
+                Some(_) => size,
+                None if line.size.to_bits() == first.size.to_bits() => size,
+                None => Some(line.size / k).filter(|s| s.is_finite()).map_or(size, |s| s.clamp(0.1, 100_000.0)),
+            };
+            let fill = match style.color {
+                Some([r, g, bl]) => vec![Op::new("rg", vec![pdfcraft_content::num(r), pdfcraft_content::num(g), pdfcraft_content::num(bl)])],
+                None => line.origin.state.fill.clone(),
+            };
+            let latin = text_shaped::latin_of(&looked.text_of(look));
+            let (font, latin_look) = looks::LatinLook::of(doc, &mut fonts_res, line, &latin, style, look_size)?;
+            other_looks.push((font, latin_look, fill));
         }
-    };
-    let measure = shaped.then(|| text_shaped::Measure::new(rtl, size, &latin_width));
+    }
+    let other_widths: Vec<_> = other_looks.iter().map(|(_, look, _)| move |s: &str| look.width(s)).collect();
+    let measure = shaped.then(|| match &looked {
+        Some(_) => text_shaped::Measure::with_looks(
+            rtl,
+            std::iter::once((size, &latin_width as text_shaped::LatinWidth))
+                .chain(other_looks.iter().zip(&other_widths).map(|((_, look, _), width)| (look.size, width as text_shaped::LatinWidth)))
+                .collect(),
+        ),
+        None => text_shaped::Measure::new(rtl, size, &latin_width),
+    });
     let advance = |s: &str| -> f64 {
         if let Some(measure) = &measure {
             return measure.line(s) * o_state.scale * k;
@@ -2576,7 +2666,7 @@ fn rewrite_block_from(
         t * o_state.scale * k
     };
     // A turned single line grows to fit, up to where its baseline reaches the page's margin.
-    let width = if !upright && style.width.is_none() && members.len() == 1 {
+    let width = if !upright && style.width.is_none() && single_line {
         let crop = p.crop(doc);
         let (x0, y0) = (first.origin.x + dx, first.origin.baseline + dy);
         let (ux, uy) = first.direction();
@@ -2595,17 +2685,44 @@ fn rewrite_block_from(
             f64::INFINITY
         };
         let cap = width.max(tx.min(ty)).min(14_400.0);
-        text.split('\n').map(&advance).fold(width, f64::max).min(cap)
+        let natural = match (&measure, &looked) {
+            (Some(measure), Some(looked)) => text
+                .split('\n')
+                .scan(0, |at, row| {
+                    let range = *at..*at + row.len();
+                    *at = range.end + 1;
+                    Some(measure.line_looked(row, &looked.looks_of(range)) * o_state.scale * k)
+                })
+                .fold(width, f64::max),
+            _ => text.split('\n').map(&advance).fold(width, f64::max),
+        };
+        natural.min(cap)
     } else {
         width
     };
     let right_edge = if anchored_right { right_edge } else { width };
-    let wrapped_rows = match &measure {
-        Some(measure) => wrap_rows(&text, width + 0.5, |s| measure.approx(s) * o_state.scale * k),
-        None => wrap_rows(&text, width + 0.5, advance),
+    // Each word of a paragraph of several looks is measured in its own (and the looks of each line kept for drawing it).
+    let mut wrapped_looks: Vec<Vec<usize>> = Vec::new();
+    let wrapped_rows = match (&measure, &looked) {
+        (Some(measure), Some(looked)) => {
+            let ranges = wrap_ranges(&text, width + 0.5, |range| {
+                measure.approx_looked(text.get(range.clone()).unwrap_or_default(), &looked.looks_of(range)) * o_state.scale * k
+            });
+            wrapped_looks = ranges.iter().map(|(range, _)| looked.looks_of(range.clone())).collect();
+            ranges.into_iter().map(|(range, ends)| (text.get(range).unwrap_or_default().to_owned(), ends)).collect()
+        }
+        (Some(measure), None) => wrap_rows(&text, width + 0.5, |s| measure.approx(s) * o_state.scale * k),
+        (None, _) => wrap_rows(&text, width + 0.5, advance),
     };
     // Whether each line ends its paragraph (a justified text leaves those unstretched).
     let (wrapped, ends): (Vec<String>, Vec<bool>) = wrapped_rows.into_iter().unzip();
+    // The width of wrapped line `i`, in user space.
+    let line_width = |i: usize, line: &str| -> f64 {
+        match (&measure, wrapped_looks.get(i)) {
+            (Some(measure), Some(looks)) => measure.line_looked(line, looks) * o_state.scale * k,
+            _ => advance(line),
+        }
+    };
     let mut substituted = None;
     let new_font = !reuse || shaped;
     let (show_font, encode): (String, Encoder) = if let Some(m) = metrics.clone().filter(|_| reuse) {
@@ -2671,13 +2788,13 @@ fn rewrite_block_from(
     block_ops.extend(state.ops());
     block_ops.push(Op::new("Tm", tm.iter().map(|v| n(*v)).collect()));
     // Alignment: each line's offset from the left edge, in text space.
-    let offset = |line: &str| -> f64 {
-        let free = (width - advance(line)).max(0.0) / k;
+    let offset = |line_width: f64| -> f64 {
+        let free = (width - line_width).max(0.0) / k;
         match align {
             Some(crate::added::Align::Center) => free / 2.0,
             // A right-to-left line anchored at its right edge may start left of the old box.
             // (`anchored_right` is only so for right-to-left text, a justified one among it.)
-            Some(crate::added::Align::Right | crate::added::Align::Justify) if anchored_right => (right_edge - advance(line)) / k,
+            Some(crate::added::Align::Right | crate::added::Align::Justify) if anchored_right => (right_edge - line_width) / k,
             Some(crate::added::Align::Right) => free,
             // A justified right-to-left paragraph ends the lines it does not stretch (its last) at the right edge.
             Some(crate::added::Align::Justify) if rtl => free,
@@ -2700,36 +2817,43 @@ fn rewrite_block_from(
     let mut underlines: Vec<(f64, f64, f64)> = Vec::new(); // (x0, x1, y) in text space
     // Shaped Arabic: every line is laid out and every font made now, before the document is changed;
     // the Latin pieces of a line use the font the paragraph would use for them.
-    // (The Latin pieces of a line: the paragraph's own font where it has them, Helvetica otherwise.)
-    let latin_ops = |s: &str| -> Result<Vec<Op>, EditError> {
-        match &metrics {
-            Some(m) if reuse => source_show(m, s, size, space, 0.0, 0.0),
-            _ => {
-                if s.chars().any(|c| !is_win_ansi_char(c) && c != '?') {
-                    return Err(text_shaped::unsupported_with_arabic(s));
-                }
-                Ok(vec![Op::new("Tj", vec![Object::String(PdfString::literal(pdfcraft_fonts::win_ansi(s)))])])
-            }
-        }
-    };
+    let latin_ops = |s: &str| -> Result<Vec<Op>, EditError> { first_look.show(s) };
+    let other_shows: Vec<_> = other_looks.iter().map(|(_, look, _)| move |s: &str| look.show(s)).collect();
+    let shows: Vec<text_shaped::ShowLatin> =
+        std::iter::once(&latin_ops as text_shaped::ShowLatin).chain(other_shows.iter().map(|show| show as text_shaped::ShowLatin)).collect();
     let shaped_plan = if shaped {
-        let latin = text_shaped::LatinShow { font: &shown_font, show: &latin_ops };
-        let plan = text_shaped::plan(doc, &mut fonts_res, &wrapped, rtl, max_glyphs, &latin)?;
+        let plan = if looked.is_some() {
+            let fonts = std::iter::once(shown_font.as_str()).chain(other_looks.iter().map(|(font, _, _)| font.as_str()));
+            let latins: Vec<text_shaped::LatinShow> = fonts.zip(&shows).map(|(font, show)| text_shaped::LatinShow { font, show: *show }).collect();
+            let lines: Vec<(String, Vec<usize>)> = wrapped.iter().cloned().zip(wrapped_looks.iter().cloned()).collect();
+            text_shaped::plan_looked(doc, &mut fonts_res, &lines, rtl, max_glyphs, &latins)?
+        } else {
+            let latin = text_shaped::LatinShow { font: &shown_font, show: &latin_ops };
+            text_shaped::plan(doc, &mut fonts_res, &wrapped, rtl, max_glyphs, &latin)?
+        };
         substituted = Some(format!("{} Type3", plan.family()));
         Some(plan)
     } else {
         None
     };
+    // A paragraph of several looks: each look's size and fill colour, and the text state the runs are drawn from. A look
+    // in the initial colour (black) sets it, so a run after one of another colour goes back to it.
+    let fill_of = |fill: &[Op]| if fill.is_empty() { vec![Op::new("g", vec![Object::Int(0)])] } else { fill.to_vec() };
+    let run_looks: Vec<text_shaped::RunLook> = std::iter::once(text_shaped::RunLook { size, fill: fill_of(&state.fill) })
+        .chain(other_looks.iter().map(|(_, look, fill)| text_shaped::RunLook { size: look.size, fill: fill_of(fill) }))
+        .collect();
+    let mut pen = looked.as_ref().map(|_| text_shaped::pen(&shown_font, size, &fill_of(&state.fill)));
     for (i, line) in wrapped.iter().enumerate() {
+        let line_w = line_width(i, line);
         // The spaces between words a stretch widens (a shaped line says how many it draws).
         let spaces = shaped_plan.as_ref().map_or_else(|| line.matches(' ').count(), |plan| plan.gaps(i));
         let tw = if justify && !ends.get(i).copied().unwrap_or(true) && spaces > 0 {
-            (width - advance(line)).max(0.0) / k / o_state.scale / spaces as f64
+            (width - line_w).max(0.0) / k / o_state.scale / spaces as f64
         } else {
             0.0
         };
         // A stretched line fills the width: from the left edge, or back from the right edge a right-to-left line is anchored at.
-        let dx = if tw > 0.0 { (right_edge - width) / k } else { offset(line) };
+        let dx = if tw > 0.0 { (right_edge - width) / k } else { offset(line_w) };
         if i > 0 || dx != 0.0 {
             block_ops.push(Op::new("Td", vec![n(dx - x), n(if i > 0 { -lead } else { 0.0 })]));
         }
@@ -2743,7 +2867,10 @@ fn rewrite_block_from(
         // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
         // (Shaped Arabic is laid out already: one span per line, in drawing order.)
         if let Some(plan) = &shaped_plan {
-            if stretch > 0.0 {
+            if let Some(pen) = &mut pen {
+                // Each run in its own look (a gap that is not positive stretches nothing).
+                block_ops.extend(plan.looked_line_ops(i, &run_looks, pen, stretch, &shows)?);
+            } else if stretch > 0.0 {
                 block_ops.extend(plan.line_ops_stretched(i, size, &mut shown_font, stretch, &latin_ops)?);
             } else {
                 block_ops.extend(plan.line_ops(i, size, &mut shown_font));
@@ -2776,7 +2903,7 @@ fn rewrite_block_from(
             }
         }
         let tw = tw + stretch;
-        let w = (advance(line) + tw * spaces as f64 * o_state.scale * k) / k;
+        let w = (line_w + tw * spaces as f64 * o_state.scale * k) / k;
         underlines.push((dx, dx + w, -(i as f64) * lead - size * 0.12));
     }
     block_ops.push(Op::new("ET", vec![]));

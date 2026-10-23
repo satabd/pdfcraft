@@ -72,6 +72,25 @@ one paragraph, formatting part of the Arabic text or choosing a document font fo
 (refused), character spacing (ignored, since it would pull joined letters apart), at most 4,096
 distinct letter shapes per edit, and embedding the face as a real font.
 
+A paragraph of several looks (runs that differ in size, fill colour or font, such as a larger
+first row or a bold red word) keeps them when it is retyped in Arabic and drawn in the craft-fonts
+face. Each character of the draft takes the look of the stored character it came from, and an
+inserted one its neighbour's (`TextBlock::edited_spans`, as the styled rewrite and the Edit text
+box have it); a stretch of right-to-left script, a word, takes the look of its first letter, so a
+look never changes inside a joined word (`text_looks`, the rule the editor's `shaper_styles`
+draws by). Each line is drawn as runs of one look: the shaped glyphs at the run's own size and in
+its fill colour, the Latin text among them in the run's own font where that has the characters
+(else the standard font of its family and weight). Each word is measured in its own look when the
+paragraph wraps, a one-row paragraph of several runs grows and keeps its right edge as a single
+line does, and Justify widens every gap of a line by the same distance, a `TJ` adjustment in the
+size of the run it follows. Every line is still one `/Span` with `/ActualText` in typing order,
+and the ToUnicode maps give the letters back. A paragraph in one look is written byte for byte
+as before. Still different: the Arabic face has one weight, so the Arabic letters of a bold run
+are drawn regular (their size and colour kept); a line written in several looks reads back as one
+run (its `/ActualText` span) in the look of its leftmost run, so editing it again starts from one
+look; the rows keep the paragraph's first line spacing; past 256 looks in one paragraph the rest
+take the first.
+
 A justified paragraph stretches every row the wrap breaks to the paragraph's width by widening the
 spaces between its words, on every route. The last row of a paragraph, a row before a line break
 (`\n`: each line of the draft is a paragraph of its own) and a row of one word are not stretched,
