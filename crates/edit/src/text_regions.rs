@@ -60,6 +60,21 @@ fn same_style(a: &TextLine, b: &TextLine) -> bool {
         && (a.size - b.size).abs() < 0.01
 }
 
+/// The runs of `row` (indexes into `lines`, as drawn along the row) in the order they read in. A row of `/ActualText`
+/// spans with right-to-left text among them (as Edit text writes a line of shaped Arabic in several looks, a span for
+/// each look) holds each run in typing order, and the runs read in the order page text extraction puts them in
+/// ([`pdfcraft_fonts::shaped_text::reading_order`]). Any other row reads as it is drawn, each run's text already put in
+/// typing order on its own.
+fn reading_row(row: &[usize], lines: &[TextLine]) -> Vec<usize> {
+    let members: Vec<&TextLine> = row.iter().filter_map(|i| lines.get(*i)).collect();
+    if members.len() < 2 || members.len() != row.len() || !members.iter().all(|l| l.actual_text) || !members.iter().any(|l| l.logical_order) {
+        return row.to_vec();
+    }
+    let texts: Vec<&str> = members.iter().map(|l| l.text.as_str()).collect();
+    let order: Vec<usize> = pdfcraft_fonts::shaped_text::reading_order(&texts).into_iter().filter_map(|k| row.get(k).copied()).collect();
+    if order.len() == row.len() { order } else { row.to_vec() }
+}
+
 fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -132,13 +147,22 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
         if !block.rows.is_empty() {
             block.editor_text.push('\n');
         }
-        for &index in &row {
+        // The runs in the order they read in; `block.lines` keeps them in the order they are drawn.
+        let reading = reading_row(&row, lines);
+        let reordered = reading != row;
+        let mut prev: Option<&TextLine> = None;
+        for &index in &reading {
             let Some(line) = lines.get(index) else { continue };
-            // Some producers position separate words without encoding a space.
-            if let Some(prev) = block.lines.last().filter(|i| row.contains(i)).and_then(|i| lines.get(*i))
+            // Some producers position separate words without encoding a space. (Runs read in another order than they are
+            // drawn in are apart by the gap between their boxes, on whichever side it is.)
+            let gap = |prev: &TextLine| {
+                let after = line.frame_rect()[0] - prev.frame_rect()[2];
+                if reordered { after.max(prev.frame_rect()[0] - line.frame_rect()[2]) } else { after }
+            };
+            if let Some(prev) = prev
                 && !row_text.ends_with(char::is_whitespace)
                 && !line.text.starts_with(char::is_whitespace)
-                && line.frame_rect()[0] - prev.frame_rect()[2] > line.size * 0.12
+                && gap(prev) > line.size * 0.12
             {
                 row_text.push(' ');
                 block.editor_text.push(' ');
@@ -148,8 +172,9 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
             block.spans.push((start..block.editor_text.len(), index));
             row_text.push_str(&line.text);
             block.invisible &= line.origin.state.render_mode == 3;
-            block.lines.push(index);
+            prev = Some(line);
         }
+        block.lines.extend(row.iter().filter(|i| lines.get(**i).is_some()));
         if !block.text.is_empty() {
             if block.text.ends_with('-') {
                 block.text.pop();

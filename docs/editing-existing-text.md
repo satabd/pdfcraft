@@ -83,9 +83,17 @@ its fill colour, the Latin text among them in the run's own font where that has 
 (else the standard font of its family and weight). Each word is measured in its own look when the
 paragraph wraps, a one-row paragraph of several runs grows and keeps its right edge as a single
 line does, and Justify widens every gap of a line by the same distance, a `TJ` adjustment in the
-size of the run it follows. Every line is still one `/Span` with `/ActualText` in typing order,
-and the ToUnicode maps give the letters back. A paragraph in one look is written byte for byte
-as before. A bold look's Arabic is bold: a look is bold when its run's font is (its name says
+size of the run it follows. A line of several looks has a `/Span` for each look, drawn one after
+another, each with `/ActualText` holding that look's characters in typing order, and the ToUnicode
+maps give the letters back. Edit text and page text extraction (copy, Find, `text_extract`) read a
+row of such spans in the same order, a simplified bidirectional pass over the spans
+(`pdfcraft_fonts::shaped_text::reading_order`): a span of right-to-left text is read right to left
+among its neighbours, Latin and numbers left to right. Two right-to-left spans side by side never
+join into one run, so a later edit reads each look back as a run of its own and keeps it. A line
+keeps one span, as before, when a look's runs are not drawn one after another (a look change
+inside a stretch of Latin text in a right-to-left line) or when its spans would read in another
+order than they were typed (as many Latin pieces as Arabic ones, which extraction takes for a
+left-to-right line). A paragraph in one look is written byte for byte as before. A bold look's Arabic is bold: a look is bold when its run's font is (its name says
 Bold, Black, Heavy, Semibold or Demi, or its descriptor has ForceBold or a FontWeight of 600 or
 more) unless a weight or family is asked for, the rule that picks the standard font of the family
 and weight for its Latin text (`text_looks::settled_bold`); a whole bold paragraph, and a bold
@@ -97,9 +105,11 @@ ToUnicode maps are what a regular run's would be. A build whose Arabic face has 
 bold Arabic regular, as before. The Edit text box draws bold Arabic at the same instance (its bold
 font is the interface's semibold faces with the Arabic face at `wght` 700, `theme::EDITOR_BOLD`),
 so a bold Arabic word is as wide in the box as on the page. Still different: italic Arabic is
-drawn upright; a line written in several looks reads back as one run (its `/ActualText` span)
-in the look of its leftmost run, so editing it again starts from one look; the rows keep the
-paragraph's first line spacing; past 256 looks in one paragraph the rest take the first.
+drawn upright; a line that keeps one span (above) reads back as one run in the look of its
+leftmost run, so editing it again starts from one look for that line; a look whose spans read
+alike (the same generated font, size and colour, only the Latin font differing) reads back as the
+look of the first; the rows keep the paragraph's first line spacing; past 256 looks in one
+paragraph the rest take the first.
 
 A justified paragraph stretches every row the wrap breaks to the paragraph's width by widening the
 spaces between its words, on every route. The last row of a paragraph, a row before a line break

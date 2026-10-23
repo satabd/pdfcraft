@@ -1198,7 +1198,7 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
             let bt = pen.bt;
             let (near, gap) = pen.continues(&s, if bt == s.bt { 3.0 } else { 1.5 });
             piece == si
-                && lines.last().is_some_and(|l| l.scope == s.scope && l.logical_order == s.logical_order)
+                && lines.last().is_some_and(|l| joins_order(l, &s))
                 && (bt == s.bt || lines.last().is_some_and(|l| compatible_word(l, &s)))
                 && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_font(l, &s.font, s.face.as_deref())))
                 && (s.text.trim().is_empty()
@@ -1275,6 +1275,13 @@ pub fn text_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditErro
     Ok(lines)
 }
 
+/// Whether run `s` may continue line `l` as far as their marked content and order go: in the same scope, and both in
+/// typing order or neither. Two right-to-left `/ActualText` spans never join: each is already in typing order, and the
+/// order they read in is that of the row they are in (see `group_layout`), as page text extraction takes it.
+fn joins_order(l: &TextLine, s: &Shown) -> bool {
+    l.scope == s.scope && l.logical_order == s.logical_order && !(l.logical_order && s.logical_order)
+}
+
 /// Joining independent text objects is safe only when they use the same text and graphics
 /// transforms and spacing. In particular, a nearby rotated label isn't part of this line.
 fn compatible_word(line: &TextLine, shown: &Shown) -> bool {
@@ -1293,7 +1300,7 @@ fn compatible_word(line: &TextLine, shown: &Shown) -> bool {
 fn add_shown(lines: &mut Vec<TextLine>, last: &mut Option<Pen>, s: Shown, stream: usize) {
     let joins = last.is_some_and(|pen| {
         let bt = pen.bt;
-        lines.last().is_some_and(|l| l.scope == s.scope && l.logical_order == s.logical_order)
+        lines.last().is_some_and(|l| joins_order(l, &s))
             && (bt == s.bt || lines.last().is_some_and(|l| compatible_word(l, &s)))
             && (s.text.trim().is_empty() || lines.last().is_some_and(|l| same_font(l, &s.font, s.face.as_deref())))
             && (s.text.trim().is_empty()
@@ -2873,7 +2880,7 @@ fn rewrite_block_from(
             tw_set = tw;
         }
         // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
-        // (Shaped Arabic is laid out already: one span per line, in drawing order.)
+        // (Shaped Arabic is laid out already: one span per line, or per look of a line of several, in drawing order.)
         if let Some(plan) = &shaped_plan {
             if let Some(pen) = &mut pen {
                 // Each run in its own look (a gap that is not positive stretches nothing).

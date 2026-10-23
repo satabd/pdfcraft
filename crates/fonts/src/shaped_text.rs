@@ -15,7 +15,9 @@
 //!   the line in typing order;
 //! - [`Measure`]: the width of a line as it will be drawn, for wrapping and alignment;
 //! - lines drawn in several looks (sizes, fill colours, Latin fonts): [`shaped_pieces_looked`], [`Measure::with_looks`],
-//!   [`plan_looked`] and [`ShapedPlan::looked_line_ops`], each piece and run in one look, the text state kept in a [`Pen`];
+//!   [`plan_looked`] and [`ShapedPlan::looked_line_ops`], each piece and run in one look, the text state kept in a [`Pen`],
+//!   and a span for each look holding its characters in typing order where the looks are drawn one after another and
+//!   [`reading_order`] (the order page text extraction reads a line's spans in) gives the line back as typed;
 //! - bold Arabic: each look has a [`Weight`] ([`shaped_pieces_weighted`], [`Measure::weighted`], [`plan_looked`]), and
 //!   a bold look's Arabic is shaped, measured and drawn at the Arabic face's bold instance (its `wght` axis at 700:
 //!   [`ShapedScript::ArabicBold`]), in Type 3 fonts of its own. A face without a `wght` axis draws it regular.
@@ -284,6 +286,12 @@ pub fn shaped_pieces_weighted(
     rtl: bool,
     shaper: &Shaper,
 ) -> Result<Vec<(usize, Piece)>, ShapedTextError> {
+    Ok(placed_pieces(line, looks, weights, rtl, shaper)?.into_iter().map(|(look, _, piece)| (look, piece)).collect())
+}
+
+/// [`shaped_pieces_weighted`] with where each piece starts in `line`: the byte offset of its first character in typing
+/// order.
+fn placed_pieces(line: &str, looks: &[usize], weights: &[Weight], rtl: bool, shaper: &Shaper) -> Result<Vec<(usize, usize, Piece)>, ShapedTextError> {
     // unicode-bidi indexes the first level of a line, so an empty one would panic.
     if line.is_empty() {
         return Ok(Vec::new());
@@ -301,19 +309,20 @@ pub fn shaped_pieces_weighted(
     for run in runs {
         let run_rtl = levels.get(run.start).is_some_and(Level::is_rtl);
         let mut next = starts.partition_point(|(at, _)| *at < run.start);
+        let run_start = run.start;
         // Runs lie on character boundaries; a missing slice is skipped, never a panic.
         let Some(text) = line.get(run) else { continue };
         // Arabic and Hebrew letters take their face; so do spaces and punctuation between them
         // (Hebrew's when they follow Hebrew), which the shaper then mirrors. Latin text (and what
         // the faces lack) keeps the caller's font.
-        let mut segments: Vec<(Option<ShapedScript>, usize, String)> = Vec::new();
-        for c in text.chars() {
+        let mut segments: Vec<(Option<ShapedScript>, usize, String, usize)> = Vec::new();
+        for (offset, c) in text.char_indices() {
             let look = starts.get(next).map_or(0, |(_, look)| *look);
             next = next.saturating_add(1);
             if is_bidi_control(c) {
                 continue;
             }
-            let after_hebrew = segments.last().is_some_and(|(kind, _, _)| *kind == Some(ShapedScript::Hebrew));
+            let after_hebrew = segments.last().is_some_and(|(kind, ..)| *kind == Some(ShapedScript::Hebrew));
             let script = if is_thai(c) {
                 Some(ShapedScript::Thai)
             } else if is_hebrew(c) || (run_rtl && after_hebrew && !c.is_alphanumeric() && (shaper.has)(ShapedScript::Hebrew, c)) {
@@ -324,16 +333,17 @@ pub fn shaped_pieces_weighted(
                 None
             };
             match segments.last_mut() {
-                Some((kind, was, s)) if *kind == script && *was == look => s.push(c),
-                _ => segments.push((script, look, c.to_string())),
+                Some((kind, was, s, _)) if *kind == script && *was == look => s.push(c),
+                _ => segments.push((script, look, c.to_string(), run_start.saturating_add(offset))),
             }
         }
         if run_rtl {
             segments.reverse();
         }
-        for (script, look, s) in segments {
+        for (script, look, s, start) in segments {
             pieces.push((
                 look,
+                start,
                 if let Some(script) = script {
                     let script = script.weighted(weight_of(weights, look));
                     let shaped = (shaper.shape)(script, &s, run_rtl).map_err(|e| script_error(script, e, &s))?;
@@ -743,7 +753,11 @@ impl Run {
 struct PlannedLine {
     /// The line in typing order: its `/ActualText`.
     logical: String,
-    runs: Vec<Run>,
+    /// The runs in drawing order, each with the part of the line it draws (see [`parts_of`]).
+    runs: Vec<(usize, Run)>,
+    /// The line's spans when it has more than one ([`split_spans`]): the runs each holds and its `/ActualText`. Empty:
+    /// one span of every run, holding `logical`.
+    spans: Vec<(std::ops::Range<usize>, String)>,
 }
 
 /// Wrapped lines laid out, with the fonts they need already added to the document.
@@ -757,9 +771,182 @@ pub struct ShapedPlan {
 }
 
 enum Staged {
-    Latin(usize, Vec<TextOp>, String),
-    /// A look, and indexes into the distinct clusters with whether each is a space.
-    Shaped(usize, Vec<(usize, bool)>),
+    /// A look, the part of the line, the operators that show the text and the text.
+    Latin(usize, usize, Vec<TextOp>, String),
+    /// A look, the part of the line, and indexes into the distinct clusters with whether each is a space.
+    Shaped(usize, usize, Vec<(usize, bool)>),
+}
+
+/// The parts of `line` drawn in one look each, as byte ranges in typing order: the longest stretches of characters of one
+/// look (`looks` holds each character's, a character past its end has look 0). A line of one look is one part.
+fn parts_of(line: &str, looks: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut parts: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    for ((at, c), look) in line.char_indices().zip(looks.iter().copied().chain(std::iter::repeat(0))) {
+        let end = at.saturating_add(c.len_utf8());
+        match parts.last_mut() {
+            Some((range, was)) if *was == look => range.end = end,
+            _ => parts.push((at..end, look)),
+        }
+    }
+    parts.into_iter().map(|(range, _)| range).collect()
+}
+
+/// The order a reader of the page puts the pieces of one line in, each piece drawn after the one before it along the
+/// baseline (in visual order) with its text already in typing order (a span's `/ActualText`): indexes into `texts` in
+/// reading order. The simplified bidirectional pass (UAX #9) that page text extraction runs over a line's glyphs, a
+/// span counting as one glyph: the line runs right to left when more of its pieces are right-to-left text than
+/// left-to-right; numbers keep their left-to-right order, and neutrals (spaces, punctuation) take the direction of their
+/// neighbours, or the line's between opposite ones.
+pub fn reading_order(texts: &[&str]) -> Vec<usize> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Bidi {
+        L,
+        R,
+        Num,
+        N,
+    }
+    let rtl_char = |c: char| matches!(u32::from(c), 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x1_0800..=0x1_0FFF | 0x1_E800..=0x1_EFFF);
+    let class = |text: &str| {
+        if text.chars().any(|c| rtl_char(c) && !c.is_numeric()) {
+            Bidi::R
+        } else if text.chars().any(char::is_numeric) {
+            Bidi::Num
+        } else if text.chars().any(char::is_alphabetic) {
+            Bidi::L
+        } else {
+            Bidi::N
+        }
+    };
+    let mut classes: Vec<Bidi> = texts.iter().map(|t| class(t)).collect();
+    let count = |classes: &[Bidi], b: Bidi| classes.iter().filter(|c| **c == b).count();
+    let para = if count(&classes, Bidi::R) > count(&classes, Bidi::L) { Bidi::R } else { Bidi::L };
+    let text = |k: usize| texts.get(k).copied().unwrap_or("");
+    let at = |classes: &[Bidi], k: usize| classes.get(k).copied().unwrap_or(Bidi::N);
+    let n = classes.len();
+    // W4: a single separator between two numbers belongs to them.
+    for k in 1..n.saturating_sub(1) {
+        let sep = matches!(text(k), "." | "," | ":" | "/" | "+" | "-" | "\u{066B}" | "\u{066C}");
+        if sep
+            && at(&classes, k - 1) == Bidi::Num
+            && at(&classes, k + 1) == Bidi::Num
+            && let Some(c) = classes.get_mut(k)
+        {
+            *c = Bidi::Num;
+        }
+    }
+    // W5: terminators (percent, currency) next to a number belong to it.
+    let term =
+        |s: &str| !s.is_empty() && s.chars().all(|c| matches!(c, '%' | '‰' | '#' | '$' | '¢'..='¥' | '°' | '\u{066A}' | '\u{20A0}'..='\u{20CF}'));
+    for k in 1..n {
+        if at(&classes, k) == Bidi::N
+            && at(&classes, k - 1) == Bidi::Num
+            && term(text(k))
+            && let Some(c) = classes.get_mut(k)
+        {
+            *c = Bidi::Num;
+        }
+    }
+    for k in (0..n.saturating_sub(1)).rev() {
+        if at(&classes, k) == Bidi::N
+            && at(&classes, k + 1) == Bidi::Num
+            && term(text(k))
+            && let Some(c) = classes.get_mut(k)
+        {
+            *c = Bidi::Num;
+        }
+    }
+    // W7: a number after left-to-right text (or at the start of a left-to-right line) is left-to-right.
+    let mut strong = para;
+    for c in &mut classes {
+        match *c {
+            Bidi::L | Bidi::R => strong = *c,
+            Bidi::Num if strong == Bidi::L => *c = Bidi::L,
+            _ => {}
+        }
+    }
+    // N1/N2: neutrals between text of one direction take it (numbers count as right-to-left), else the line's.
+    let dir = |b: Bidi| if b == Bidi::L { Bidi::L } else { Bidi::R };
+    let mut k = 0;
+    while k < n {
+        if at(&classes, k) != Bidi::N {
+            k += 1;
+            continue;
+        }
+        let mut e = k;
+        while e < n && at(&classes, e) == Bidi::N {
+            e += 1;
+        }
+        let before = if k == 0 { para } else { dir(at(&classes, k - 1)) };
+        let after = if e == n { para } else { dir(at(&classes, e)) };
+        let resolved = if before == after { before } else { para };
+        for c in classes.get_mut(k..e).unwrap_or_default() {
+            *c = resolved;
+        }
+        k = e;
+    }
+    // Levels (I1/I2), then L2: every run at or above each level reversed, the highest first.
+    let rtl_para = para == Bidi::R;
+    let levels: Vec<u8> = classes
+        .iter()
+        .map(|c| match c {
+            Bidi::R => 1,
+            Bidi::Num => 2,
+            _ if rtl_para => 2,
+            _ => 0,
+        })
+        .collect();
+    let level_of = |i: usize| levels.get(i).copied().unwrap_or(0);
+    let mut order: Vec<usize> = (0..n).collect();
+    for level in (1..=levels.iter().copied().max().unwrap_or(0)).rev() {
+        let mut k = 0;
+        while k < n {
+            if order.get(k).is_none_or(|i| level_of(*i) < level) {
+                k += 1;
+                continue;
+            }
+            let mut e = k;
+            while order.get(e).is_some_and(|i| level_of(*i) >= level) {
+                e += 1;
+            }
+            if let Some(run) = order.get_mut(k..e) {
+                run.reverse();
+            }
+            k = e;
+        }
+    }
+    order
+}
+
+/// The spans of a planned line drawn in several looks: one for each part of the line (see [`parts_of`]), holding the runs
+/// that draw it and the part's text, so that each look reads back as a run of its own. A line gets them only when the
+/// runs of each part are drawn one after another and the parts, read in [`reading_order`], give the line as it was typed;
+/// otherwise (and for a line of one part) none, and the line is one span.
+fn split_spans(logical: &str, parts: &[std::ops::Range<usize>], runs: &[(usize, Run)]) -> Vec<(std::ops::Range<usize>, String)> {
+    if parts.len() < 2 {
+        return Vec::new();
+    }
+    // The runs of each part, one after another.
+    let mut groups: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    for (i, (part, _)) in runs.iter().enumerate() {
+        match groups.last_mut() {
+            Some((range, was)) if *was == *part => range.end = i.saturating_add(1),
+            _ => groups.push((i..i.saturating_add(1), *part)),
+        }
+    }
+    if groups.len() < 2 {
+        return Vec::new();
+    }
+    let mut seen = vec![false; parts.len()];
+    let mut spans = Vec::with_capacity(groups.len());
+    for (range, part) in groups {
+        let Some(slot) = seen.get_mut(part).filter(|s| !**s) else { return Vec::new() };
+        *slot = true;
+        let Some(text) = parts.get(part).and_then(|r| logical.get(r.clone())) else { return Vec::new() };
+        spans.push((range, text.to_owned()));
+    }
+    let texts: Vec<&str> = spans.iter().map(|(_, t)| t.as_str()).collect();
+    let read: String = reading_order(&texts).into_iter().filter_map(|k| texts.get(k).copied()).collect();
+    if read == logical { spans } else { Vec::new() }
 }
 
 /// The look a run of a planned line is drawn in (see [`ShapedPlan::looked_line_ops`]): its font size and the
@@ -837,6 +1024,11 @@ pub fn plan_directed(
 /// `weights[i]` (a look past the end of either with the first's; no weight at all, regular). A bold look's Arabic is
 /// drawn from Type 3 fonts of its own (the resource name's prefix and object number followed by `B`), built from the
 /// face's bold outlines. Everything that can fail does so before `doc` is touched.
+///
+/// A line of several looks is drawn in a span for each look (each part of it in one look, see `parts_of`), holding the
+/// look's characters in typing order, so that a reader takes each look as a run of its own. It is one span, as a line of
+/// one look is, when the runs of a look are not drawn one after another or the spans read in [`reading_order`] would not
+/// give the line as it was typed.
 pub fn plan_looked(
     doc: &mut Document,
     fonts_res: &mut Dict,
@@ -849,7 +1041,12 @@ pub fn plan_looked(
     let shaper = current_shaper();
     let mut laid = Vec::with_capacity(lines.len());
     for (line, looks) in lines {
-        laid.push((line.clone(), shaped_pieces_weighted(line, looks, weights, rtl, &shaper)?));
+        let parts = parts_of(line, looks);
+        let pieces = placed_pieces(line, looks, weights, rtl, &shaper)?
+            .into_iter()
+            .map(|(look, start, piece)| (look, parts.partition_point(|r| r.end <= start), piece))
+            .collect();
+        laid.push((line.clone(), parts, pieces));
     }
     plan_looked_pieces(doc, fonts_res, laid, fonts, latins)
 }
@@ -865,15 +1062,19 @@ pub fn plan_pieces(
     fonts: PlanFonts,
     latin: &LatinShow,
 ) -> Result<ShapedPlan, ShapedTextError> {
-    let laid = laid.into_iter().map(|(line, pieces)| (line, pieces.into_iter().map(|piece| (0, piece)).collect())).collect();
+    let laid = laid.into_iter().map(|(line, pieces)| (line, Vec::new(), pieces.into_iter().map(|piece| (0, 0, piece)).collect())).collect();
     plan_looked_pieces(doc, fonts_res, laid, fonts, std::slice::from_ref(latin))
 }
+
+/// A line laid out: its text in typing order, its parts (see [`parts_of`]; none: one), and its pieces in drawing order,
+/// each with its look and the part it draws.
+type Laid = (String, Vec<std::ops::Range<usize>>, Vec<(usize, usize, Piece)>);
 
 /// [`plan_pieces`] with each piece in a look of its own (see [`plan_looked`]).
 fn plan_looked_pieces(
     doc: &mut Document,
     fonts_res: &mut Dict,
-    laid: Vec<(String, Vec<(usize, Piece)>)>,
+    laid: Vec<Laid>,
     fonts: PlanFonts,
     latins: &[LatinShow],
 ) -> Result<ShapedPlan, ShapedTextError> {
@@ -881,14 +1082,14 @@ fn plan_looked_pieces(
     let mut keys: Vec<&ShapedCluster> = Vec::new();
     let mut index: HashMap<ClusterKey, usize> = HashMap::new();
     let mut staged: Vec<Vec<Staged>> = Vec::with_capacity(laid.len());
-    for (_, pieces) in &laid {
+    for (_, _, pieces) in &laid {
         let mut row = Vec::with_capacity(pieces.len());
-        for (look, piece) in pieces {
+        for (look, part, piece) in pieces {
             match piece {
                 Piece::Latin(s) => {
                     let latin =
                         latins.get(*look).or_else(|| latins.first()).ok_or_else(|| ShapedTextError("no font to show Latin text in".into()))?;
-                    row.push(Staged::Latin(*look, (latin.show)(s)?, s.clone()));
+                    row.push(Staged::Latin(*look, *part, (latin.show)(s)?, s.clone()));
                 }
                 Piece::Shaped(clusters) => {
                     let mut ks = Vec::with_capacity(clusters.len());
@@ -912,7 +1113,7 @@ fn plan_looked_pieces(
                         };
                         ks.push((k, c.text == " "));
                     }
-                    row.push(Staged::Shaped(*look, ks));
+                    row.push(Staged::Shaped(*look, *part, ks));
                 }
             }
         }
@@ -967,26 +1168,27 @@ fn plan_looked_pieces(
     }
 
     let mut planned = Vec::with_capacity(laid.len());
-    for ((line, _), row) in laid.iter().zip(staged) {
-        let mut runs: Vec<Run> = Vec::new();
+    for ((line, parts, _), row) in laid.iter().zip(staged) {
+        let mut runs: Vec<(usize, Run)> = Vec::new();
         for item in row {
             match item {
-                Staged::Latin(look, ops, text) => runs.push(Run::Latin(look, ops, text)),
-                Staged::Shaped(look, ks) => {
+                Staged::Latin(look, part, ops, text) => runs.push((part, Run::Latin(look, ops, text))),
+                Staged::Shaped(look, part, ks) => {
                     for (k, space) in ks {
                         let Some(&(font, code)) = slots.get(k) else { continue };
                         match runs.last_mut() {
-                            Some(Run::Shaped(l, f, codes, spaces)) if *f == font && *l == look => {
+                            Some((p, Run::Shaped(l, f, codes, spaces))) if *f == font && *l == look && *p == part => {
                                 codes.push(code);
                                 spaces.push(space);
                             }
-                            _ => runs.push(Run::Shaped(look, font, vec![code], vec![space])),
+                            _ => runs.push((part, Run::Shaped(look, font, vec![code], vec![space]))),
                         }
                     }
                 }
             }
         }
-        planned.push(PlannedLine { logical: line.clone(), runs });
+        let spans = split_spans(line, parts, &runs);
+        planned.push(PlannedLine { logical: line.clone(), runs, spans });
     }
     let family = ShapedScript::Arabic.font().map_or("Arabic", |f| f.family).to_owned();
     Ok(ShapedPlan { names, latin_fonts: latins.iter().map(|l| l.font.to_owned()).collect(), lines: planned, family })
@@ -1009,22 +1211,35 @@ impl ShapedPlan {
     }
 
     /// [`Self::line_ops`] for a plan of several looks ([`plan_looked`]): each run is drawn in `looks[its look]` (a look
-    /// past the end in the first), its fill colour and size set where they change. `pen` is the text state, and holds the
+    /// past the end in the first), its fill colour and size set where they change, in a span for each look where the
+    /// plan gave the line those (see [`plan_looked`]). `pen` is the text state, and holds the
     /// last font, size and fill afterwards. No look at all draws nothing.
     pub fn looked_line_ops(&self, i: usize, looks: &[RunLook], pen: &mut Pen) -> Vec<TextOp> {
         let Some(line) = self.lines.get(i).filter(|l| !l.runs.is_empty()) else { return Vec::new() };
         if looks.is_empty() {
             return Vec::new();
         }
-        let mut ops = vec![Self::span(line)];
-        ops.extend(self.run_ops(line, looks, pen));
-        ops.push(TextOp::new("EMC", vec![]));
+        let mut ops = Vec::new();
+        for (runs, text) in Self::spans(line) {
+            ops.push(Self::span(text));
+            ops.extend(self.run_ops(runs, looks, pen));
+            ops.push(TextOp::new("EMC", vec![]));
+        }
         ops
     }
 
-    fn span(line: &PlannedLine) -> TextOp {
+    /// The spans line `line` is drawn in, in drawing order: the runs each holds and its `/ActualText` (one span of the
+    /// whole line unless [`split_spans`] gave it several).
+    fn spans(line: &PlannedLine) -> Vec<(&[(usize, Run)], &str)> {
+        if line.spans.is_empty() {
+            return vec![(line.runs.as_slice(), line.logical.as_str())];
+        }
+        line.spans.iter().map(|(range, text)| (line.runs.get(range.clone()).unwrap_or_default(), text.as_str())).collect()
+    }
+
+    fn span(text: &str) -> TextOp {
         let mut bytes = vec![0xFE, 0xFF];
-        for unit in line.logical.encode_utf16() {
+        for unit in text.encode_utf16() {
             bytes.extend_from_slice(&unit.to_be_bytes());
         }
         let mut properties = Dict::new();
@@ -1038,7 +1253,7 @@ impl ShapedPlan {
         let Some(line) = self.lines.get(i) else { return 0 };
         line.runs
             .iter()
-            .map(|run| match run {
+            .map(|(_, run)| match run {
                 Run::Latin(_, _, text) => text.matches(' ').count(),
                 Run::Shaped(_, _, _, spaces) => spaces.iter().filter(|s| **s).count(),
             })
@@ -1075,13 +1290,32 @@ impl ShapedPlan {
             return Ok(self.looked_line_ops(i, looks, pen));
         }
         let Some(line) = self.lines.get(i).filter(|l| !l.runs.is_empty()) else { return Ok(Vec::new()) };
-        let mut ops = vec![Self::span(line)];
-        for run in &line.runs {
+        let mut ops = Vec::new();
+        for (runs, text) in Self::spans(line) {
+            ops.push(Self::span(text));
+            self.stretched_runs(&mut ops, runs, looks, pen, &adjustment, shows)?;
+            ops.push(TextOp::new("EMC", vec![]));
+        }
+        Ok(ops)
+    }
+
+    /// The operators of [`Self::looked_line_ops_stretched`] that draw `runs`, each gap widened by `adjustment` of the size
+    /// of the run it is in.
+    fn stretched_runs(
+        &self,
+        ops: &mut Vec<TextOp>,
+        runs: &[(usize, Run)],
+        looks: &[RunLook],
+        pen: &mut Pen,
+        adjustment: &dyn Fn(f64) -> f64,
+        shows: &[LatinOps],
+    ) -> Result<(), ShapedTextError> {
+        for (_, run) in runs {
             // (`looks` is not empty, checked above)
             let Some(look) = looks.get(run.look()).or_else(|| looks.first()) else { continue };
             match run {
                 Run::Latin(look_index, shown, text) => {
-                    pen.select(&mut ops, self.latin_font(*look_index), look);
+                    pen.select(ops, self.latin_font(*look_index), look);
                     if text.contains(' ') {
                         let show = shows
                             .get(*look_index)
@@ -1099,7 +1333,7 @@ impl ShapedPlan {
                 }
                 Run::Shaped(_, font, codes, spaces) => {
                     let Some(name) = self.names.get(*font) else { continue };
-                    pen.select(&mut ops, name, look);
+                    pen.select(ops, name, look);
                     if spaces.iter().any(|s| *s) {
                         let mut array = Vec::new();
                         let mut word = Vec::new();
@@ -1120,8 +1354,7 @@ impl ShapedPlan {
                 }
             }
         }
-        ops.push(TextOp::new("EMC", vec![]));
-        Ok(ops)
+        Ok(())
     }
 
     /// [`Self::line_ops`] without the span: the operators that show planned line `i`, for a caller
@@ -1129,7 +1362,7 @@ impl ShapedPlan {
     pub fn bare_ops(&self, i: usize, size: f64, current: &mut String) -> Vec<TextOp> {
         let Some(line) = self.lines.get(i) else { return Vec::new() };
         let mut pen = Pen { font: std::mem::take(current), size, fill: Vec::new() };
-        let ops = self.run_ops(line, &[RunLook { size, fill: &[] }], &mut pen);
+        let ops = self.run_ops(&line.runs, &[RunLook { size, fill: &[] }], &mut pen);
         *current = pen.font;
         ops
     }
@@ -1139,9 +1372,9 @@ impl ShapedPlan {
         self.latin_fonts.get(look).or_else(|| self.latin_fonts.first()).map_or("", String::as_str)
     }
 
-    fn run_ops(&self, line: &PlannedLine, looks: &[RunLook], pen: &mut Pen) -> Vec<TextOp> {
+    fn run_ops(&self, runs: &[(usize, Run)], looks: &[RunLook], pen: &mut Pen) -> Vec<TextOp> {
         let mut ops = Vec::new();
-        for run in &line.runs {
+        for (_, run) in runs {
             let Some(look) = looks.get(run.look()).or_else(|| looks.first()) else { continue };
             match run {
                 Run::Latin(look_index, shown, _) => {
@@ -1296,6 +1529,51 @@ mod stretch_tests {
         plan
     }
 
+    /// The `/ActualText` of each span `ops` open, in order.
+    fn spans_of(ops: &[TextOp]) -> Vec<String> {
+        ops.iter()
+            .filter(|op| op.operator == b"BDC")
+            .filter_map(|op| match op.operands.get(1) {
+                Some(Object::Dict(d)) => match d.get(b"ActualText") {
+                    Some(Object::String(s)) => Some(s.to_text()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pieces_read_in_the_order_page_text_extraction_puts_them_in() {
+        assert!(reading_order(&[]).is_empty());
+        assert_eq!(reading_order(&["ab", "cd"]), [0, 1]);
+        // Right-to-left pieces drawn left to right are read right to left, with the Latin ones among them left to right.
+        assert_eq!(reading_order(&["\u{628}", "\u{627} "]), [1, 0]);
+        assert_eq!(reading_order(&["\u{628}", "ab", "cd ", "\u{627} ", "\u{62A} "]), [4, 3, 1, 2, 0]);
+        // As many pieces of each: the line is left to right, as extraction takes it.
+        assert_eq!(reading_order(&["ab ", "\u{627}"]), [0, 1]);
+        // Numbers keep their order; a separator between two belongs to them.
+        assert_eq!(reading_order(&["\u{628} ", "12", ".", "5", " \u{627}"]), [4, 1, 2, 3, 0]);
+        let hostile: Vec<String> = (0..5_000).map(|i| if i % 3 == 0 { "\u{627}".to_owned() } else { format!("{i}") }).collect();
+        let texts: Vec<&str> = hostile.iter().map(String::as_str).collect();
+        let mut order = reading_order(&texts);
+        order.sort_unstable();
+        assert_eq!(order, (0..5_000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_line_whose_looks_interleave_as_drawn_keeps_one_span() {
+        // `اب AB` in look 0 and ` CD اب` in look 1, right to left: drawn `اب`, `AB`, ` CD`, `اب`, the looks in turn.
+        let line = "\u{627}\u{628} AB CD \u{627}\u{628}";
+        let plan = looked(&[(line, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1])]);
+        let looks = [RunLook { size: 10.0, fill: &[] }, RunLook { size: 20.0, fill: &[] }];
+        let ops = plan.looked_line_ops(0, &looks, &mut Pen::default());
+        assert_eq!(spans_of(&ops), [line]);
+        // A line of one look is one span whatever its scripts.
+        let plan = looked(&[(line, Vec::new())]);
+        assert_eq!(spans_of(&plan.looked_line_ops(0, &looks, &mut Pen::default())), [line]);
+    }
+
     #[test]
     fn pieces_end_where_the_look_changes_and_one_look_cuts_nothing() {
         let shaper = LETTERS;
@@ -1329,8 +1607,9 @@ mod stretch_tests {
         // The Latin word of look 1 in its font F8 at 20, in red; its shaped word; then look 0 at 10 in black.
         assert_eq!(states, ["rg [1.0, 0.0, 0.0]", "Tf [-1.0, 20.0]", "Tf [-1.0, 20.0]", "g [0.0]", "Tf [-1.0, 10.0]"], "{ops:?}");
         assert!(pen.font.starts_with("PCT") && pen.size == 10.0 && pen.fill == black, "{pen:?}");
-        // One span; the gaps of the whole line, whatever their looks.
-        assert_eq!(ops.iter().filter(|op| op.operator == b"BDC").count(), 1);
+        // A span for each look, in drawing order, each holding its part of the line in typing order; the gaps of the whole
+        // line, whatever their looks.
+        assert_eq!(spans_of(&ops), ["\u{627}\u{628} ab", "\u{627}\u{628} "]);
         assert_eq!(plan.gaps(0), 2);
         // Stretched, each gap is the same distance: an adjustment in the size of the run it follows.
         let mut pen = Pen { font: String::new(), size: 10.0, fill: black.to_vec() };

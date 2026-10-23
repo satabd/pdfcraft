@@ -77,6 +77,36 @@ fn actual_texts(doc: &Document) -> Vec<String> {
         .collect()
 }
 
+/// The `/ActualText` of each line the page draws (the spans after one move of the text position), its spans read in the
+/// order page text extraction reads them ([`pdfcraft_fonts::shaped_text::reading_order`]): the line as copy and search
+/// take it.
+fn read_lines(doc: &Document) -> Vec<String> {
+    let mut lines: Vec<Vec<String>> = Vec::new();
+    let mut moved = true;
+    for op in ops(doc) {
+        if ["BT", "Td", "TD", "Tm", "T*"].iter().any(|name| op.is(name)) {
+            moved = true;
+        } else if op.is("BDC")
+            && let Some(Object::Dict(d)) = op.operands.get(1)
+            && let Some(Object::String(text)) = d.get(b"ActualText")
+        {
+            if std::mem::take(&mut moved) {
+                lines.push(Vec::new());
+            }
+            if let Some(line) = lines.last_mut() {
+                line.push(text.to_text());
+            }
+        }
+    }
+    lines
+        .iter()
+        .map(|spans| {
+            let texts: Vec<&str> = spans.iter().map(String::as_str).collect();
+            pdfcraft_fonts::shaped_text::reading_order(&texts).into_iter().map(|k| texts[k]).collect()
+        })
+        .collect()
+}
+
 /// What each string the paragraph shows is drawn in, in drawing order: the font resource, the size and the fill colour
 /// operator in force (`""` for the initial black).
 fn shown(doc: &Document) -> Vec<(String, f64, String)> {
@@ -132,8 +162,9 @@ fn a_retyped_paragraph_of_two_sizes_keeps_each_words_size() {
     text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
     // Drawn right to left: the last word typed is drawn first, at 18 pt (with its space), then the first at 12.
     assert_eq!(arabic_sizes(&doc), [18.0, 12.0], "{:?}", shown(&doc));
-    // One span, the line in typing order.
-    assert_eq!(actual_texts(&doc), [typed.as_str()]);
+    // A span for each look, in drawing order, each in typing order: read right to left, the line as typed.
+    assert_eq!(actual_texts(&doc), [" بالعالم", "مسممس"]);
+    assert_eq!(read_lines(&doc), [typed.as_str()]);
     // It reads back as typed: the generated fonts' ToUnicode maps give back every letter once.
     assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text, typed);
     // The row keeps its right edge, as a right-to-left row does.
@@ -212,7 +243,7 @@ fn wrapping_measures_each_word_in_its_own_size() {
     for (text, rect) in &rows {
         assert!(rect[2] - rect[0] <= 100.5, "a row no wider than the box: {text:?} {rect:?}");
     }
-    assert_eq!(actual_texts(&doc).join(" "), typed);
+    assert_eq!(read_lines(&doc).join(" "), typed);
 }
 
 #[test]
@@ -234,7 +265,7 @@ fn a_justified_paragraph_of_two_looks_is_stretched_to_its_width() {
     assert!(arabic_sizes(&doc).len() >= 2, "{:?}", shown(&doc));
     assert!(ops(&doc).iter().any(|o| o.is("TJ")));
     // The text is what it was: the lines in typing order.
-    assert_eq!(actual_texts(&doc).join(" "), words(&typed));
+    assert_eq!(read_lines(&doc).join(" "), words(&typed));
     // The layout the editor is given reports those rows.
     let draft = two_sizes();
     let layout = text::text_edit_layout(&draft, 0, 0, &typed, &style).expect("layout");
@@ -285,7 +316,7 @@ fn a_look_change_at_every_character_stays_bounded_and_never_panics() {
                     written += 1;
                     let bytes = page_content_bytes(&doc, 0).len();
                     assert!(bytes < 4_000_000, "{bytes} bytes for {} characters", typed.chars().count());
-                    let read: String = actual_texts(&doc).concat();
+                    let read: String = read_lines(&doc).concat();
                     assert_eq!(read.split_whitespace().collect::<String>(), typed.split_whitespace().collect::<String>());
                 }
                 Err(e) => assert!(!e.to_string().is_empty()),
@@ -307,7 +338,8 @@ fn the_real_face_keeps_two_sizes() {
     let typed = format!("{}بالعالم", editor_text(&doc));
     text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
     assert_eq!(arabic_sizes(&doc), [18.0, 12.0], "{:?}", shown(&doc));
-    assert_eq!(actual_texts(&doc), [typed.as_str()]);
+    assert_eq!(actual_texts(&doc), [" بالعالم", "مسممس"]);
+    assert_eq!(read_lines(&doc), [typed.as_str()]);
     assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text, typed);
 }
 
@@ -362,8 +394,9 @@ fn a_bold_run_retyped_in_arabic_is_drawn_from_bold_fonts_and_the_regular_run_fro
     let (bold_widths, regular_widths) = (widths(&bold_font), widths(&regular_font));
     assert!(!bold_widths.is_empty() && bold_widths.iter().all(|w| regular_advances.contains(&(w / 1.2).round())), "{bold_widths:?}");
     assert!(regular_widths.iter().all(|w| regular_advances.contains(w)), "{regular_widths:?}");
-    // The text is what it was: one span in typing order, and the ToUnicode maps give back every letter once.
-    assert_eq!(actual_texts(&doc), [typed.as_str()]);
+    // The text is what it was: a span for each look, read in typing order, and the ToUnicode maps give back every letter once.
+    assert_eq!(actual_texts(&doc), [" بالعالم", "مسممس"]);
+    assert_eq!(read_lines(&doc), [typed.as_str()]);
     assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text, typed);
 }
 
@@ -419,7 +452,7 @@ fn a_weight_change_at_every_word_stays_bounded() {
                     // Both weights are drawn, each from fonts of its own.
                     let fonts = arabic_fonts(&doc);
                     assert!(fonts.iter().any(|f| f.ends_with('B')) && fonts.iter().any(|f| !f.ends_with('B')), "{:?}", &fonts[..fonts.len().min(8)]);
-                    let read: String = actual_texts(&doc).concat();
+                    let read: String = read_lines(&doc).concat();
                     assert_eq!(read.split_whitespace().collect::<String>(), typed.split_whitespace().collect::<String>());
                 }
                 Err(e) => assert!(!e.to_string().is_empty()),
@@ -456,4 +489,200 @@ fn the_real_face_draws_a_bold_run_at_its_bold_instance() {
     let (bold, bold_width) = written("F2");
     assert!(!regular.ends_with('B') && bold.ends_with('B'), "{regular} {bold}");
     assert!(bold_width > regular_width * 1.02, "{bold_width} against {regular_width}");
+}
+
+// ---- read back ----
+
+/// Each run of paragraph 0 of `doc` as it reads back, in reading order: its text in the editor, and the size, weight and
+/// fill colour of the run it comes from.
+fn read_looks(doc: &Document) -> Vec<(String, f64, bool, [f64; 3])> {
+    let lines = text::text_lines(doc, 0).expect("lines");
+    let block = text::text_blocks(doc, 0).expect("blocks").remove(0);
+    block
+        .spans
+        .iter()
+        .map(|(range, line)| {
+            let line = &lines[*line];
+            (block.editor_text[range.clone()].to_owned(), line.size, line.bold, line.color)
+        })
+        .collect()
+}
+
+/// What each string the page shows is drawn in, as [`shown`] gives it, with each generated Arabic font as its weight
+/// (their names follow object numbers, which a second edit changes).
+fn drawn_looks(doc: &Document) -> Vec<(String, f64, String)> {
+    shown(doc)
+        .into_iter()
+        .map(|(font, size, fill)| {
+            let font = match font {
+                f if f.starts_with("PCEdAr") && f.ends_with('B') => "Arabic bold".to_owned(),
+                f if f.starts_with("PCEdAr") => "Arabic".to_owned(),
+                f => f,
+            };
+            (font, size, fill)
+        })
+        .collect()
+}
+
+/// The text of page 0 as copy and Find read it.
+fn page_text(doc: &Document) -> pdfcraft_render::PageText {
+    let bytes = pdfcraft_cos::write_incremental(doc, &pdfcraft_cos::SaveOptions::default()).expect("saves");
+    let mut renderer = pdfcraft_render::PageRenderer::new(std::sync::Arc::new(bytes), pdfcraft_render::RenderConfig::default());
+    renderer.filtered_text(0, pdfcraft_render::text::TextFilter::default()).expect("page text")
+}
+
+#[test]
+fn a_paragraph_of_two_looks_reads_back_with_its_looks() {
+    let _face = fake();
+    for (source, second) in [(two_sizes(), (18.0, false, [0.0; 3])), (bold_red(), (12.0, true, [1.0, 0.0, 0.0]))] {
+        let mut doc = source;
+        let typed = format!("{}بالعالم", editor_text(&doc));
+        text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
+        let doc = reopen(&doc);
+        // The first word in the paragraph's first look, the space and the typed word in the second run's.
+        assert_eq!(
+            read_looks(&doc),
+            [("مسممس".to_owned(), 12.0, false, [0.0; 3]), (" بالعالم".to_owned(), second.0, second.1, second.2)],
+            "{:?}",
+            shown(&doc)
+        );
+        let block = text::text_blocks(&doc, 0).expect("blocks").remove(0);
+        assert_eq!((block.editor_text.as_str(), block.text.as_str()), (typed.as_str(), typed.as_str()));
+    }
+}
+
+#[test]
+fn a_paragraph_of_two_looks_retyped_twice_keeps_both() {
+    let _face = fake();
+    for source in [two_sizes(), bold_red()] {
+        let mut doc = source;
+        let typed = format!("{}بالعالم", editor_text(&doc));
+        text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
+        let mut doc = reopen(&doc);
+        let once = drawn_looks(&doc);
+        let looks = read_looks(&doc);
+        // The second word changed: it keeps its look, and the first word its own.
+        let again = typed.replace("بالعالم", "سلام");
+        text::replace_block(&mut doc, 0, 0, &again).expect("writes again");
+        let doc = reopen(&doc);
+        assert_eq!(drawn_looks(&doc), once, "{:?}", shown(&doc));
+        let read: Vec<_> = read_looks(&doc).into_iter().map(|(_, size, bold, color)| (size, bold, color)).collect();
+        assert_eq!(read, looks.iter().map(|(_, size, bold, color)| (*size, *bold, *color)).collect::<Vec<_>>());
+        assert_eq!(text::text_blocks(&doc, 0).expect("blocks")[0].text, again);
+        assert_eq!(read_lines(&doc), [again.as_str()]);
+    }
+}
+
+#[test]
+fn page_text_reads_a_paragraph_of_two_looks_as_it_reads_one_of_one_look() {
+    let _face = fake();
+    let typed = "مسممس بالعالم";
+    let written = |source: Document| {
+        let mut doc = source;
+        text::replace_block(&mut doc, 0, 0, typed).expect("writes");
+        doc
+    };
+    let (two, one) = (written(two_sizes()), written(looks_page("BT /F1 12 Tf 300 700 Td (BAB) Tj ( AB) Tj ET")));
+    assert_eq!((actual_texts(&two).len(), actual_texts(&one).len()), (2, 1));
+    let (two_text, one_text) = (page_text(&two), page_text(&one));
+    assert_eq!(two_text.plain_text().trim(), typed);
+    assert_eq!(two_text.plain_text(), one_text.plain_text());
+    // Find finds each word, and the two across the look change.
+    for word in ["مسممس", "بالعالم", typed] {
+        assert_eq!(two_text.find(word).len(), 1, "{word}");
+    }
+    // Bold and red too, and a line whose looks are a Latin and an Arabic piece, which extraction would read the wrong
+    // way round as two spans: it keeps one, and reads as typed.
+    for (draft, spans) in [(typed.to_owned(), 2), (format!("{}PDF", editor_text(&bold_red())), 1)] {
+        let mut doc = bold_red();
+        text::replace_block(&mut doc, 0, 0, &draft).expect("writes");
+        assert_eq!(actual_texts(&doc).len(), spans, "{draft}");
+        assert_eq!(page_text(&doc).plain_text().trim(), draft);
+        assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text, draft);
+    }
+}
+
+#[test]
+fn the_glyphs_of_a_paragraph_of_two_looks_still_read_as_typed_without_its_spans() {
+    let _face = fake();
+    let mut doc = two_sizes();
+    let typed = format!("{}بالعالم", editor_text(&doc));
+    text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
+    // A reader that ignores `/ActualText` reads the generated fonts' ToUnicode maps: every letter once.
+    let bare: Vec<Op> = ops(&doc).into_iter().filter(|op| !op.is("BDC") && !op.is("EMC")).collect();
+    let mut stripped = doc.clone();
+    let page = pdfcraft_model::pages(&stripped)[0].obj;
+    let contents = stripped.add(Object::Stream(pdfcraft_cos::Stream::from_raw(pdfcraft_cos::Dict::new(), pdfcraft_content::serialize_ops(&bare))));
+    stripped.update_dict(page, |d| d.set(b"Contents".to_vec(), Object::Ref(contents))).expect("updates");
+    let letters = |text: &str| {
+        let mut letters: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+        letters.sort_unstable();
+        letters
+    };
+    let read: String = text::text_lines(&stripped, 0).expect("lines").iter().map(|l| l.text.clone()).collect();
+    assert!(!read.is_empty());
+    assert_eq!(letters(&read), letters(&typed), "{read:?}");
+}
+
+#[test]
+fn a_look_change_at_every_word_reads_back_and_retypes_bounded() {
+    let _face = fake();
+    // 3,000 runs: Arabic words of one letter, regular and bold in turn, the spaces between them in the weight before.
+    let mut content = String::from("BT /F1 12 Tf 30 700 Td ");
+    for i in 0..3_000 {
+        content.push_str(if i % 2 == 0 { "/F1 12 Tf (B ) Tj " } else { "/F2 12 Tf (A ) Tj " });
+    }
+    content.push_str("ET");
+    let mut doc = looks_page(&content);
+    let typed = format!("{}سم", editor_text(&doc));
+    let started = std::time::Instant::now();
+    text::rewrite_block(&mut doc, 0, 0, Some(&typed), &BlockStyle::default()).expect("writes");
+    let doc = reopen(&doc);
+    let block = text::text_blocks(&doc, 0).expect("blocks").remove(0);
+    assert_eq!(words(&block.text), words(&typed));
+    // Both weights read back, a run for each word (with its space), and a second edit keeps them.
+    let looks = read_looks(&doc);
+    assert!(looks.len() > 2_900 && looks.iter().filter(|l| l.2).count() > 1_400, "{} {:?}", looks.len(), &looks[..looks.len().min(8)]);
+    assert!(looks.windows(2).filter(|pair| pair[0].2 != pair[1].2).count() > 2_800, "{:?}", &looks[..looks.len().min(8)]);
+    let mut again = doc.clone();
+    let retyped = format!("{} بالعالم", block.editor_text);
+    text::rewrite_block(&mut again, 0, 0, Some(&retyped), &BlockStyle::default()).expect("writes again");
+    let fonts = arabic_fonts(&again);
+    assert!(fonts.iter().any(|f| f.ends_with('B')) && fonts.iter().any(|f| !f.ends_with('B')), "{:?}", &fonts[..fonts.len().min(8)]);
+    assert_eq!(words(&read_lines(&again).join(" ")), words(&retyped));
+    assert!(started.elapsed().as_secs() < 60, "{:?}", started.elapsed());
+}
+
+#[test]
+fn the_real_face_reads_two_looks_back_and_keeps_them_retyped() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("built without a craft-fonts Arabic face: the real-face check needs CRAFT_FONTS_DIR");
+        return;
+    }
+    let mut doc = bold_red();
+    let typed = format!("{}بالعالم", editor_text(&doc));
+    text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
+    let doc = reopen(&doc);
+    assert_eq!(read_lines(&doc), [typed.as_str()]);
+    assert_eq!(page_text(&doc).plain_text().trim(), typed);
+    let looks: Vec<_> = read_looks(&doc).into_iter().map(|(_, _, bold, color)| (bold, color)).collect();
+    assert_eq!(looks, [(false, [0.0; 3]), (true, [1.0, 0.0, 0.0])]);
+    let mut again = doc.clone();
+    let retyped = typed.replace("بالعالم", "سلام");
+    text::replace_block(&mut again, 0, 0, &retyped).expect("writes again");
+    assert_eq!(drawn_looks(&again), drawn_looks(&doc));
+    assert_eq!(text::text_blocks(&reopen(&again), 0).expect("blocks")[0].text, retyped);
+}
+
+#[test]
+fn right_to_left_spans_side_by_side_in_one_look_read_right_to_left() {
+    // Two words of one look, each a span of its own in typing order, drawn left to right: the right one is read first,
+    // whether they are one run or two.
+    let doc = looks_page(
+        "BT /F1 12 Tf 300 700 Td /Span <</ActualText <FEFF0633064520>>> BDC (BAB ) Tj EMC /Span <</ActualText <FEFF06450645>>> BDC (BB) Tj EMC ET",
+    );
+    let block = text::text_blocks(&doc, 0).expect("blocks").remove(0);
+    assert_eq!(block.editor_text.trim(), "ممسم");
+    let text = page_text(&doc).plain_text();
+    assert_eq!(text.trim(), block.editor_text.trim());
 }

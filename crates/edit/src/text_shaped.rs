@@ -11,7 +11,10 @@
 //! copy, search and a later Edit text read the line as it was typed. Latin text and digits in the
 //! line are drawn with the paragraph's own font when it has them and with Helvetica otherwise,
 //! between the shaped runs, in the same span. In a paragraph of several looks (sizes, colours, fonts) each line is drawn as
-//! runs of one look, each character in the look of the stored character it came from (`text_looks`, [`plan_looked`]).
+//! runs of one look, each character in the look of the stored character it came from (`text_looks`, [`plan_looked`]), and
+//! has a span for each look, holding that look's characters in typing order, so that a later Edit text reads each look
+//! back as a run of its own. A line keeps one span when its looks are not drawn one after another, or when page text
+//! extraction would read its spans in another order than they were typed (`shaped_text::reading_order`).
 //! A bold paragraph, or a bold look, has its Arabic drawn at the face's bold instance (`wght` 700), from Type 3 fonts of
 //! its own (`PCEdAr…B`); a build whose face has no `wght` axis draws it regular.
 //!
