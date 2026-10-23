@@ -1271,3 +1271,42 @@ fn a_dialogs_scrollbar_is_at_the_start_edge() {
         assert_on_screen(&h, &format!("{language} shortcuts"));
     }
 }
+
+/// A document of `pages` empty pages, enough for the Organize grid to scroll.
+fn many_pages(pages: usize) -> Vec<u8> {
+    let kids: String = (0..pages).map(|i| format!("{} 0 R ", i + 3)).collect();
+    let objects: String = (0..pages).map(|i| format!("{} 0 obj << /Type /Page /Parent 2 0 R >> endobj\n", i + 3)).collect();
+    format!(
+        "%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [{kids}] /Count {pages} /MediaBox [0 0 300 400] >> endobj
+{objects}trailer << /Root 1 0 R >>
+%%EOF"
+    )
+    .into_bytes()
+}
+
+/// The Organize page grid's scrollbar is at the start edge of the grid: the left in Arabic (the
+/// grid draws a bar of its own, as the document view does), the right in English.
+#[test]
+fn the_organize_grids_scrollbar_is_at_the_start_edge() {
+    /// The width of the tools pane, on the right when mirrored and on the left in English.
+    const TOOLS: f32 = 272.0;
+    for language in ["ar", "en"] {
+        // Short, with far more pages than fit: several rows of cards.
+        let h = bare(language, egui::vec2(WIDTH, 400.0), |app| {
+            app.open_bytes("pages.pdf", None, many_pages(40)).expect("opens");
+            app.set_option("left", "closed").unwrap();
+            app.set_option("tool", "organize").unwrap();
+        });
+        // The rail stands between the window edge and the grid: at the left in Arabic, at the
+        // right in English.
+        let rail = h.get_by_role_and_label(Role::Button, i18n::tr(Lang::from_code(language).unwrap(), "Comments")).rect();
+        let grid = if language == "ar" {
+            egui::Rect::from_min_max(egui::pos2(rail.right(), 0.0), egui::pos2(WIDTH - TOOLS, 400.0))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(TOOLS, 0.0), egui::pos2(rail.left(), 400.0))
+        };
+        assert_bar_at_start_edge(language, grid, &tall_bars(&h), "organize grid");
+    }
+}
