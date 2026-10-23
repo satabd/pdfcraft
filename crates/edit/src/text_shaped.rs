@@ -16,7 +16,9 @@
 //! back as a run of its own. A line keeps one span when its looks are not drawn one after another, or when page text
 //! extraction would read its spans in another order than they were typed (`shaped_text::reading_order`).
 //! A bold paragraph, or a bold look, has its Arabic drawn at the face's bold instance (`wght` 700), from Type 3 fonts of
-//! its own (`PCEdAr…B`); a build whose face has no `wght` axis draws it regular.
+//! its own (`PCEdAr…B`); a build whose face has no `wght` axis draws it regular. An italic paragraph, or an italic look,
+//! has its Arabic drawn with a synthesized 12° slant, from Type 3 fonts of its own (`PCEdAr…I`, `PCEdAr…BI`) whose
+//! `FontMatrix` shears the upright glyphs (the face has no italic).
 //!
 //! The paragraph's text state keeps no character or word spacing here (spacing would pull joined
 //! letters apart; word spacing reaches only a single-byte code 32, which these fonts' codes are not). A justified
@@ -75,7 +77,7 @@ pub(crate) fn unsupported_with_arabic(latin: &str) -> EditError {
     ))
 }
 
-pub(crate) use pdfcraft_fonts::Weight;
+pub(crate) use pdfcraft_fonts::{Slant, Weight};
 pub(crate) use shaped_text::{LatinWidth, Measure};
 
 /// The operators that show Latin text in a font, or why the font can't.
@@ -117,7 +119,9 @@ fn adapted<'a>(
 
 /// Lay out `lines` (in typing order, in a paragraph that runs `rtl` or not), read every outline
 /// and add the fonts to `doc` and `fonts_res`. Everything that can fail does so before `doc` is
-/// touched. `max_glyphs` is the most glyphs one generated font holds (tests lower it). The Arabic is drawn at `weight`.
+/// touched. `max_glyphs` is the most glyphs one generated font holds (tests lower it). The Arabic is drawn at `weight`
+/// and `slant`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     doc: &mut Document,
     fonts_res: &mut Dict,
@@ -126,14 +130,16 @@ pub(crate) fn plan(
     max_glyphs: usize,
     latin: &LatinShow,
     weight: Weight,
+    slant: Slant,
 ) -> Result<ShapedPlan, EditError> {
     let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|line| (line.clone(), Vec::new())).collect();
-    plan_looked(doc, fonts_res, &lines, rtl, max_glyphs, std::slice::from_ref(latin), &[weight])
+    plan_looked(doc, fonts_res, &lines, rtl, max_glyphs, std::slice::from_ref(latin), &[weight], &[slant])
 }
 
 /// [`plan`] for a paragraph of several looks: each line with the look of each of its characters (an index into
-/// `latins`, which shows the Latin text of each look, and into `weights`, the weight its Arabic is drawn at; see
-/// [`shaped_text::shaped_pieces_weighted`]).
+/// `latins`, which shows the Latin text of each look, into `weights`, the weight its Arabic is drawn at, see
+/// [`shaped_text::shaped_pieces_weighted`], and into `slants`, the slant it is drawn at, see [`shaped_text::plan_looked`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_looked(
     doc: &mut Document,
     fonts_res: &mut Dict,
@@ -142,6 +148,7 @@ pub(crate) fn plan_looked(
     max_glyphs: usize,
     latins: &[LatinShow],
     weights: &[Weight],
+    slants: &[Slant],
 ) -> Result<ShapedPlan, EditError> {
     // An error of the writer's own is kept as it is; the planner's is turned into an `EditError`.
     let failure: std::cell::RefCell<Option<EditError>> = std::cell::RefCell::new(None);
@@ -149,7 +156,7 @@ pub(crate) fn plan_looked(
     let planner: Vec<shaped_text::LatinShow> =
         latins.iter().zip(&shows).map(|(latin, show)| shaped_text::LatinShow { font: latin.font, show }).collect();
     let fonts = PlanFonts { max_glyphs, name_prefix: FONT_PREFIX, font_name: Some(ARABIC_FONT_NAME) };
-    let planned = shaped_text::plan_looked(doc, fonts_res, lines, rtl, fonts, &planner, weights);
+    let planned = shaped_text::plan_looked(doc, fonts_res, lines, rtl, fonts, &planner, weights, slants);
     drop(planner);
     drop(shows);
     match planned {

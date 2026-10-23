@@ -20,7 +20,10 @@
 //!   [`reading_order`] (the order page text extraction reads a line's spans in) gives the line back as typed;
 //! - bold Arabic: each look has a [`Weight`] ([`shaped_pieces_weighted`], [`Measure::weighted`], [`plan_looked`]), and
 //!   a bold look's Arabic is shaped, measured and drawn at the Arabic face's bold instance (its `wght` axis at 700:
-//!   [`ShapedScript::ArabicBold`]), in Type 3 fonts of its own. A face without a `wght` axis draws it regular.
+//!   [`ShapedScript::ArabicBold`]), in Type 3 fonts of its own. A face without a `wght` axis draws it regular;
+//! - italic Arabic: each look has a [`Slant`] ([`plan_looked`]), and an italic look's Arabic is drawn from Type 3 fonts of
+//!   its own whose `FontMatrix` shears the upright glyphs by 12° ([`type3_shaped_slanted`]): a synthesized oblique, as
+//!   the face has no italic. Shapes, advances and measures are the upright ones.
 //!
 //! Operators are returned as [`TextOp`] (an operator and its operands) because this crate sits
 //! below the content-stream crate; callers turn them into their own operator type.
@@ -31,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use unicode_bidi::{Level, ParagraphBidiInfo};
 
-use crate::{GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Weight, shape_arabic_at, shape_hebrew, shape_thai, shaped_glyph};
+use crate::{GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Slant, Weight, shape_arabic_at, shape_hebrew, shape_thai, shaped_glyph};
 
 /// Most glyphs in one Type 3 font: its codes are single bytes, 1–240. A text gets one such font
 /// per 240 distinct glyphs it needs.
@@ -274,6 +277,11 @@ pub fn shaped_pieces_looked(line: &str, looks: &[usize], rtl: bool, shaper: &Sha
 /// The weight of look `look` among `weights` (a look past the end has the first's, and no weight at all is regular).
 fn weight_of(weights: &[Weight], look: usize) -> Weight {
     weights.get(look).or_else(|| weights.first()).copied().unwrap_or_default()
+}
+
+/// The slant of look `look` among `slants` (as [`weight_of`]: past the end the first's, none at all upright).
+fn slant_of(slants: &[Slant], look: usize) -> Slant {
+    slants.get(look).or_else(|| slants.first()).copied().unwrap_or_default()
 }
 
 /// [`shaped_pieces_looked`] with each look at a weight: the Arabic of look `i` is shaped at `weights[i]` (a look past
@@ -547,6 +555,29 @@ pub fn type3_shaped(
     outlines: &HashMap<(ShapedScript, u32), GlyphOutline>,
     name: Option<&str>,
 ) -> ObjRef {
+    type3_shaped_slanted(doc, clusters, outlines, name, Slant::Upright)
+}
+
+/// The `c` entry of a shaped font's `FontMatrix` (1000 glyph units to the em): the shear of `slant` ([`Slant::shear`]
+/// in text space units, a thousandth of it in glyph space).
+fn font_matrix_shear(slant: Slant) -> f64 {
+    match slant {
+        Slant::Upright => 0.0,
+        Slant::Italic => 0.000_212_6,
+    }
+}
+
+/// [`type3_shaped`] drawn at `slant`: an italic font is the upright one (the same glyph procedures, widths and
+/// `ToUnicode`) with a shear in its `FontMatrix` (ISO 32000-2 §9.6.5), and says it is italic (`ItalicAngle -12`, the
+/// Italic flag, a `FontName` ending `-Italic` or `-BoldItalic`), so a reader, a later Edit text among them, sees italic
+/// text. [`Slant::Upright`] writes what [`type3_shaped`] always wrote.
+pub fn type3_shaped_slanted(
+    doc: &mut Document,
+    clusters: &[&ShapedCluster],
+    outlines: &HashMap<(ShapedScript, u32), GlyphOutline>,
+    name: Option<&str>,
+    slant: Slant,
+) -> ObjRef {
     let mut charprocs = Dict::new();
     let mut differences = vec![Object::Int(1)];
     let mut widths = Vec::with_capacity(clusters.len());
@@ -611,13 +642,22 @@ pub fn type3_shaped(
     };
     // A font of bold glyphs says so (its name and weight), so a reader, a later Edit text among them, sees bold text.
     let bold = single.is_some_and(|s| s.weight() == Weight::Bold);
+    let italic = slant == Slant::Italic;
     let mut descriptor = Dict::new();
     descriptor.set(b"Type".to_vec(), Object::name("FontDescriptor"));
     let font_name = family.replace(' ', "");
-    descriptor.set(b"FontName".to_vec(), Object::name(&if bold { format!("{font_name}-Bold") } else { font_name }));
+    let font_name = match (bold, italic) {
+        (false, false) => font_name,
+        (true, false) => format!("{font_name}-Bold"),
+        (false, true) => format!("{font_name}-Italic"),
+        (true, true) => format!("{font_name}-BoldItalic"),
+    };
+    descriptor.set(b"FontName".to_vec(), Object::name(&font_name));
     descriptor.set(b"FontFamily".to_vec(), Object::String(PdfString::literal(family.as_bytes().to_vec())));
-    descriptor.set(b"Flags".to_vec(), Object::Int(4));
-    descriptor.set(b"ItalicAngle".to_vec(), Object::Int(0));
+    // Symbolic (4), and Italic (64) when slanted.
+    descriptor.set(b"Flags".to_vec(), Object::Int(if italic { 68 } else { 4 }));
+    // (Degrees counter-clockwise from the vertical: a slant to the right is negative.)
+    descriptor.set(b"ItalicAngle".to_vec(), Object::Int(if italic { -12 } else { 0 }));
     if bold {
         descriptor.set(b"FontWeight".to_vec(), Object::Int(700));
     }
@@ -634,7 +674,14 @@ pub fn type3_shaped(
     font.set(b"FontBBox".to_vec(), Object::Array(bbox.iter().map(|v| Object::Real(*v)).collect()));
     font.set(
         b"FontMatrix".to_vec(),
-        Object::Array(vec![Object::Real(0.001), Object::Int(0), Object::Int(0), Object::Real(0.001), Object::Int(0), Object::Int(0)]),
+        Object::Array(vec![
+            Object::Real(0.001),
+            Object::Int(0),
+            if italic { Object::Real(font_matrix_shear(slant)) } else { Object::Int(0) },
+            Object::Real(0.001),
+            Object::Int(0),
+            Object::Int(0),
+        ]),
     );
     font.set(b"FirstChar".to_vec(), Object::Int(1));
     font.set(b"LastChar".to_vec(), Object::Int(i64::try_from(clusters.len()).unwrap_or(i64::MAX)));
@@ -1023,12 +1070,16 @@ pub fn plan_directed(
 /// characters (see [`shaped_pieces_looked`]), look `i` shows its Latin text with `latins[i]` and its Arabic is drawn at
 /// `weights[i]` (a look past the end of either with the first's; no weight at all, regular). A bold look's Arabic is
 /// drawn from Type 3 fonts of its own (the resource name's prefix and object number followed by `B`), built from the
-/// face's bold outlines. Everything that can fail does so before `doc` is touched.
+/// face's bold outlines. Look `i`'s Arabic is drawn at `slants[i]` (likewise): an italic look's from Type 3 fonts of its
+/// own (followed by `I`, or `BI` when bold too) whose `FontMatrix` slants the upright glyphs (see
+/// [`type3_shaped_slanted`]); a slant changes no advance, so it is not an input of the layout or of [`Measure`].
+/// Everything that can fail does so before `doc` is touched.
 ///
 /// A line of several looks is drawn in a span for each look (each part of it in one look, see `parts_of`), holding the
 /// look's characters in typing order, so that a reader takes each look as a run of its own. It is one span, as a line of
 /// one look is, when the runs of a look are not drawn one after another or the spans read in [`reading_order`] would not
 /// give the line as it was typed.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_looked(
     doc: &mut Document,
     fonts_res: &mut Dict,
@@ -1037,6 +1088,7 @@ pub fn plan_looked(
     fonts: PlanFonts,
     latins: &[LatinShow],
     weights: &[Weight],
+    slants: &[Slant],
 ) -> Result<ShapedPlan, ShapedTextError> {
     let shaper = current_shaper();
     let mut laid = Vec::with_capacity(lines.len());
@@ -1048,7 +1100,7 @@ pub fn plan_looked(
             .collect();
         laid.push((line.clone(), parts, pieces));
     }
-    plan_looked_pieces(doc, fonts_res, laid, fonts, latins)
+    plan_looked_pieces(doc, fonts_res, laid, fonts, latins, slants)
 }
 
 /// [`plan_directed`] for lines already laid out: each is its text in typing order and its pieces
@@ -1063,24 +1115,26 @@ pub fn plan_pieces(
     latin: &LatinShow,
 ) -> Result<ShapedPlan, ShapedTextError> {
     let laid = laid.into_iter().map(|(line, pieces)| (line, Vec::new(), pieces.into_iter().map(|piece| (0, 0, piece)).collect())).collect();
-    plan_looked_pieces(doc, fonts_res, laid, fonts, std::slice::from_ref(latin))
+    plan_looked_pieces(doc, fonts_res, laid, fonts, std::slice::from_ref(latin), &[])
 }
 
 /// A line laid out: its text in typing order, its parts (see [`parts_of`]; none: one), and its pieces in drawing order,
 /// each with its look and the part it draws.
 type Laid = (String, Vec<std::ops::Range<usize>>, Vec<(usize, usize, Piece)>);
 
-/// [`plan_pieces`] with each piece in a look of its own (see [`plan_looked`]).
+/// [`plan_pieces`] with each piece in a look of its own, look `i` at `slants[i]` (see [`plan_looked`]).
 fn plan_looked_pieces(
     doc: &mut Document,
     fonts_res: &mut Dict,
     laid: Vec<Laid>,
     fonts: PlanFonts,
     latins: &[LatinShow],
+    slants: &[Slant],
 ) -> Result<ShapedPlan, ShapedTextError> {
     let shaper = current_shaper();
-    let mut keys: Vec<&ShapedCluster> = Vec::new();
-    let mut index: HashMap<ClusterKey, usize> = HashMap::new();
+    // Each distinct cluster at each slant it is drawn at is one glyph: an upright and a slanted one are in other fonts.
+    let mut keys: Vec<(&ShapedCluster, Slant)> = Vec::new();
+    let mut index: HashMap<(ClusterKey, Slant), usize> = HashMap::new();
     let mut staged: Vec<Vec<Staged>> = Vec::with_capacity(laid.len());
     for (_, _, pieces) in &laid {
         let mut row = Vec::with_capacity(pieces.len());
@@ -1092,12 +1146,13 @@ fn plan_looked_pieces(
                     row.push(Staged::Latin(*look, *part, (latin.show)(s)?, s.clone()));
                 }
                 Piece::Shaped(clusters) => {
+                    let slant = slant_of(slants, *look);
                     let mut ks = Vec::with_capacity(clusters.len());
                     for c in clusters {
                         if !c.script.is_arabic() {
                             return Err(mixed_scripts_error());
                         }
-                        let k = match index.get(&cluster_key(c)) {
+                        let k = match index.get(&(cluster_key(c), slant)) {
                             Some(k) => *k,
                             None => {
                                 if keys.len() >= MAX_CLUSTERS {
@@ -1105,9 +1160,9 @@ fn plan_looked_pieces(
                                         "this Arabic text needs more than {MAX_CLUSTERS} different letter shapes; split it into smaller parts"
                                     )));
                                 }
-                                keys.push(c);
+                                keys.push((c, slant));
                                 let k = keys.len().saturating_sub(1);
-                                index.insert(cluster_key(c), k);
+                                index.insert((cluster_key(c), slant), k);
                                 k
                             }
                         };
@@ -1122,7 +1177,7 @@ fn plan_looked_pieces(
 
     // Every outline is read before anything is written, so a failure leaves the document as it was.
     let mut outlines = HashMap::new();
-    for c in &keys {
+    for (c, _) in &keys {
         for (id, _) in &c.glyphs {
             if let std::collections::hash_map::Entry::Vacant(entry) = outlines.entry((c.script, *id)) {
                 entry.insert((shaper.outline)(c.script, *id).map_err(|e| script_error(c.script, e, &c.text))?);
@@ -1131,29 +1186,34 @@ fn plan_looked_pieces(
     }
 
     let per_font = fonts.max_glyphs.clamp(1, GLYPHS_PER_FONT);
-    // Each face instance (regular, bold) has fonts of its own, the one seen first first: a text of one weight is chunked
-    // as it always was.
-    let mut groups: Vec<(ShapedScript, Vec<usize>)> = Vec::new();
-    for (k, c) in keys.iter().enumerate() {
-        match groups.iter_mut().find(|(script, _)| *script == c.script) {
+    // Each face instance (regular, bold) at each slant has fonts of its own, the one seen first first: a text of one
+    // weight and slant is chunked as it always was.
+    let mut groups: Vec<((ShapedScript, Slant), Vec<usize>)> = Vec::new();
+    for (k, (c, slant)) in keys.iter().enumerate() {
+        match groups.iter_mut().find(|(face, _)| *face == (c.script, *slant)) {
             Some((_, group)) => group.push(k),
-            None => groups.push((c.script, vec![k])),
+            None => groups.push(((c.script, *slant), vec![k])),
         }
     }
     // Each distinct cluster's font (an index into `names`) and code in it.
     let mut slots: Vec<(usize, u8)> = vec![(0, 1); keys.len()];
     let mut taken: HashSet<Vec<u8>> = fonts_res.iter().map(|(name, _)| name.clone()).collect();
     let mut names = Vec::new();
-    for (script, group) in &groups {
-        let weight = if script.weight() == Weight::Bold { "B" } else { "" };
+    for ((script, slant), group) in &groups {
+        let face = match (script.weight(), slant) {
+            (Weight::Regular, Slant::Upright) => "",
+            (Weight::Bold, Slant::Upright) => "B",
+            (Weight::Regular, Slant::Italic) => "I",
+            (Weight::Bold, Slant::Italic) => "BI",
+        };
         for chunk in group.chunks(per_font) {
-            let clusters: Vec<&ShapedCluster> = chunk.iter().filter_map(|k| keys.get(*k).copied()).collect();
-            let font = type3_shaped(doc, &clusters, &outlines, fonts.font_name);
-            let mut name = format!("{}{}{weight}", fonts.name_prefix, font.num);
+            let clusters: Vec<&ShapedCluster> = chunk.iter().filter_map(|k| keys.get(*k).map(|(c, _)| *c)).collect();
+            let font = type3_shaped_slanted(doc, &clusters, &outlines, fonts.font_name, *slant);
+            let mut name = format!("{}{}{face}", fonts.name_prefix, font.num);
             let mut suffix = 0usize;
             while taken.contains(name.as_bytes()) {
                 suffix = suffix.saturating_add(1);
-                name = format!("{}{}{weight}_{suffix}", fonts.name_prefix, font.num);
+                name = format!("{}{}{face}_{suffix}", fonts.name_prefix, font.num);
             }
             taken.insert(name.clone().into_bytes());
             fonts_res.set(name.clone().into_bytes(), Object::Ref(font));
@@ -1524,7 +1584,7 @@ mod stretch_tests {
         let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
         let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|(l, looks)| ((*l).to_owned(), looks.clone())).collect();
         let latins = [LatinShow { font: "F9", show: &latin }, LatinShow { font: "F8", show: &latin }];
-        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins, &[]).expect("plans");
+        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins, &[], &[]).expect("plans");
         set_test_shaper(None);
         plan
     }
@@ -1658,13 +1718,18 @@ mod weight_tests {
 
     /// `lines` planned with `shaper` at `weights`: the document, its font resources, the plan and line 0's operators.
     fn planned(shaper: Shaper, lines: &[(&str, Vec<usize>)], weights: &[Weight]) -> (Document, Dict, Vec<TextOp>) {
+        planned_slanted(shaper, lines, weights, &[])
+    }
+
+    /// [`planned`] with the looks at `slants`.
+    fn planned_slanted(shaper: Shaper, lines: &[(&str, Vec<usize>)], weights: &[Weight], slants: &[Slant]) -> (Document, Dict, Vec<TextOp>) {
         set_test_shaper(Some(shaper));
         let mut doc = Document::new_empty();
         let mut fonts = Dict::new();
         let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
         let lines: Vec<(String, Vec<usize>)> = lines.iter().map(|(l, looks)| ((*l).to_owned(), looks.clone())).collect();
         let latins = [LatinShow { font: "F9", show: &latin }, LatinShow { font: "F8", show: &latin }];
-        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins, weights).expect("plans");
+        let plan = plan_looked(&mut doc, &mut fonts, &lines, true, names, &latins, weights, slants).expect("plans");
         set_test_shaper(None);
         let looks = [RunLook { size: 10.0, fill: &[] }, RunLook { size: 10.0, fill: &[] }];
         let ops = plan.looked_line_ops(0, &looks, &mut Pen::default());
@@ -1772,8 +1837,17 @@ mod weight_tests {
             let mut doc = Document::new_empty();
             let mut fonts = Dict::new();
             let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
-            plan_looked(&mut doc, &mut fonts, &[(word.to_owned(), Vec::new())], true, names, &[LatinShow { font: "F9", show: &latin }], &[weight])
-                .expect("plans");
+            plan_looked(
+                &mut doc,
+                &mut fonts,
+                &[(word.to_owned(), Vec::new())],
+                true,
+                names,
+                &[LatinShow { font: "F9", show: &latin }],
+                &[weight],
+                &[],
+            )
+            .expect("plans");
             let (name, font) = fonts.iter().next().map(|(n, f)| (String::from_utf8_lossy(n).into_owned(), f.clone())).expect("a font");
             let font = doc.resolve(&font).as_dict().cloned().expect("a dict");
             let widths: f64 = match font.get(b"Widths") {
@@ -1795,5 +1869,156 @@ mod weight_tests {
         // (A line measures every cluster; a font's widths count each distinct one once.)
         let at = |weight| crate::shape_arabic_at(word, true, weight).expect("shapes").iter().map(cluster_width).sum::<f64>();
         assert!((light - at(Weight::Regular)).abs() < 1e-9 && (heavy - at(Weight::Bold)).abs() < 1e-9 && heavy > light * 1.02, "{light} {heavy}");
+    }
+
+    /// Font `name` of `fonts`, resolved.
+    fn font_of(doc: &Document, fonts: &Dict, name: &str) -> Dict {
+        fonts.get(name.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).unwrap_or_default()
+    }
+
+    fn descriptor_of(doc: &Document, font: &Dict) -> Dict {
+        font.get(b"FontDescriptor").and_then(|d| doc.resolve(d).as_dict().cloned()).unwrap_or_default()
+    }
+
+    fn numbers(o: Option<&Object>) -> Vec<f64> {
+        match o {
+            Some(Object::Array(a)) => a.iter().filter_map(Object::as_f64).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A font's glyph procedures (decoded, by name), its widths and its decoded `ToUnicode` map.
+    type Drawing = (Vec<(Vec<u8>, Vec<u8>)>, Vec<f64>, Vec<u8>);
+
+    /// What a font draws (see [`Drawing`]).
+    fn drawing(doc: &Document, font: &Dict) -> Drawing {
+        let procs = match font.get(b"CharProcs") {
+            Some(Object::Dict(procs)) => procs.iter().filter_map(|(name, p)| Some((name.clone(), decoded(doc, p)?))).collect(),
+            _ => Vec::new(),
+        };
+        (procs, numbers(font.get(b"Widths")), font.get(b"ToUnicode").and_then(|t| decoded(doc, t)).unwrap_or_default())
+    }
+
+    const UPRIGHT_MATRIX: [f64; 6] = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
+    const ITALIC_MATRIX: [f64; 6] = [0.001, 0.0, 0.000_212_6, 0.001, 0.0, 0.0];
+
+    #[test]
+    fn the_shear_is_twelve_degrees() {
+        assert!((Slant::Italic.shear() - Slant::SKEW_DEGREES.to_radians().tan()).abs() < 1e-4);
+        assert!((font_matrix_shear(Slant::Italic) * 1000.0 - Slant::Italic.shear()).abs() < 1e-12);
+        assert_eq!((Slant::Upright.shear(), font_matrix_shear(Slant::Upright)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn an_italic_text_is_the_upright_text_in_a_sheared_font() {
+        let lines = [("\u{627}\u{628} \u{628}\u{627}", vec![0, 0, 0, 0, 0])];
+        let (up_doc, up_fonts, up_ops) = planned_slanted(WEIGHTED, &lines, &[], &[Slant::Upright]);
+        let (it_doc, it_fonts, it_ops) = planned_slanted(WEIGHTED, &lines, &[], &[Slant::Italic]);
+        let (up_names, it_names) = (font_names(&up_fonts), font_names(&it_fonts));
+        assert!(up_names.len() == 1 && it_names.len() == 1, "{up_names:?} {it_names:?}");
+        assert!(!up_names[0].ends_with('I') && it_names[0].ends_with('I') && !it_names[0].ends_with("BI"), "{up_names:?} {it_names:?}");
+        let (up, it) = (font_of(&up_doc, &up_fonts, &up_names[0]), font_of(&it_doc, &it_fonts, &it_names[0]));
+        // The shear is in the font matrix; the glyphs, their widths and what they stand for are the upright font's.
+        assert_eq!(numbers(up.get(b"FontMatrix")), UPRIGHT_MATRIX);
+        assert_eq!(numbers(it.get(b"FontMatrix")), ITALIC_MATRIX);
+        assert_eq!(drawing(&it_doc, &it), drawing(&up_doc, &up));
+        assert_eq!(numbers(it.get(b"FontBBox")), numbers(up.get(b"FontBBox")));
+        // The descriptor says italic, by flag, angle and name; the upright one says none of it.
+        let (up_d, it_d) = (descriptor_of(&up_doc, &up), descriptor_of(&it_doc, &it));
+        assert_eq!(it_d.get(b"ItalicAngle").and_then(Object::as_f64), Some(-12.0));
+        assert_eq!(it_d.get(b"Flags").and_then(Object::as_f64), Some(68.0));
+        assert!(it_d.name(b"FontName").is_some_and(|n| n.ends_with(b"-Italic")));
+        assert_eq!((up_d.get(b"ItalicAngle").and_then(Object::as_f64), up_d.get(b"Flags").and_then(Object::as_f64)), (Some(0.0), Some(4.0)));
+        // The same codes are shown at the same places, only from the other font; and a reader takes it as italic.
+        let strip = |ops: &[TextOp], name: &str| -> Vec<TextOp> {
+            let named = Object::name(name);
+            ops.iter()
+                .map(|op| TextOp {
+                    operator: op.operator.clone(),
+                    operands: op.operands.iter().map(|o| if *o == named { Object::name("F") } else { o.clone() }).collect(),
+                })
+                .collect()
+        };
+        assert_eq!(strip(&it_ops, &it_names[0]), strip(&up_ops, &up_names[0]));
+        assert_ne!(it_ops, up_ops);
+        assert!(crate::pdf::Metrics::from_dict(&it_doc, &it).italic);
+        assert!(!crate::pdf::Metrics::from_dict(&up_doc, &up).italic);
+        // A slant is no input of the measure: the widths drawn are the upright ones, which the measure gives.
+        let zero = |_: &str| 0.0;
+        set_test_shaper(Some(WEIGHTED));
+        let width = Measure::new(true, 10.0, &zero).line(lines[0].0);
+        set_test_shaper(None);
+        assert!((width - 25.0).abs() < 1e-9, "{width}");
+    }
+
+    #[test]
+    fn an_italic_look_is_drawn_from_fonts_of_its_own_and_bold_italic_from_others() {
+        // The first word upright, the second italic; the same letters, so each is a glyph of an upright and of an italic font.
+        let line = ("\u{627}\u{628} \u{628}\u{627}", vec![0, 0, 0, 1, 1]);
+        let (doc, fonts, ops) = planned_slanted(WEIGHTED, std::slice::from_ref(&line), &[], &[Slant::Upright, Slant::Italic]);
+        let names = font_names(&fonts);
+        assert_eq!(names.len(), 2, "{names:?}");
+        let italic = names.iter().find(|n| n.ends_with('I')).expect("an italic font");
+        let upright = names.iter().find(|n| !n.ends_with('I')).expect("an upright font");
+        let drawn = shown(&ops);
+        assert_eq!(drawn.iter().map(|(font, _)| font).collect::<Vec<_>>(), [italic, upright], "{ops:?}");
+        assert_eq!(numbers(font_of(&doc, &fonts, italic).get(b"FontMatrix")), ITALIC_MATRIX);
+        assert_eq!(numbers(font_of(&doc, &fonts, upright).get(b"FontMatrix")), UPRIGHT_MATRIX);
+
+        // Bold and italic: the bold instance's glyphs, sheared, named and described as both.
+        let (doc, fonts, ops) =
+            planned_slanted(WEIGHTED, std::slice::from_ref(&line), &[Weight::Regular, Weight::Bold], &[Slant::Upright, Slant::Italic]);
+        let names = font_names(&fonts);
+        let both = names.iter().find(|n| n.ends_with("BI")).expect("a bold italic font");
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert_eq!(&shown(&ops)[0].0, both);
+        let font = font_of(&doc, &fonts, both);
+        let descriptor = descriptor_of(&doc, &font);
+        assert_eq!(numbers(font.get(b"FontMatrix")), ITALIC_MATRIX);
+        assert_eq!(numbers(font.get(b"Widths")), [600.0, 600.0]);
+        assert!(descriptor.name(b"FontName").is_some_and(|n| n.ends_with(b"-BoldItalic")));
+        assert_eq!(descriptor.get(b"FontWeight").and_then(Object::as_f64), Some(700.0));
+        assert_eq!(descriptor.get(b"ItalicAngle").and_then(Object::as_f64), Some(-12.0));
+        let metrics = crate::pdf::Metrics::from_dict(&doc, &font);
+        assert!(metrics.bold && metrics.italic);
+    }
+
+    #[test]
+    fn upright_is_planned_as_before() {
+        let lines = [("\u{627}\u{628} \u{628}\u{627}", vec![0, 0, 0, 1, 1]), ("\u{628}", vec![1])];
+        let bytes = |(doc, fonts, ops): (Document, Dict, Vec<TextOp>)| {
+            let objects: Vec<String> = doc.object_numbers().into_iter().map(|n| format!("{n} {:?}", doc.try_get(n).ok())).collect();
+            (objects, font_names(&fonts), format!("{ops:?}"))
+        };
+        let before = bytes(planned(WEIGHTED, &lines, &[Weight::Regular, Weight::Bold]));
+        assert_eq!(bytes(planned_slanted(WEIGHTED, &lines, &[Weight::Regular, Weight::Bold], &[Slant::Upright, Slant::Upright])), before);
+        assert_ne!(bytes(planned_slanted(WEIGHTED, &lines, &[Weight::Regular, Weight::Bold], &[Slant::Upright, Slant::Italic])), before);
+    }
+
+    #[test]
+    fn the_real_face_draws_an_italic_word_from_the_upright_glyphs_sheared() {
+        if crate::document_arabic_font().is_none() {
+            eprintln!("skipping the italic plan check: built without a craft-fonts Arab face (set CRAFT_FONTS_DIR)");
+            return;
+        }
+        let word = "بالعالم";
+        let plan_at = |weight: Weight, slant: Slant| {
+            let mut doc = Document::new_empty();
+            let mut fonts = Dict::new();
+            let names = PlanFonts { max_glyphs: GLYPHS_PER_FONT, name_prefix: "PCT", font_name: None };
+            let latins = [LatinShow { font: "F9", show: &latin }];
+            plan_looked(&mut doc, &mut fonts, &[(word.to_owned(), Vec::new())], true, names, &latins, &[weight], &[slant]).expect("plans");
+            let name = font_names(&fonts).into_iter().next().expect("a font");
+            let font = font_of(&doc, &fonts, &name);
+            (name, numbers(font.get(b"FontMatrix")), drawing(&doc, &font))
+        };
+        for weight in [Weight::Regular, Weight::Bold] {
+            let (up_name, up_matrix, up_drawing) = plan_at(weight, Slant::Upright);
+            let (it_name, it_matrix, it_drawing) = plan_at(weight, Slant::Italic);
+            assert!(!up_name.ends_with('I') && it_name.ends_with('I'), "{up_name} {it_name}");
+            assert_eq!((up_matrix.as_slice(), it_matrix.as_slice()), (UPRIGHT_MATRIX.as_slice(), ITALIC_MATRIX.as_slice()));
+            assert!(!it_drawing.0.is_empty());
+            assert_eq!(it_drawing, up_drawing, "{weight:?}");
+        }
     }
 }

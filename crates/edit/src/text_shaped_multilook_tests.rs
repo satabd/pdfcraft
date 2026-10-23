@@ -13,6 +13,12 @@ use crate::text_shaped_tests::fake;
 /// A page whose one font resource per look is a subset that has only `B`/`A` (م/س), `X` (lam-alef) and the space: `F1`
 /// regular and `F2` bold, both drawn as `content` says.
 fn looks_page(content: &str) -> Document {
+    fonts_page(content, &["FakeArabic", "FakeArabic-Bold"])
+}
+
+/// [`looks_page`] with a font resource for each of `base_fonts`, `F1` on (the first two are objects 5 and 7, the ToUnicode
+/// map between them, and any others follow from 8).
+fn fonts_page(content: &str, base_fonts: &[&str]) -> Document {
     let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapType 2 def \
                 1 begincodespacerange <00> <FF> endcodespacerange 4 beginbfchar \
                 <20> <0020> <41> <0633> <42> <0645> <58> <FEFB> \
@@ -21,15 +27,19 @@ fn looks_page(content: &str) -> Document {
     let font = |name: &str| {
         format!("<< /Type /Font /Subtype /Type1 /BaseFont /{name} /FirstChar 32 /LastChar 88 /Widths [{}] /ToUnicode 6 0 R >>", widths.join(" "))
     };
-    build(&[
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 7 0 R >> >> >>",
-        &stream("", content),
-        &font("FakeArabic"),
-        &stream("", cmap),
-        &font("FakeArabic-Bold"),
-    ])
+    let numbers = |i: usize| if i == 0 { 5 } else { i + 6 };
+    let resources: Vec<String> = (0..base_fonts.len()).map(|i| format!("/F{} {} 0 R", i + 1, numbers(i))).collect();
+    let page =
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << {} >> >> >>", resources.join(" "));
+    let mut objects =
+        vec!["<< /Type /Catalog /Pages 2 0 R >>".to_owned(), "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(), page, stream("", content)];
+    for (i, base) in base_fonts.iter().enumerate() {
+        objects.push(font(base));
+        if i == 0 {
+            objects.push(stream("", cmap));
+        }
+    }
+    build(&objects.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// One row from x = 300 of two runs, `مسم` at 12 pt and `مس ` at 18 pt (each run is read right to left, and the row's
@@ -685,4 +695,202 @@ fn right_to_left_spans_side_by_side_in_one_look_read_right_to_left() {
     assert_eq!(block.editor_text.trim(), "ممسم");
     let text = page_text(&doc).plain_text();
     assert_eq!(text.trim(), block.editor_text.trim());
+}
+
+// ---- italic ----
+
+/// [`looks_page`] with `F3` italic and `F4` bold italic too.
+fn slants_page(content: &str) -> Document {
+    fonts_page(content, &["FakeArabic", "FakeArabic-Bold", "FakeArabic-Italic", "FakeArabic-BoldItalic"])
+}
+
+/// The `FontMatrix` of font resource `name` of page 0.
+fn font_matrix(doc: &Document, name: &str) -> Vec<f64> {
+    match font_and_descriptor(doc, name).0.get(b"FontMatrix") {
+        Some(Object::Array(m)) => m.iter().filter_map(Object::as_f64).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A generated font of slanted glyphs: its resource name ends in `I` (`BI` when bold too).
+fn slanted(font: &str) -> bool {
+    font.ends_with('I')
+}
+
+const UPRIGHT_MATRIX: [f64; 6] = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
+const ITALIC_MATRIX: [f64; 6] = [0.001, 0.0, 0.000_212_6, 0.001, 0.0, 0.0];
+
+/// Whether every line of the page reads back italic (`true`) or upright, as a later Edit text takes it.
+fn reads_back_italic(doc: &Document, italic: bool) -> bool {
+    let lines = text::text_lines(&reopen(doc), 0).expect("lines");
+    !lines.is_empty() && lines.iter().all(|l| l.italic == italic)
+}
+
+#[test]
+fn an_italic_run_retyped_in_arabic_is_drawn_slanted_and_the_upright_run_upright() {
+    let _face = fake();
+    let mut doc = slants_page("BT /F1 12 Tf 300 700 Td (BAB) Tj 1 0 0 rg /F3 12 Tf ( AB) Tj ET");
+    // A word typed after the italic red run's space takes its look: italic.
+    let typed = format!("{}بالعالم", editor_text(&doc));
+    text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
+    let drawn = shown(&doc);
+    let red: Vec<_> = drawn.iter().filter(|(font, _, fill)| font.starts_with("PCEdAr") && fill.starts_with("rg")).collect();
+    let black: Vec<_> = drawn.iter().filter(|(font, _, fill)| font.starts_with("PCEdAr") && fill.starts_with("g")).collect();
+    assert!(!red.is_empty() && !black.is_empty(), "{drawn:?}");
+    assert!(red.iter().all(|(font, _, _)| slanted(font) && !font.ends_with("BI")), "{drawn:?}");
+    assert!(black.iter().all(|(font, _, _)| !slanted(font)), "{drawn:?}");
+    // The italic run's font slants the glyphs; its widths are the upright stand-in's (a slant changes no advance).
+    assert_eq!(font_matrix(&doc, &red[0].0), ITALIC_MATRIX);
+    assert_eq!(font_matrix(&doc, &black[0].0), UPRIGHT_MATRIX);
+    let (italic_font, italic_descriptor) = font_and_descriptor(&doc, &red[0].0);
+    assert_eq!(italic_descriptor.get(b"ItalicAngle").and_then(Object::as_f64), Some(-12.0));
+    let regular_advances = [250.0, 400.0, 500.0, 520.0, 540.0, 560.0, 600.0];
+    let widths: Vec<f64> = match italic_font.get(b"Widths") {
+        Some(Object::Array(w)) => w.iter().filter_map(Object::as_f64).collect(),
+        _ => Vec::new(),
+    };
+    assert!(!widths.is_empty() && widths.iter().all(|w| regular_advances.contains(w)), "{widths:?}");
+    // The text is what it was: a span per look, which read in order give the line as typed, and the ToUnicode maps give
+    // back every letter once.
+    assert_eq!(read_lines(&doc), [typed.as_str()]);
+    let reopened = reopen(&doc);
+    assert_eq!(text::text_blocks(&reopened, 0).expect("blocks")[0].text, typed);
+    // Read back, each run is the slant it was drawn at, so a second edit keeps them.
+    let lines = text::text_lines(&reopened, 0).expect("lines");
+    let italics: Vec<(bool, bool)> = lines.iter().map(|l| (l.font.starts_with("PCEdAr") && slanted(&l.font), l.italic)).collect();
+    assert!(italics.iter().any(|(_, italic)| *italic) && italics.iter().all(|(drawn, italic)| drawn == italic), "{italics:?}");
+    let mut again = reopened.clone();
+    let retyped = format!("{} سم", editor_text(&again));
+    text::replace_block(&mut again, 0, 0, &retyped).expect("writes again");
+    let fonts = arabic_fonts(&again);
+    assert!(fonts.iter().any(|f| slanted(f)) && fonts.iter().any(|f| !slanted(f)), "{fonts:?}");
+    assert_eq!(text::text_blocks(&reopen(&again), 0).expect("blocks")[0].text, retyped);
+}
+
+#[test]
+fn a_whole_italic_paragraph_is_slanted_on_the_one_look_path_and_keeps_its_slant() {
+    let _face = fake();
+    for (font, italic, bold) in [("F3", true, false), ("F4", true, true), ("F1", false, false), ("F2", false, true)] {
+        let mut doc = slants_page(&format!("BT /{font} 12 Tf 300 700 Td (BAB) Tj ( AB) Tj ET"));
+        let typed = format!("{}بالعالم", editor_text(&doc));
+        text::replace_block(&mut doc, 0, 0, &typed).expect("writes");
+        let fonts = arabic_fonts(&doc);
+        assert_eq!(fonts.len(), 1, "{font}: {:?}", shown(&doc));
+        assert_eq!((slanted(&fonts[0]), fonts[0].trim_end_matches('I').ends_with('B')), (italic, bold), "{font}: {fonts:?}");
+        assert_eq!(font_matrix(&doc, &fonts[0]), if italic { ITALIC_MATRIX } else { UPRIGHT_MATRIX });
+        assert_eq!(actual_texts(&doc), [typed.as_str()]);
+        assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text, typed);
+        assert!(reads_back_italic(&doc, italic), "{font}");
+        // A second edit reads the slant back from the generated font and draws it again.
+        let mut again = reopen(&doc);
+        let retyped = format!("{} سم", editor_text(&again));
+        text::replace_block(&mut again, 0, 0, &retyped).expect("writes again");
+        let fonts = arabic_fonts(&again);
+        assert!(!fonts.is_empty() && fonts.iter().all(|f| slanted(f) == italic), "{font}: {fonts:?}");
+    }
+}
+
+#[test]
+fn the_slant_asked_for_in_the_format_panel_wins_over_the_runs() {
+    let _face = fake();
+    for (font, asked) in [("F1", true), ("F3", false)] {
+        let mut doc = slants_page(&format!("BT /{font} 12 Tf 300 700 Td (BAB) Tj ( AB) Tj ET"));
+        let typed = format!("{}بالعالم", editor_text(&doc));
+        let style = BlockStyle { family: Some((crate::added::Family::Helvetica, false, asked)), ..Default::default() };
+        text::rewrite_block(&mut doc, 0, 0, Some(&typed), &style).expect("writes");
+        let fonts = arabic_fonts(&doc);
+        assert!(!fonts.is_empty() && fonts.iter().all(|f| slanted(f) == asked), "{font} {asked}: {fonts:?}");
+        // (Its Latin font, a standard one of that slant, and the Arabic agree.)
+        assert!(reads_back_italic(&doc, asked), "{font} {asked}");
+    }
+    // A weight asked for alone keeps the run's slant.
+    let mut doc = slants_page("BT /F3 12 Tf 300 700 Td (BAB) Tj ( AB) Tj ET");
+    let typed = format!("{}بالعالم", editor_text(&doc));
+    text::rewrite_block(&mut doc, 0, 0, Some(&typed), &BlockStyle { bold: Some(true), ..Default::default() }).expect("writes");
+    let fonts = arabic_fonts(&doc);
+    assert!(!fonts.is_empty() && fonts.iter().all(|f| f.ends_with("BI")), "{fonts:?}");
+}
+
+#[test]
+fn a_line_edited_in_arabic_keeps_its_slant() {
+    let _face = fake();
+    for (font, italic) in [("F3", true), ("F1", false)] {
+        let mut doc = slants_page(&format!("BT /{font} 12 Tf 300 700 Td (BAB) Tj ET"));
+        text::replace_line(&mut doc, 0, 0, "بالعالم").expect("writes");
+        let fonts = arabic_fonts(&doc);
+        assert!(!fonts.is_empty() && fonts.iter().all(|f| slanted(f) == italic), "{font}: {fonts:?}");
+        assert!(fonts.iter().all(|f| font_matrix(&doc, f) == if italic { ITALIC_MATRIX } else { UPRIGHT_MATRIX }));
+        assert_eq!(actual_texts(&doc), ["بالعالم"]);
+    }
+}
+
+#[test]
+fn a_slant_change_at_every_word_stays_bounded() {
+    let _face = fake();
+    // 4,000 runs: Arabic words of one letter, upright and italic in turn, the spaces between them in the slant before.
+    let mut content = String::from("BT /F1 12 Tf 30 700 Td ");
+    for i in 0..2_000 {
+        content.push_str(if i % 2 == 0 { "/F1 12 Tf (B ) Tj " } else { "/F3 12 Tf (A ) Tj " });
+    }
+    content.push_str("ET");
+    let source = slants_page(&content);
+    let source_text = editor_text(&source);
+    assert!(source_text.chars().count() >= 3_999, "{}", source_text.chars().count());
+    let mut written = 0;
+    for typed in [format!("{source_text}سم PDF"), format!("{source_text}{}", "ب ".repeat(2_000))] {
+        for style in [BlockStyle::default(), BlockStyle { width: Some(200.0), align: Some(Align::Justify), ..Default::default() }] {
+            let mut doc = source.clone();
+            let started = std::time::Instant::now();
+            match text::rewrite_block(&mut doc, 0, 0, Some(&typed), &style) {
+                Ok(_) => {
+                    written += 1;
+                    let bytes = page_content_bytes(&doc, 0).len();
+                    assert!(bytes < 4_000_000, "{bytes} bytes for {} characters", typed.chars().count());
+                    let fonts = arabic_fonts(&doc);
+                    assert!(fonts.iter().any(|f| slanted(f)) && fonts.iter().any(|f| !slanted(f)), "{:?}", &fonts[..fonts.len().min(8)]);
+                    let read: String = read_lines(&doc).concat();
+                    assert_eq!(read.split_whitespace().collect::<String>(), typed.split_whitespace().collect::<String>());
+                }
+                Err(e) => assert!(!e.to_string().is_empty()),
+            }
+            assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+        }
+    }
+    assert_eq!(written, 4);
+}
+
+#[test]
+fn the_real_face_draws_an_italic_paragraph_from_the_upright_glyphs_sheared() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("built without a craft-fonts Arabic face: the real-face italic check needs CRAFT_FONTS_DIR");
+        return;
+    }
+    let written = |font: &str| {
+        let mut doc = slants_page(&format!("BT /{font} 12 Tf 300 700 Td (BAB) Tj ( AB) Tj ET"));
+        let typed = "بالعالم";
+        text::replace_block(&mut doc, 0, 0, typed).expect("writes");
+        assert_eq!(actual_texts(&doc), [typed]);
+        assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text, typed);
+        let fonts = arabic_fonts(&doc);
+        assert_eq!(fonts.len(), 1, "{fonts:?}");
+        let (font_dict, _) = font_and_descriptor(&doc, &fonts[0]);
+        let procs: Vec<Vec<u8>> = match font_dict.get(b"CharProcs") {
+            Some(Object::Dict(procs)) => procs
+                .iter()
+                .filter_map(|(_, p)| match &*doc.resolve(p) {
+                    Object::Stream(s) => s.decoded().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        (fonts[0].clone(), font_matrix(&doc, &fonts[0]), font_dict.get(b"Widths").cloned(), procs)
+    };
+    let (upright, upright_matrix, upright_widths, upright_procs) = written("F1");
+    let (italic, italic_matrix, italic_widths, italic_procs) = written("F3");
+    assert!(!slanted(&upright) && slanted(&italic), "{upright} {italic}");
+    assert_eq!((upright_matrix.as_slice(), italic_matrix.as_slice()), (UPRIGHT_MATRIX.as_slice(), ITALIC_MATRIX.as_slice()));
+    assert_eq!(italic_widths, upright_widths);
+    assert!(!italic_procs.is_empty());
+    assert_eq!(italic_procs, upright_procs);
 }

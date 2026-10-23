@@ -106,8 +106,16 @@ bold Arabic regular, as before. The Edit text box draws bold Arabic at the same 
 font is the interface's semibold faces with the Arabic face at `wght` 700, `theme::EDITOR_BOLD`),
 so a bold Arabic word is as wide in the box as on the page. Where the rewrite refuses a draft the box
 cannot ask it for the page's rows, and breaks the lines by a measure of its own that sets each character in
-the font and size of its own source row (the looks the box draws by), not in the first row's. Still different: italic Arabic is
-drawn upright; a line that keeps one span (above) reads back as one run in the look of its
+the font and size of its own source row (the looks the box draws by), not in the first row's. An italic look's Arabic is
+slanted: a look is italic when its run's font is (its name says Italic, Oblique or Slanted, or its descriptor has the Italic
+flag or an `ItalicAngle`) unless a family is asked for with its slant in the Format panel, the rule that picks the italic
+standard font for its Latin text (`text_looks::settled_italic`); a whole italic paragraph, and an italic line on the line form,
+are slanted too. The Arabic face has no italic (no `ital` or `slnt` axis), so the slant is synthesized, not a true italic: the
+upright glyphs are drawn from Type 3 fonts of their own (`PCEdAr…I`, `…BI` when bold too) whose `FontMatrix` shears them by 12°
+(`[0.001 0 0.0002126 0.001 0 0]`), with an `ItalicAngle` of −12, the Italic flag and a `FontName` ending `-Italic` (or
+`-BoldItalic`), so a later edit reads the run as italic again. The glyph procedures, widths, measure, `/ActualText` and ToUnicode
+maps are the upright run's. The Edit text box shows the slant: it shears the vertices of an italic look's Arabic glyphs by the
+same 12° about the baseline (its Latin rows are drawn as before). Still different: a line that keeps one span (above) reads back as one run in the look of its
 leftmost run, so editing it again starts from one look for that line; a look whose spans read
 alike (the same generated font, size and colour, only the Latin font differing) reads back as the
 look of the first; past 256 looks in one paragraph the rest take the first.

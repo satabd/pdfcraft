@@ -305,3 +305,45 @@ fn a_bold_item_draws_its_arabic_at_the_faces_bold_instance() {
     let span = |out: &str| out.lines().find(|l| l.contains("ActualText")).map(str::to_owned);
     assert_eq!(span(&bold_out), span(&regular_out));
 }
+
+#[test]
+fn an_italic_item_draws_its_shaped_glyphs_from_a_sheared_font() {
+    // No face needed: the clusters and outlines are injected. The same line drawn upright and italic.
+    let laid = vec![line((1..=3).map(|i| cluster(i, 0.5)).collect(), true)];
+    let drawn = |italic: bool| {
+        let t = AddedText { italic, ..item() };
+        let mut doc = Document::new_empty();
+        let (mut fonts, mut out) = (Dict::new(), Vec::new());
+        draw_laid_shaped(&mut doc, &t, &laid, &Dict::new(), &mut fonts, &mut out, |_, _| Ok(boxed(0.5))).expect("draws");
+        let font = fonts.iter().find(|(name, _)| name.starts_with(b"PCAr")).and_then(|(_, f)| doc.dict(f)).expect("a generated font");
+        let descriptor = font.get(b"FontDescriptor").and_then(|d| doc.dict(d)).expect("a descriptor");
+        let numbers = |o: Option<&Object>| match o {
+            Some(Object::Array(a)) => a.iter().filter_map(Object::as_f64).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let decoded = |o: &Object| match &*doc.resolve(o) {
+            Object::Stream(s) => s.decoded().ok(),
+            _ => None,
+        };
+        let procs: Vec<Vec<u8>> = match font.get(b"CharProcs") {
+            Some(Object::Dict(procs)) => procs.iter().filter_map(|(_, p)| decoded(p)).collect(),
+            _ => Vec::new(),
+        };
+        let to_unicode = font.get(b"ToUnicode").and_then(decoded);
+        let angle = descriptor.get(b"ItalicAngle").and_then(Object::as_f64);
+        let matrix = numbers(font.get(b"FontMatrix"));
+        let drawing = (procs, numbers(font.get(b"Widths")), to_unicode, glyphs_shown(&out).len(), String::from_utf8_lossy(&out).into_owned());
+        (matrix, angle, pdfcraft_fonts::pdf::Metrics::from_dict(&doc, &font).italic, drawing)
+    };
+    let (upright_matrix, upright_angle, upright_italic, upright) = drawn(false);
+    let (italic_matrix, italic_angle, italic_italic, italic) = drawn(true);
+    assert_eq!(upright_matrix, [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
+    assert_eq!(italic_matrix, [0.001, 0.0, 0.000_212_6, 0.001, 0.0, 0.0]);
+    assert_eq!((upright_angle, italic_angle), (Some(0.0), Some(-12.0)));
+    assert!(!upright_italic && italic_italic);
+    // The glyphs, their widths and text, and where they are shown are the upright item's (the Latin font aside).
+    assert_eq!(italic.0, upright.0);
+    assert_eq!((&italic.1, &italic.2, italic.3), (&upright.1, &upright.2, upright.3));
+    let span = |out: &str| out.lines().find(|l| l.contains("ActualText")).map(str::to_owned);
+    assert_eq!(span(&italic.4), span(&upright.4));
+}

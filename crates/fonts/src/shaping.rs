@@ -43,6 +43,31 @@ pub enum Weight {
     Bold,
 }
 
+/// Whether shaped text is drawn upright or slanted. None of the shaped-script faces has an italic (no `ital` or `slnt`
+/// axis, no italic face), so an italic look is drawn with a synthesized oblique: its Type 3 fonts carry a shear of
+/// [`Slant::SKEW_DEGREES`] in their `FontMatrix` (ISO 32000-2 §9.6.5), as renderers fake an italic for a face without
+/// one. The shear leaves the shapes' advances, and so every width and measure, as they are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Slant {
+    #[default]
+    Upright,
+    Italic,
+}
+
+impl Slant {
+    /// The angle of the synthesized oblique, clockwise from upright.
+    pub const SKEW_DEGREES: f64 = 12.0;
+
+    /// How far right a point at height `h` above the baseline moves, per unit of `h`: tan 12° to four places for
+    /// [`Slant::Italic`], none upright.
+    pub fn shear(self) -> f64 {
+        match self {
+            Self::Upright => 0.0,
+            Self::Italic => 0.2126,
+        }
+    }
+}
+
 impl ShapedScript {
     pub fn font(self) -> Option<&'static crate::CraftFont> {
         match self {

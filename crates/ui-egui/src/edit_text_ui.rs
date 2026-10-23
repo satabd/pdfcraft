@@ -1306,7 +1306,14 @@ fn line_formats(
             italics: look.italic && !embedded,
             ..Default::default()
         },
-        joined: egui::TextFormat { font_id: joined_font, color: color32(look.color), ..Default::default() },
+        // An italic look's Arabic is slanted on the page (the shaped glyphs' synthesized 12° oblique) unless the page's own
+        // face draws it; `italics` marks its glyphs, which `slant_joined_glyphs` shears as the page does.
+        joined: egui::TextFormat {
+            font_id: joined_font,
+            color: color32(look.color),
+            italics: look.italic && page_face.is_none(),
+            ..Default::default()
+        },
     }
 }
 
@@ -1590,6 +1597,7 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &Scre
             glyph.line_height = ascent + descent;
         }
         widgets::shift_glyph_vertices(row, &dy);
+        slant_joined_glyphs(row, ascent);
         row.size.y = (ascent + descent).max(1.0);
         row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
         bounds = bounds.union(Rect::from_min_size(placed.pos, row.size));
@@ -1598,6 +1606,34 @@ fn editor_galley(ui: &egui::Ui, ed: &LineEditor, ctx: &LayoutCtx<'_>, map: &Scre
     g.rect = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(bounds.right().max(0.0), bounds.bottom().max(0.0)));
     g.mesh_bounds = meshes;
     galley
+}
+
+/// The glyphs of `row` in an italic look's Arabic (a joined letter of a section with `italics`, see [`line_formats`])
+/// sheared as the page slants them: by [`pdfcraft_fonts::Slant::Italic`]'s 12° about the baseline `baseline` (row
+/// coordinates), in place of egui's own italic skew. egui skews a glyph by moving the top corners of its quad right by a
+/// quarter of its height, which is how such a glyph is known here (a glyph's section is private to egui); Latin italic
+/// keeps egui's skew.
+fn slant_joined_glyphs(row: &mut egui::epaint::text::Row, baseline: f32) {
+    // egui's skew (`epaint::text::text_layout`, `tessellate_glyphs`).
+    const EGUI_SKEW: f32 = 0.25;
+    let shear = pdfcraft_fonts::Slant::Italic.shear() as f32;
+    let end = row.visuals.glyph_vertex_range.end.min(row.visuals.mesh.vertices.len());
+    for glyph in row.glyphs.iter().filter(|g| bidi::is_joining_script(g.chr) && !g.uv_rect.is_nothing()) {
+        let from = (glyph.first_vertex as usize).min(end);
+        let Some([top_left, top_right, bottom_left, bottom_right]) = row.visuals.mesh.vertices.get_mut(from..from.saturating_add(4).min(end)) else {
+            continue;
+        };
+        let height = bottom_left.pos.y - top_left.pos.y;
+        let skewed = height > 0.0 && (top_left.pos.x - bottom_left.pos.x - EGUI_SKEW * height).abs() <= 1e-3 * height.max(1.0);
+        if !skewed {
+            continue;
+        }
+        top_left.pos.x -= EGUI_SKEW * height;
+        top_right.pos.x -= EGUI_SKEW * (bottom_right.pos.y - top_right.pos.y);
+        for vertex in [top_left, top_right, bottom_left, bottom_right] {
+            vertex.pos.x += (baseline - vertex.pos.y) * shear;
+        }
+    }
 }
 
 /// The map of the draft `text` as the editor lays it out in one piece (not wrapped), in the direction the
@@ -2469,6 +2505,50 @@ mod tests {
         let phrase = format!("{SALAM} {BIL_ALAM} \u{627}\u{644}\u{633}\u{644}\u{627}\u{645} {ALAYKUM}");
         let (_, out, map) = bold_rig(&phrase, true).expect("the Arabic face");
         assert_eq!(drawn(&out.galley), map.drawn.iter().copied().filter(|c| *c != '\n').collect::<Vec<_>>(), "a glyph for every drawn character");
+    }
+
+    /// For each inked glyph of the galley's first row that `keep` takes: how far right the top of its quad sits of its
+    /// bottom, and its height (screen points).
+    fn leans(galley: &egui::Galley, keep: impl Fn(char) -> bool) -> Vec<(f32, f32)> {
+        let row = &galley.rows[0].row;
+        let vertices = &row.visuals.mesh.vertices;
+        row.glyphs
+            .iter()
+            .filter(|g| keep(g.chr) && !g.uv_rect.is_nothing())
+            .filter_map(|g| match vertices.get(g.first_vertex as usize..g.first_vertex as usize + 4) {
+                Some([top_left, _, bottom_left, _]) => Some((top_left.pos.x - bottom_left.pos.x, bottom_left.pos.y - top_left.pos.y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An italic look's Arabic is sheared in the box as the page slants it (12° about the baseline: the top of a letter
+    /// sits right of its bottom by tan 12° of its height), and a regular look's is upright; Latin italic keeps egui's skew.
+    #[test]
+    fn italic_arabic_in_the_box_is_slanted_as_the_page_draws_it() {
+        let lean_of = |draft: &str, italic: bool| {
+            let (_app, mut ed) = styled_editor(draft, false);
+            ed.look.italic = italic;
+            let mut rig = Rig::arabic(ed)?;
+            rig.width = 2000.0;
+            let (out, _) = rig.frame(vec![]);
+            Some((leans(&out.galley, bidi::is_joining_script), leans(&out.galley, |c| c.is_ascii_alphabetic())))
+        };
+        let Some((upright, _)) = lean_of(BIL_ALAM, false) else {
+            eprintln!("skipping: no Arabic face for the editor (build with CRAFT_FONTS_DIR)");
+            return;
+        };
+        let (italic, _) = lean_of(BIL_ALAM, true).expect("the Arabic face");
+        assert!(!upright.is_empty() && upright.len() == italic.len(), "{upright:?} {italic:?}");
+        assert!(upright.iter().all(|(lean, _)| lean.abs() < 1e-3), "upright: {upright:?}");
+        let tan = (12.0f32).to_radians().tan();
+        // The tallest letter (alef, lam) leans by the page's slant of its height.
+        let &(lean, height) = italic.iter().max_by(|a, b| a.1.total_cmp(&b.1)).expect("a glyph");
+        assert!(height > 10.0 && (lean - tan * height).abs() < 0.01 * height, "lean {lean} for height {height}: {italic:?}");
+        assert!(italic.iter().all(|(lean, height)| (lean - tan * height).abs() < 0.01 * height.max(1.0)), "{italic:?}");
+        // Latin italic is egui's skew, a quarter of the glyph's height, as before.
+        let (_, latin) = lean_of(&format!("{BIL_ALAM} Hello"), true).expect("the Arabic face");
+        assert!(!latin.is_empty() && latin.iter().all(|(lean, height)| (lean - 0.25 * height).abs() < 1e-3), "{latin:?}");
     }
 
     /// The widest extent of the glyphs of `line` laid out in `font`, as the wrapping measures a line.

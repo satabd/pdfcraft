@@ -74,6 +74,15 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
   `Measure::weighted`, the `weights` of `plan_looked`); a bold look's clusters go in Type 3 fonts
   of their own (resource name `<prefix><object number>B`, `FontName` ending `-Bold`, `FontWeight`
   700). No weight, or all regular, plans byte for byte as before; every other writer passes none.
+- `Slant` (`Upright`, `Italic`) / `shaped_text::type3_shaped_slanted`: italic shaped text. No
+  shaped-script face has an italic (no `ital` or `slnt` axis), so an italic look's glyphs are the
+  upright ones in Type 3 fonts whose `FontMatrix` shears them by 12° (`[0.001 0 0.0002126 0.001 0
+  0]`, ISO 32000-2 §9.6.5): a synthesized oblique, with `ItalicAngle -12`, the Italic flag and a
+  `FontName` ending `-Italic` (`-BoldItalic`). A slant changes no advance, so it is no input of
+  shaping or `Measure`; `plan_looked` takes the `slants` of its looks, and an italic look's clusters
+  go in fonts of their own (resource name ending `I`, or `BI` with bold). No slant, or all upright,
+  plans byte for byte as before; every other writer passes none (Add text passes its italic flag
+  to `type3_shaped_slanted`).
 - `document_japanese_fonts_for_style`: every `Jpan` face in that order of preference, so the
   editor can use the first one that has all of the replacement's glyphs (the faces differ in
   coverage, e.g. of Cyrillic).

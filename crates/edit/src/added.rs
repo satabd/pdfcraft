@@ -16,7 +16,7 @@ use pdfcraft_fonts::{GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Std1
 // The shaped-text layout is shared with the other writers (forms, annotations) and lives in
 // `pdfcraft_fonts::shaped_text`; Add text and Edit text use it under their old names.
 pub(crate) use pdfcraft_fonts::shaped_text::{
-    ClusterKey, GLYPHS_PER_FONT, Piece, Shaper, cluster_key, is_arabic, is_bidi_control, is_hebrew, type3_shaped,
+    ClusterKey, GLYPHS_PER_FONT, Piece, Shaper, cluster_key, is_arabic, is_bidi_control, is_hebrew, type3_shaped_slanted,
 };
 
 use crate::{EditError, MarkKind, check, contents, matrix_number, n, page_list, place_tagged};
@@ -522,6 +522,7 @@ fn draw_laid_shaped(
 ) -> Result<(), EditError> {
     let r = text_rect(t);
     let latin = font_name(t.family.base_font(t.bold, t.italic));
+    let slant = if t.italic { pdfcraft_fonts::Slant::Italic } else { pdfcraft_fonts::Slant::Upright };
     // Every distinct cluster (a letter with its dots and the text it stands for) is one glyph of
     // one of the fonts, so copy and search get each character exactly once.
     let mut keys: Vec<&ShapedCluster> = Vec::new();
@@ -549,7 +550,8 @@ fn draw_laid_shaped(
     let mut taken_names: HashSet<Vec<u8>> = taken.iter().chain(fonts.iter()).map(|(name, _)| name.clone()).collect();
     let mut names = Vec::new();
     for chunk in keys.chunks(GLYPHS_PER_FONT) {
-        let font = type3_shaped(doc, chunk, &outlines, None);
+        // An italic item's glyphs slant (the faces have no italic: a synthesized oblique, see `Slant`).
+        let font = type3_shaped_slanted(doc, chunk, &outlines, None, slant);
         // A name no font on the page has, so items never replace each other's fonts (object
         // numbers alone don't do: a full save renumbers objects but keeps resource names).
         let mut name = format!("PCAr{}", font.num);

@@ -2097,9 +2097,11 @@ fn shaped_line(
         Ok(vec![Op::new("Tj", vec![Object::String(PdfString::literal(pdfcraft_fonts::win_ansi(s)))])])
     };
     let latin_font = if reuse.is_some() { target.font.as_str() } else { helvetica.as_str() };
-    // The Arabic in the line's weight, as its Latin text is (the rule of `looks::settled_bold` with no style asked for).
+    // The Arabic in the line's weight and slant, as its Latin text is (the rules of `looks::settled_bold` and
+    // `looks::settled_italic` with no style asked for).
     let latin_show = text_shaped::LatinShow { font: latin_font, show: &show };
-    let plan = text_shaped::plan(doc, fonts_res, &[text.to_owned()], rtl, max_glyphs, &latin_show, looks::weight(target.bold))?;
+    let (weight, slant) = (looks::weight(target.bold), looks::slant(target.italic));
+    let plan = text_shaped::plan(doc, fonts_res, &[text.to_owned()], rtl, max_glyphs, &latin_show, weight, slant)?;
     if reuse.is_none() {
         let mut f = Dict::new();
         f.set(b"Type".to_vec(), Object::name("Font"));
@@ -2567,9 +2569,10 @@ fn rewrite_block_from(
             .is_some_and(|m| source_encodes(m, &indic_text) && (!shaped || source_encodes(m, &text_shaped::with_mirrors(&indic_text))));
     let space = metrics.as_ref().map_or(0.33, |m| source_space(doc, &fonts_res, m));
     // The chosen style also determines the real Japanese fallback outlines and advances.
-    let (family, _, italic) = style.family.unwrap_or((source_family(&b.base_font), b.bold, b.italic));
-    // (The rule each look of a paragraph of several follows too: its Arabic is drawn at this weight.)
+    let family = style.family.map_or_else(|| source_family(&b.base_font), |(family, _, _)| family);
+    // (The rules each look of a paragraph of several follows too: its Arabic is drawn at this weight and slant.)
     let bold = looks::settled_bold(b.bold, style);
+    let italic = looks::settled_italic(b.italic, style);
     // The face is chosen after `bold` settles, so a bold request measures with the bold metrics.
     let face = family.std14(bold, italic);
     let std_width = move |s: &str, size: f64| -> f64 { face.text_width(s, size) };
@@ -2635,7 +2638,8 @@ fn rewrite_block_from(
     };
     // Shaped Arabic is measured by laying a line out; Latin pieces by the font that draws them.
     // (The Latin pieces of a line: the paragraph's own font where it has them, the standard font of its family otherwise.)
-    let first_look = looks::LatinLook { metrics: metrics.clone().filter(|_| reuse), space, face, size, weight: looks::weight(bold) };
+    let first_look =
+        looks::LatinLook { metrics: metrics.clone().filter(|_| reuse), space, face, size, weight: looks::weight(bold), slant: looks::slant(italic) };
     let latin_width = |s: &str| -> f64 { first_look.width(s) };
     // The other looks of a paragraph of several (see `looks`): each in its run's size and fill colour, its Latin text in its
     // run's own font where that has it. Settled before anything is written.
@@ -2660,6 +2664,8 @@ fn rewrite_block_from(
     let other_widths: Vec<_> = other_looks.iter().map(|(_, look, _)| move |s: &str| look.width(s)).collect();
     // Each look's weight, the paragraph's first: a bold look's Arabic is measured and drawn at the face's bold instance.
     let weights: Vec<text_shaped::Weight> = std::iter::once(first_look.weight).chain(other_looks.iter().map(|(_, look, _)| look.weight)).collect();
+    // And slant: an italic look's Arabic is drawn slanted (no input of the measure: a slant changes no advance).
+    let slants: Vec<text_shaped::Slant> = std::iter::once(first_look.slant).chain(other_looks.iter().map(|(_, look, _)| look.slant)).collect();
     let measure = shaped.then(|| {
         match &looked {
             Some(_) => text_shaped::Measure::with_looks(
@@ -2860,10 +2866,10 @@ fn rewrite_block_from(
             let fonts = std::iter::once(shown_font.as_str()).chain(other_looks.iter().map(|(font, _, _)| font.as_str()));
             let latins: Vec<text_shaped::LatinShow> = fonts.zip(&shows).map(|(font, show)| text_shaped::LatinShow { font, show: *show }).collect();
             let lines: Vec<(String, Vec<usize>)> = wrapped.iter().cloned().zip(wrapped_looks.iter().cloned()).collect();
-            text_shaped::plan_looked(doc, &mut fonts_res, &lines, rtl, max_glyphs, &latins, &weights)?
+            text_shaped::plan_looked(doc, &mut fonts_res, &lines, rtl, max_glyphs, &latins, &weights, &slants)?
         } else {
             let latin = text_shaped::LatinShow { font: &shown_font, show: &latin_ops };
-            text_shaped::plan(doc, &mut fonts_res, &wrapped, rtl, max_glyphs, &latin, first_look.weight)?
+            text_shaped::plan(doc, &mut fonts_res, &wrapped, rtl, max_glyphs, &latin, first_look.weight, first_look.slant)?
         };
         substituted = Some(format!("{} Type3", plan.family()));
         Some(plan)

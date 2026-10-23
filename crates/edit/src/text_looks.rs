@@ -8,6 +8,8 @@
 //!
 //! A look is bold when its run's font is ([`settled_bold`]: the rule that picks the standard font of its family and
 //! weight for its Latin text), and its Arabic is then drawn at the Arabic face's bold instance ([`LatinLook::weight`]).
+//! It is italic when its run's font is ([`settled_italic`]: the rule that picks the italic standard font for its Latin
+//! text), and its Arabic is then drawn with a synthesized slant ([`LatinLook::slant`]).
 
 use super::*;
 
@@ -141,6 +143,20 @@ pub(super) fn weight(bold: bool) -> pdfcraft_fonts::Weight {
     if bold { pdfcraft_fonts::Weight::Bold } else { pdfcraft_fonts::Weight::Regular }
 }
 
+/// Whether text drawn like a run whose font is italic (`italic`: its name or descriptor says so, see
+/// `pdfcraft_fonts::pdf::Metrics::italic`) is italic as `style` leaves it: a family asked for (the Format panel's, with
+/// its slant) wins. The one rule for both halves of a shaped paragraph: it picks the standard font of the family and
+/// slant the Latin text is shown in, and whether the Arabic is drawn slanted.
+pub(super) fn settled_italic(italic: bool, style: &BlockStyle) -> bool {
+    style.family.map_or(italic, |(_, _, italic)| italic)
+}
+
+/// The slant Arabic is drawn at in text that is `italic` or not: the Arabic face has no italic, so an italic look's is
+/// the upright face's shapes with a synthesized 12° oblique (see `pdfcraft_fonts::Slant`).
+pub(super) fn slant(italic: bool) -> pdfcraft_fonts::Slant {
+    if italic { pdfcraft_fonts::Slant::Italic } else { pdfcraft_fonts::Slant::Upright }
+}
+
 /// How a look shows the Latin text among its Arabic: in its run's own font where that font has the characters, in the
 /// standard font of its family and weight otherwise.
 pub(super) struct LatinLook {
@@ -154,6 +170,8 @@ pub(super) struct LatinLook {
     pub size: f64,
     /// The weight its Arabic is drawn at (bold when [`settled_bold`] says so).
     pub weight: pdfcraft_fonts::Weight,
+    /// The slant its Arabic is drawn at (italic when [`settled_italic`] says so).
+    pub slant: pdfcraft_fonts::Slant,
 }
 
 impl LatinLook {
@@ -189,8 +207,9 @@ impl LatinLook {
         style: &BlockStyle,
         size: f64,
     ) -> Result<(String, Self), EditError> {
-        let (family, _, italic) = style.family.unwrap_or((source_family(&line.base_font), line.bold, line.italic));
+        let family = style.family.map_or_else(|| source_family(&line.base_font), |(family, _, _)| family);
         let bold = settled_bold(line.bold, style);
+        let italic = settled_italic(line.italic, style);
         let face = family.std14(bold, italic);
         let metrics =
             fonts_res.get(line.font.as_bytes()).and_then(|f| doc.resolve(f).as_dict().cloned()).map(|d| Metrics::from_dict(doc, &d)).filter(|m| {
@@ -198,7 +217,7 @@ impl LatinLook {
             });
         if let Some(m) = metrics {
             let space = source_space(doc, fonts_res, &m);
-            return Ok((line.font.clone(), LatinLook { metrics: Some(m), space, face, size, weight: weight(bold) }));
+            return Ok((line.font.clone(), LatinLook { metrics: Some(m), space, face, size, weight: weight(bold), slant: slant(italic) }));
         }
         if needs_type3(latin) {
             return Err(text_shaped::unsupported_with_arabic(latin));
@@ -211,7 +230,7 @@ impl LatinLook {
         f.set(b"BaseFont".to_vec(), Object::name(base));
         f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
         fonts_res.set(font.clone().into_bytes(), Object::Dict(f));
-        Ok((font, LatinLook { metrics: None, space: 0.33, face, size, weight: weight(bold) }))
+        Ok((font, LatinLook { metrics: None, space: 0.33, face, size, weight: weight(bold), slant: slant(italic) }))
     }
 }
 
