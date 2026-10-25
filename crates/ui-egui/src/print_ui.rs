@@ -7,6 +7,7 @@ use egui::{Color32, Pos2, Rect, Stroke, pos2, vec2};
 use pdfcraft_engine::print::{self, Binding, BookletSubset, Content, Layout, Orientation, PAPERS, PageOrder, SizeMode, Subset, spool};
 
 use crate::theme::{self, Tokens};
+use crate::widgets::HoverParagraph as _;
 use crate::{PdfCraftApp, widgets};
 
 /// The preview pane, and the paper inside it (12 pt inset on each side).
@@ -160,8 +161,10 @@ impl PrintDraft {
             Which::All | Which::Range => print::select_pages(count, range.as_deref(), labels, self.subset, self.reverse),
         }
         // What the person got wrong about what to print is said in their language: the engine hands
-        // the wording over whole and the page numbers apart from it.
-        .map_err(|e| e.said(&crate::i18n::words))?;
+        // the wording over whole and the page numbers apart from it. The wording is taken back to
+        // logical order first, so the preview's paragraph wraps an Arabic sentence from its first
+        // words; the toast puts it into display order again (`bidi::display_rtl`).
+        .map_err(|e| e.said(&|wording| crate::i18n::logical(&crate::i18n::words(wording)).to_owned()))?;
         let layout = match self.handling {
             Handling::Size => Layout::Size(match self.size {
                 SizeMode::Custom(_) => SizeMode::Custom(self.custom_scale),
@@ -494,7 +497,7 @@ impl PdfCraftApp {
         let settings = match self.print_draft.settings(doc.info.pages.len(), &labels) {
             Ok(s) => s,
             Err(e) => {
-                self.notify_tr(&e);
+                self.notify_tr(&crate::bidi::display_rtl(&e));
                 return false;
             }
         };
@@ -1133,7 +1136,11 @@ pub(crate) fn body(
             ui.painter().rect_filled(area, 6.0, t.hover);
             match (&settings, sheets.get(d.sheet)) {
                 (Err(e), _) => {
-                    ui.put(area.shrink(16.0), egui::Label::new(egui::RichText::new(tl!(e)).color(t.text_muted)).wrap());
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(area.shrink(16.0)), |ui| {
+                        // A catalog sentence (cut and stack) comes back from `tl!` in display order
+                        // and goes to logical; a said error is logical already and passes through.
+                        widgets::paragraph_logical(ui, crate::i18n::logical(tl!(e)), egui::TextStyle::Body.resolve(ui.style()), t.text_muted);
+                    });
                 }
                 (Ok(_), Some(sheet)) => {
                     let k = (PREVIEW_BOX.0 / sheet.size.0 as f32).min(PREVIEW_BOX.1 / sheet.size.1 as f32);
@@ -1198,7 +1205,7 @@ pub(crate) fn body(
             }
             ui.horizontal(|ui| {
                 let n = sheets.len();
-                if ui.add_enabled(d.sheet > 0, egui::Button::new("‹")).on_hover_text(tl!("Previous sheet")).clicked() {
+                if ui.add_enabled(d.sheet > 0, egui::Button::new("‹")).on_hover_paragraph(tl!("Previous sheet")).clicked() {
                     d.sheet -= 1;
                 }
                 ui.label(if n == 0 {
@@ -1206,7 +1213,7 @@ pub(crate) fn body(
                 } else {
                     crate::i18n::fmt(tl!("Sheet {s} of {n}"), &[("s", &(d.sheet + 1).to_string()), ("n", &n.to_string())])
                 });
-                if ui.add_enabled(d.sheet + 1 < n, egui::Button::new("›")).on_hover_text(tl!("Next sheet")).clicked() {
+                if ui.add_enabled(d.sheet + 1 < n, egui::Button::new("›")).on_hover_paragraph(tl!("Next sheet")).clicked() {
                     d.sheet += 1;
                 }
             });

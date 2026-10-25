@@ -5,6 +5,7 @@ use egui::{Align, Layout};
 use crate::theme::{self, Tokens};
 use pdfcraft_engine::Edit;
 
+use crate::widgets::HoverParagraph as _;
 use crate::{CloseRequest, Dialog, PdfCraftApp, PropsTab, panels::human_size, widgets};
 
 const INFO_KEYS: [&str; 4] = ["Title", "Author", "Subject", "Keywords"];
@@ -361,7 +362,7 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                                         for n in (1..ends.len()).rev().take(12) {
                                             if ui
                                                 .small_button(crate::i18n::fmt(tl!("View revision {n}"), &[("n", &n.to_string())]))
-                                                .on_hover_text(tl!("Open the file as it was saved then"))
+                                                .on_hover_paragraph(tl!("Open the file as it was saved then"))
                                                 .clicked()
                                             {
                                                 open_revision = Some(n);
@@ -1479,12 +1480,11 @@ fn save_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
         ui.set_width(420.0);
         ui.horizontal(|ui| {
             ui.add(crate::icons::image("save", 22.0, t.accent));
-            let title = ui.add(
-                egui::Label::new(
-                    egui::RichText::new(crate::i18n::fmt(tl!("Save changes to “{name}” before closing?"), &[("name", &shown)]))
-                        .font(theme::semibold(16.0)),
-                )
-                .wrap(),
+            let title = widgets::paragraph_logical(
+                ui,
+                &crate::i18n::fmt(crate::i18n::logical(tl!("Save changes to “{name}” before closing?")), &[("name", &shown)]),
+                theme::semibold(16.0),
+                t.text,
             );
             if shown != name {
                 title.on_hover_text(&name);
@@ -1610,11 +1610,13 @@ fn full_screen_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ui.label(egui::RichText::new(tl!("Open in Full Screen mode?")).font(theme::semibold(16.0)));
         });
         ui.add_space(6.0);
-        ui.add(
-            egui::Label::new(tl!(
+        widgets::paragraph(
+            ui,
+            tl!(
                 "This document asks to open in Full Screen mode: the page fills the screen and nothing else shows. Press Esc at any time to leave it."
-            ))
-            .wrap(),
+            ),
+            egui::TextStyle::Body.resolve(ui.style()),
+            t.text,
         );
         ui.add_space(14.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1695,7 +1697,7 @@ fn password_modal(
             ui.label(egui::RichText::new(title).font(theme::semibold(17.0)));
         });
         ui.add_space(6.0);
-        ui.add(egui::Label::new(message).wrap());
+        widgets::paragraph_logical(ui, &message, egui::TextStyle::Body.resolve(ui.style()), t.text);
         ui.add_space(8.0);
         let r = ui.add(widgets::line(input).password(true).hint_text(tl!("Password")).desired_width(f32::INFINITY));
         // Enter submits. The field keeps focus (we request it every frame), so check the key
@@ -1725,7 +1727,9 @@ fn password_modal(
 /// Password prompt for encrypted documents (Acrobat: "Password" dialog on open).
 fn password(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let Some(prompt) = app.password_prompt.as_mut() else { return };
-    let message = crate::i18n::fmt(tl!("“{name}” is protected. Enter a password to open it."), &[("name", &prompt.name)]);
+    // The template goes back to the catalog's order before the name is filled in, so the
+    // paragraph in the modal wraps an Arabic message from its first words.
+    let message = crate::i18n::fmt(crate::i18n::logical(tl!("“{name}” is protected. Enter a password to open it.")), &[("name", &prompt.name)]);
     match password_modal(ctx, "password", tl!("Password required"), message, &mut prompt.input, prompt.error.as_deref(), tl!("Open")) {
         Some(PasswordAnswer::Submit) => {
             let pw = prompt.input.clone();
@@ -1739,8 +1743,10 @@ fn password(app: &mut PdfCraftApp, ctx: &egui::Context) {
 /// Permissions password prompt: lifts the restrictions of an open document (#995).
 fn unlock(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let Some(prompt) = app.unlock_prompt.as_mut() else { return };
-    let message =
-        crate::i18n::fmt(tl!("“{name}” has security restrictions. Enter its permissions password to lift them."), &[("name", &prompt.name)]);
+    let message = crate::i18n::fmt(
+        crate::i18n::logical(tl!("“{name}” has security restrictions. Enter its permissions password to lift them.")),
+        &[("name", &prompt.name)],
+    );
     match password_modal(ctx, "unlock", tl!("Permissions password"), message, &mut prompt.input, prompt.error.as_deref(), tl!("Unlock")) {
         Some(PasswordAnswer::Submit) => {
             let pw = prompt.input.clone();
