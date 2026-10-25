@@ -298,9 +298,23 @@ pub fn wrapped_text(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Co
 /// description, a long tooltip). Pass what [`tl!`] gave. A right-to-left language's translation
 /// comes in display order, which egui would wrap from the wrong end (the last words on the first
 /// line), so it goes back to the catalog's order ([`crate::i18n::logical`]) and [`wrapped_text`]
-/// breaks and right-aligns its lines. Anything else is an ordinary wrapping label.
+/// breaks and right-aligns its lines. A label the catalog does not know (one filled in after
+/// translation) is already in display order and would be scrambled by reordering it again, so it
+/// stays an ordinary egui label; fill the holes of [`crate::i18n::logical`]'s text instead and
+/// use [`paragraph_logical`]. Anything without right-to-left script is an ordinary wrapping label.
 pub fn paragraph(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32) -> Response {
-    wrapped_text(ui, crate::i18n::logical(text), font, color, false)
+    let logical = crate::i18n::logical(text);
+    if logical == text && crate::i18n::current().rtl() && crate::bidi::has_rtl(text) {
+        return ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(color)).wrap());
+    }
+    paragraph_logical(ui, logical, font, color)
+}
+
+/// [`paragraph`] for text already in logical (typing) order: a catalog template taken back with
+/// [`crate::i18n::logical`] before its holes were filled, or an engine wording said through it.
+/// Never pass what [`tl!`] gave for a right-to-left language: that is in display order.
+pub fn paragraph_logical(ui: &mut egui::Ui, text: &str, font: egui::FontId, color: Color32) -> Response {
+    wrapped_text(ui, text, font, color, false)
 }
 
 /// [`egui::Response::on_hover_text`] for translated text, wrapped the right way round in a
@@ -313,13 +327,16 @@ pub trait HoverParagraph {
 impl HoverParagraph for Response {
     fn on_hover_paragraph(self, text: impl Into<String>) -> Response {
         let text = text.into();
-        if !crate::bidi::has_rtl(&text) {
+        let logical = crate::i18n::logical(&text);
+        // No right-to-left script, or a filled-in label already in display order: egui's own.
+        if !crate::bidi::has_rtl(&text) || (logical == text && crate::i18n::current().rtl()) {
             return self.on_hover_text(text);
         }
+        let logical = logical.to_owned();
         self.on_hover_ui(|ui| {
             let font = egui::TextStyle::Body.resolve(ui.style());
             let color = ui.visuals().text_color();
-            wrapped_text_in(ui, crate::i18n::logical(&text), font, color, false, true);
+            wrapped_text_in(ui, &logical, font, color, false, true);
         })
     }
 }
@@ -860,6 +877,21 @@ mod tests {
             assert!((pos.x + rect.width() - right).abs() < 0.5, "{text:?} must be right-aligned");
         }
         assert!(right <= 120.5, "lines stay inside the column: {right}");
+    }
+
+    /// A translation filled in after `tl!` (a page number in a print error) is not in the catalog
+    /// any more, so `paragraph` cannot take it back to logical order; reordering its display
+    /// order again would scramble it, so it stays one egui label.
+    #[test]
+    fn filled_in_translation_stays_an_egui_label() {
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        let shown = crate::i18n::fmt(tl!("page {n} is out of range (1–{count})"), &[("n", "12"), ("count", "3")]);
+        assert!(crate::bidi::has_rtl(&shown), "the Arabic catalog translates the print wording: {shown:?}");
+        let lines = paragraph_shapes(&shown);
+        crate::i18n::set_current(previous);
+        assert_eq!(lines.len(), 1, "one galley, as egui lays it out: {lines:?}");
+        assert_eq!(lines[0].2, shown, "the display-order text is painted as it came");
     }
 
     /// English, and a translation egui lays out left to right, stay ordinary wrapping labels.

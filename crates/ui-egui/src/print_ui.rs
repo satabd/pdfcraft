@@ -161,8 +161,10 @@ impl PrintDraft {
             Which::All | Which::Range => print::select_pages(count, range.as_deref(), labels, self.subset, self.reverse),
         }
         // What the person got wrong about what to print is said in their language: the engine hands
-        // the wording over whole and the page numbers apart from it.
-        .map_err(|e| e.said(&crate::i18n::words))?;
+        // the wording over whole and the page numbers apart from it. The wording is taken back to
+        // logical order first, so the preview's paragraph wraps an Arabic sentence from its first
+        // words; the toast puts it into display order again (`bidi::display_rtl`).
+        .map_err(|e| e.said(&|wording| crate::i18n::logical(&crate::i18n::words(wording)).to_owned()))?;
         let layout = match self.handling {
             Handling::Size => Layout::Size(match self.size {
                 SizeMode::Custom(_) => SizeMode::Custom(self.custom_scale),
@@ -495,7 +497,7 @@ impl PdfCraftApp {
         let settings = match self.print_draft.settings(doc.info.pages.len(), &labels) {
             Ok(s) => s,
             Err(e) => {
-                self.notify_tr(&e);
+                self.notify_tr(&crate::bidi::display_rtl(&e));
                 return false;
             }
         };
@@ -1135,7 +1137,9 @@ pub(crate) fn body(
             match (&settings, sheets.get(d.sheet)) {
                 (Err(e), _) => {
                     ui.scope_builder(egui::UiBuilder::new().max_rect(area.shrink(16.0)), |ui| {
-                        widgets::paragraph(ui, tl!(e), egui::TextStyle::Body.resolve(ui.style()), t.text_muted);
+                        // A catalog sentence (cut and stack) comes back from `tl!` in display order
+                        // and goes to logical; a said error is logical already and passes through.
+                        widgets::paragraph_logical(ui, crate::i18n::logical(tl!(e)), egui::TextStyle::Body.resolve(ui.style()), t.text_muted);
                     });
                 }
                 (Ok(_), Some(sheet)) => {

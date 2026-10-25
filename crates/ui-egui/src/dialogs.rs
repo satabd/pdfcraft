@@ -1480,7 +1480,7 @@ fn save_prompt(app: &mut PdfCraftApp, ctx: &egui::Context) {
         ui.set_width(420.0);
         ui.horizontal(|ui| {
             ui.add(crate::icons::image("save", 22.0, t.accent));
-            let title = widgets::paragraph(
+            let title = widgets::paragraph_logical(
                 ui,
                 &crate::i18n::fmt(crate::i18n::logical(tl!("Save changes to “{name}” before closing?")), &[("name", &shown)]),
                 theme::semibold(16.0),
@@ -1697,7 +1697,7 @@ fn password_modal(
             ui.label(egui::RichText::new(title).font(theme::semibold(17.0)));
         });
         ui.add_space(6.0);
-        widgets::paragraph(ui, &message, egui::TextStyle::Body.resolve(ui.style()), t.text);
+        widgets::paragraph_logical(ui, &message, egui::TextStyle::Body.resolve(ui.style()), t.text);
         ui.add_space(8.0);
         let r = ui.add(widgets::line(input).password(true).hint_text(tl!("Password")).desired_width(f32::INFINITY));
         // Enter submits. The field keeps focus (we request it every frame), so check the key
