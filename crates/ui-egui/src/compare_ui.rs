@@ -6,7 +6,7 @@ use egui::{Align, Color32, Layout};
 use pdfcraft_engine::DocId;
 use pdfcraft_engine::compare::{Comparison, Kind};
 
-use crate::theme::{self, Tokens};
+use crate::theme::Tokens;
 use crate::{PdfCraftApp, RightPanel, widgets};
 
 /// The last comparison.
@@ -45,7 +45,7 @@ pub fn colour(kind: Kind) -> Color32 {
 
 /// The Compare Files dialog: pick the older document. Returns (compare, cancel).
 pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (bool, bool) {
-    ui.label(egui::RichText::new(tl!("Compare Files")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Compare Files"));
     ui.add_space(8.0);
     let Some((_, new)) = app.active_ids() else { return (false, true) };
     let others: Vec<(DocId, String)> =
@@ -54,22 +54,22 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         app.compare_old = others.first().map(|(id, _)| *id);
     }
     let new_name = app.session.get(new).map(|d| d.name.clone()).unwrap_or_default();
-    egui::Grid::new("compare-files").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-        ui.label(tl!("Old file:"));
-        let shown =
-            others.iter().find(|(id, _)| Some(*id) == app.compare_old).map_or(tl!("Open the older version first").to_string(), |(_, n)| n.clone());
-        egui::ComboBox::from_id_salt("compare-old").selected_text(shown).width(320.0).show_ui(ui, |ui| {
-            for (id, n) in &others {
-                ui.selectable_value(&mut app.compare_old, Some(*id), n);
-            }
+    widgets::form_grid(ui, "compare-files", [12.0, 10.0], None, |rows| {
+        rows.row(tl!("Old file:"), |ui, _| {
+            let shown = others
+                .iter()
+                .find(|(id, _)| Some(*id) == app.compare_old)
+                .map_or(tl!("Open the older version first").to_string(), |(_, n)| crate::bidi::visual(n).into_owned());
+            egui::ComboBox::from_id_salt("compare-old").selected_text(shown).width(320.0).show_ui(ui, |ui| {
+                for (id, n) in &others {
+                    ui.selectable_value(&mut app.compare_old, Some(*id), crate::bidi::visual(n).into_owned());
+                }
+            });
         });
-        ui.end_row();
-        ui.label(tl!("New file:"));
-        ui.label(egui::RichText::new(new_name).strong());
-        ui.end_row();
+        rows.row(tl!("New file:"), |ui, _| _ = ui.label(egui::RichText::new(crate::bidi::visual(&new_name)).strong()));
     });
     ui.add_space(4.0);
-    ui.label(egui::RichText::new(tl!("Text is compared word by word; the differences are shown on the new file.")).small().color(t.text_muted));
+    widgets::small_text(ui, &tl_logical!("Text is compared word by word; the differences are shown on the new file."), t.text_muted);
     ui.add_space(10.0);
     let (mut go, mut cancel) = (false, false);
     ui.horizontal(|ui| {
@@ -88,7 +88,12 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
 /// The Compare panel.
 pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &Option<CompareState>, id: DocId) -> Option<PanelAction> {
     let Some(s) = state.as_ref().filter(|s| s.new == id) else {
-        ui.label(egui::RichText::new(tl!("Compare this file with an older version: Compare files… in All tools.")).color(t.text_muted));
+        widgets::styled_text(
+            ui,
+            &tl_logical!("Compare this file with an older version: Compare files… in All tools."),
+            egui::TextStyle::Body.resolve(ui.style()),
+            t.text_muted,
+        );
         return None;
     };
     let mut action = None;
@@ -149,7 +154,13 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &Option<CompareState>,
                         .small()
                         .color(t.text_muted),
                     );
-                    ui.selectable_label(selected, text)
+                    if crate::bidi::has_rtl(&text) {
+                        // Document text only (no sentence of ours), so it is reordered in every interface language.
+                        let (font, colour) = (egui::TextStyle::Button.resolve(ui.style()), ui.visuals().text_color());
+                        crate::widgets::wrapped_text_clickable(ui, &text, font, colour, selected)
+                    } else {
+                        ui.selectable_label(selected, text)
+                    }
                 })
                 .inner
             })
@@ -217,11 +228,11 @@ impl PdfCraftApp {
                 });
                 self.right = Some(RightPanel::Compare);
                 self.notify(if n == 0 {
-                    tl!("The text is the same").to_string()
+                    tl_logical!("The text is the same")
                 } else if n == 1 {
-                    tl!("1 difference found").to_string()
+                    tl_logical!("1 difference found")
                 } else {
-                    crate::i18n::fmt(tl!("{n} differences found"), &[("n", &n.to_string())])
+                    crate::i18n::fmt_logical(&tl_logical!("{n} differences found"), &[("n", &n.to_string())])
                 });
             }
             Err(e) => self.notify_error(e),
@@ -258,9 +269,9 @@ impl PdfCraftApp {
                         self.views[index].document_changed(&info);
                     }
                     self.notify(if n == 1 {
-                        tl!("Added 1 comment").to_string()
+                        tl_logical!("Added 1 comment")
                     } else {
-                        crate::i18n::fmt(tl!("Added {n} comments"), &[("n", &n.to_string())])
+                        crate::i18n::fmt_logical(&tl_logical!("Added {n} comments"), &[("n", &n.to_string())])
                     });
                 }
                 Err(e) => self.notify_error(e),
@@ -337,7 +348,8 @@ pub(crate) fn compare_area(app: &mut PdfCraftApp, old: usize, new: usize, ui: &m
     for (k, (r, index)) in [(left, old), (right, new)].into_iter().enumerate() {
         let caption = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), caption_h));
         ui.painter().rect_filled(caption, 0.0, t.panel);
-        let label = crate::i18n::fmt(if k == 0 { tl!("Old file: {name}") } else { tl!("New file: {name}") }, &[("name", &names[k])]);
+        let label =
+            crate::i18n::fmt(if k == 0 { tl!("Old file: {name}") } else { tl!("New file: {name}") }, &[("name", &crate::bidi::visual(&names[k]))]);
         ui.painter().text(
             egui::pos2(caption.min.x + 10.0, caption.center().y),
             egui::Align2::LEFT_CENTER,

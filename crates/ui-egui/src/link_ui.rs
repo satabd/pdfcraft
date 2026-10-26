@@ -7,7 +7,7 @@ use pdfcraft_engine::{Edit, LinkAction, LinkHighlight, LinkItem, LinkStyle};
 use pdfcraft_render::DocInfo;
 
 use crate::canvas::{DocView, PageXform};
-use crate::theme::{self, Tokens};
+use crate::theme::Tokens;
 use crate::{PdfCraftApp, widgets};
 
 const LINK_BLUE: Color32 = Color32::from_rgb(0x14, 0x73, 0xE6);
@@ -221,62 +221,62 @@ impl PdfCraftApp {
 /// Link Properties. Returns (apply, cancel).
 pub(crate) fn body(ui: &mut egui::Ui, d: &mut LinkDraft, pages: usize, t: &Tokens) -> (bool, bool) {
     ui.set_width(460.0);
-    ui.label(egui::RichText::new(if d.index.is_some() { tl!("Link Properties") } else { tl!("Create Link") }).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, if d.index.is_some() { tl!("Link Properties") } else { tl!("Create Link") });
     ui.add_space(8.0);
     widgets::section_title(ui, tl!("Link Appearance"));
-    egui::Grid::new("link-appearance").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-        ui.label(tl!("Link Type:"));
-        egui::ComboBox::from_id_salt("link-type")
-            .selected_text(if d.style.visible { tl!("Visible Rectangle") } else { tl!("Invisible Rectangle") })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut d.style.visible, true, tl!("Visible Rectangle"));
-                ui.selectable_value(&mut d.style.visible, false, tl!("Invisible Rectangle"));
-            });
-        ui.end_row();
-        ui.label(tl!("Highlight Style:"));
-        egui::ComboBox::from_id_salt("link-hl").selected_text(tl!(d.style.highlight.label())).show_ui(ui, |ui| {
-            for h in LinkHighlight::ALL {
-                ui.selectable_value(&mut d.style.highlight, h, tl!(h.label()));
-            }
-        });
-        ui.end_row();
-        if d.style.visible {
-            ui.label(tl!("Line Thickness:"));
-            egui::ComboBox::from_id_salt("link-w")
-                .selected_text(if d.style.width <= 1.0 {
-                    tl!("Thin")
-                } else if d.style.width <= 2.0 {
-                    tl!("Medium")
-                } else {
-                    tl!("Thick")
-                })
+    widgets::form_grid(ui, "link-appearance", [12.0, 8.0], None, |rows| {
+        rows.row(tl!("Link Type:"), |ui, _| {
+            egui::ComboBox::from_id_salt("link-type")
+                .selected_text(if d.style.visible { tl!("Visible Rectangle") } else { tl!("Invisible Rectangle") })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut d.style.width, 1.0, tl!("Thin"));
-                    ui.selectable_value(&mut d.style.width, 2.0, tl!("Medium"));
-                    ui.selectable_value(&mut d.style.width, 3.0, tl!("Thick"));
+                    ui.selectable_value(&mut d.style.visible, true, tl!("Visible Rectangle"));
+                    ui.selectable_value(&mut d.style.visible, false, tl!("Invisible Rectangle"));
                 });
-            ui.end_row();
-            ui.label(tl!("Line Style:"));
-            let mut style = if d.style.dashed {
-                1
-            } else if d.style.underline {
-                2
-            } else {
-                0
-            };
-            egui::ComboBox::from_id_salt("link-s").selected_text(tl!(["Solid", "Dashed", "Underline"][style])).show_ui(ui, |ui| {
-                for (k, l) in ["Solid", "Dashed", "Underline"].iter().enumerate() {
-                    ui.selectable_value(&mut style, k, tl!(l));
+        });
+        rows.row(tl!("Highlight Style:"), |ui, _| {
+            egui::ComboBox::from_id_salt("link-hl").selected_text(tl!(d.style.highlight.label())).show_ui(ui, |ui| {
+                for h in LinkHighlight::ALL {
+                    ui.selectable_value(&mut d.style.highlight, h, tl!(h.label()));
                 }
             });
-            d.style.dashed = style == 1;
-            d.style.underline = style == 2;
-            ui.end_row();
-            ui.label(tl!("Color:"));
-            if let Some(c) = crate::comments::swatch_grid(ui, Some(d.style.color)) {
-                d.style.color = c;
-            }
-            ui.end_row();
+        });
+        if d.style.visible {
+            rows.row(tl!("Line Thickness:"), |ui, _| {
+                egui::ComboBox::from_id_salt("link-w")
+                    .selected_text(if d.style.width <= 1.0 {
+                        tl!("Thin")
+                    } else if d.style.width <= 2.0 {
+                        tl!("Medium")
+                    } else {
+                        tl!("Thick")
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.style.width, 1.0, tl!("Thin"));
+                        ui.selectable_value(&mut d.style.width, 2.0, tl!("Medium"));
+                        ui.selectable_value(&mut d.style.width, 3.0, tl!("Thick"));
+                    });
+            });
+            rows.row(tl!("Line Style:"), |ui, _| {
+                let mut style = if d.style.dashed {
+                    1
+                } else if d.style.underline {
+                    2
+                } else {
+                    0
+                };
+                egui::ComboBox::from_id_salt("link-s").selected_text(tl!(["Solid", "Dashed", "Underline"][style])).show_ui(ui, |ui| {
+                    for (k, l) in ["Solid", "Dashed", "Underline"].iter().enumerate() {
+                        ui.selectable_value(&mut style, k, tl!(l));
+                    }
+                });
+                d.style.dashed = style == 1;
+                d.style.underline = style == 2;
+            });
+            rows.row(tl!("Color:"), |ui, _| {
+                if let Some(c) = widgets::start_block(ui, |ui| crate::comments::swatch_grid(ui, Some(d.style.color))) {
+                    d.style.color = c;
+                }
+            });
         }
     });
     ui.add_space(8.0);

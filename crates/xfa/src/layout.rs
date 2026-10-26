@@ -115,6 +115,9 @@ pub struct Widget {
     pub tooltip: Option<String>,
     pub face: Face,
     pub h_align: HAlign,
+    /// Whether the template states the alignment (`hAlign`): a field whose text runs right to
+    /// left is right-aligned unless it does.
+    pub h_stated: bool,
     pub multiline: bool,
     pub max_chars: Option<usize>,
     pub read_only: bool,
@@ -485,7 +488,7 @@ impl Layouter<'_> {
     fn push_block(&mut self, b: Block) -> Result<(), XfaError> {
         for s in b.spans {
             if s.face.underline {
-                let w = s.face.width(&s.text);
+                let w = s.face.width_in(&s.text, s.rtl);
                 let y = s.baseline + s.face.size * 0.1;
                 self.push(Item::Line { from: (s.x, y), to: (s.x + w, y), width: (s.face.size * 0.06).max(0.3), color: s.face.color, dashed: false })?;
             }
@@ -1558,6 +1561,7 @@ impl Layouter<'_> {
                 if !value.trim().is_empty() {
                     let mut para = fctx.para.clone();
                     para.h_align = HAlign::Center;
+                    para.h_explicit = true;
                     self.draw_value_text(&Value::Text(value), ui.inset(&f.ui_margin), &fctx.font, &para)?;
                 }
                 return Ok(());
@@ -1592,9 +1596,12 @@ impl Layouter<'_> {
             (Ui::Button, Some(cap)) => Face::of(&ctx.font.apply(&cap.font)),
             _ => Face::of(&fctx.font),
         };
-        let h_align = match (&f.ui, &f.caption) {
-            (Ui::Button, Some(cap)) => ctx.para.apply(&cap.para).h_align,
-            _ => fctx.para.h_align,
+        let (h_align, h_stated) = match (&f.ui, &f.caption) {
+            (Ui::Button, Some(cap)) => {
+                let para = ctx.para.apply(&cap.para);
+                (para.h_align, para.h_explicit)
+            }
+            _ => (fctx.para.h_align, fctx.para.h_explicit),
         };
         let name = self.unique_name(f.common.name.as_deref().unwrap_or("field"));
         let som = som_path();
@@ -1685,6 +1692,7 @@ impl Layouter<'_> {
             tooltip,
             face,
             h_align,
+            h_stated,
             multiline: f.multiline,
             max_chars: f.max_chars,
             read_only,

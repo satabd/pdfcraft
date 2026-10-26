@@ -145,7 +145,8 @@ pub(crate) fn panel(
         state.draft = Draft::from_tag(&tags[0]);
     }
     let search_label = ui.label(tl!("Find a tag"));
-    ui.add(egui::TextEdit::singleline(&mut state.query).hint_text(tl!("Find a tag"))).labelled_by(search_label.id);
+    let align = widgets::field_align(&state.query);
+    ui.add(widgets::BidiEdit::singleline(&mut state.query).hint_text(tl!("Find a tag")).horizontal_align(align)).labelled_by(search_label.id);
     ui.add_space(4.0);
     let query = state.query.to_lowercase();
     let matching = visible_tags(tags, &query, &state.collapsed);
@@ -153,42 +154,47 @@ pub(crate) fn panel(
     let dirty = state.selected.and_then(|r| tags.iter().find(|t| t.object == r)).is_some_and(|tag| state.draft.edit(tag).is_some());
     ui.label(egui::RichText::new(crate::i18n::fmt(tl!("{n} tags"), &[("n", &matching.len().to_string())])).small().color(t.text_muted));
     let mut page = None;
-    egui::ScrollArea::vertical().max_height(100.0).show_rows(ui, 26.0, matching.len(), |ui, range| {
-        for tag in &matching[range] {
-            let title = tag.title.as_deref().filter(|s| !s.is_empty()).unwrap_or(&tag.kind);
-            let label = format!("{title} · {}", tag.object.num);
-            ui.horizontal(|ui| {
-                ui.add_space((tag.depth.min(8) as f32) * 12.0);
-                if parents.contains(&tag.object) && query.is_empty() {
-                    let closed = state.collapsed.contains(&tag.object);
-                    if icons::button(
-                        ui,
-                        if closed { "chevron-right" } else { "chevron-down" },
-                        18.0,
-                        false,
-                        if closed { tl!("Expand tag") } else { tl!("Collapse tag") },
-                    )
-                    .clicked()
-                    {
-                        if closed {
-                            state.collapsed.remove(&tag.object);
-                        } else {
-                            state.collapsed.insert(tag.object);
+    crate::widgets::scroll_area_with(ui, egui::ScrollArea::vertical().max_height(100.0), false, |area, ui| {
+        area.show_rows(ui, 26.0, matching.len(), |ui, range| {
+            for tag in &matching[range] {
+                let title = tag.title.as_deref().filter(|s| !s.is_empty()).unwrap_or(&tag.kind);
+                let label = format!("{} · {}", crate::bidi::visual_auto(title), tag.object.num);
+                ui.horizontal(|ui| {
+                    ui.add_space((tag.depth.min(8) as f32) * 12.0);
+                    if parents.contains(&tag.object) && query.is_empty() {
+                        let closed = state.collapsed.contains(&tag.object);
+                        if icons::button(
+                            ui,
+                            if closed { "chevron-right" } else { "chevron-down" },
+                            18.0,
+                            false,
+                            if closed { tl!("Expand tag") } else { tl!("Collapse tag") },
+                        )
+                        .clicked()
+                        {
+                            if closed {
+                                state.collapsed.remove(&tag.object);
+                            } else {
+                                state.collapsed.insert(tag.object);
+                            }
                         }
+                    } else {
+                        ui.add_space(18.0);
                     }
-                } else {
-                    ui.add_space(18.0);
-                }
-                if ui
-                    .add_enabled(!dirty || state.selected == Some(tag.object), egui::Button::selectable(state.selected == Some(tag.object), label))
-                    .clicked()
-                {
-                    state.selected = Some(tag.object);
-                    state.draft = Draft::from_tag(tag);
-                    page = tag.page;
-                }
-            });
-        }
+                    if ui
+                        .add_enabled(
+                            !dirty || state.selected == Some(tag.object),
+                            egui::Button::selectable(state.selected == Some(tag.object), label),
+                        )
+                        .clicked()
+                    {
+                        state.selected = Some(tag.object);
+                        state.draft = Draft::from_tag(tag);
+                        page = tag.page;
+                    }
+                });
+            }
+        })
     });
     ui.separator();
     let Some(tag) = state.selected.and_then(|r| tags.iter().find(|t| t.object == r)) else { return (page, None) };
@@ -221,15 +227,16 @@ pub(crate) fn panel(
     ui.horizontal(|ui| {
         earlier = ui.add_enabled(can_edit && !dirty && before.is_some(), egui::Button::new(tl!("Move tag earlier"))).clicked();
         later = ui.add_enabled(can_edit && !dirty && after.is_some(), egui::Button::new(tl!("Move tag later"))).clicked();
-        artifact = ui
-            .add_enabled(can_edit && !dirty, egui::Button::new(tl!("Mark as artifact")))
-            .on_hover_text(tl!("Remove this leaf tag from reading order and mark its direct content as an artifact"))
-            .clicked();
+        let button = ui.add_enabled(can_edit && !dirty, egui::Button::new(tl!("Mark as artifact")));
+        artifact =
+            widgets::hover_text(button, &tl_logical!("Remove this leaf tag from reading order and mark its direct content as an artifact")).clicked();
     });
     ui.separator();
     for item in content {
         let page_label = item.page.map(|p| crate::i18n::fmt(tl!("Go to page {p}"), &[("p", &(p + 1).to_string())]));
-        let label = match (&page_label, item.text.trim()) {
+        // The content's text is document text: displayed in its own direction.
+        let text = crate::bidi::visual_auto(item.text.trim());
+        let label = match (&page_label, text.as_ref()) {
             (Some(page), text) if !text.is_empty() => format!("MCID {} · {page} · {text}", item.mcid),
             (Some(page), _) => format!("MCID {} · {page}", item.mcid),
             (_, text) if !text.is_empty() => format!("MCID {} · {text}", item.mcid),
@@ -288,6 +295,7 @@ fn field(ui: &mut Ui, label: &str, value: &mut String, multiline: bool) {
     if multiline {
         ui.add(widgets::block(value).desired_rows(2).desired_width(f32::INFINITY)).labelled_by(l.id);
     } else {
-        ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY)).labelled_by(l.id);
+        let align = widgets::field_align(value);
+        ui.add(widgets::BidiEdit::singleline(value).desired_width(f32::INFINITY).horizontal_align(align)).labelled_by(l.id);
     }
 }

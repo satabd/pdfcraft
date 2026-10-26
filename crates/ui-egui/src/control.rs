@@ -735,7 +735,7 @@ impl Host for crate::PdfCraftApp {
             "theme": format!("{:?}", self.theme),
             "theme_preference": self.theme_preference,
             "language": self.language,
-            "notice": self.toast.as_ref().map(|t| t.0.clone()),
+            "notice": self.toast.as_ref().map(|t| t.0.as_str()),
             "progress": self.progress_notice.as_ref().map(|p| json!({ "label": p.label, "fraction": p.fraction })),
             "password_prompt": self.password_prompt.is_some(),
             "close_prompt": self.close_request.is_some(),
@@ -773,7 +773,7 @@ impl Host for crate::PdfCraftApp {
         } else if self.pending_opens.iter().any(|pending| pending.path.as_deref() == Some(path)) {
             Ok(json!({ "accepted": path, "pending": true }))
         } else {
-            Err(self.toast.as_ref().map(|t| t.0.clone()).unwrap_or_else(|| format!("couldn't open {path}")))
+            Err(self.toast.as_ref().map(|t| t.0.as_str().to_owned()).unwrap_or_else(|| format!("couldn't open {path}")))
         }
     }
 

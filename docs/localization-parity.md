@@ -1,7 +1,7 @@
 # Localization parity
 
 > **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (Vietnamese 100% of current key union; native-speaker community review; twelve-language mean ≈68%) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (Italian count after completing its catalog) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (Arabic: the Edit text box edits in display order; earlier: the frame is mirrored, menus and dialog bodies are not; wrapped interface text in typing order, document text in display order) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 
 Per-language status of PdfCraft's interface against Acrobat Pro's. How translations work and how to
 add a language: [localization.md](localization.md). Summary in [ROADMAP.md](../ROADMAP.md).
@@ -33,7 +33,7 @@ add a language: [localization.md](localization.md). Summary in [ROADMAP.md](../R
 | Simplified Chinese | `zh-hans` | 2,088 (97.4%) | dialogs and tooltips through `tl!`; no help | CJK text and IME work, but **release builds have no Hans face**: many characters show as boxes (#826, #688, #728, #758; Flatpak #689) | no | partial | yes | 6–12 |
 | Spanish | `es` | 2,046 (95.5%) | dialogs and tooltips; no help | Latin | no | partial | yes | 2–4 |
 | Hindi | `hi` | 0 | none | Devanagari not tested (egui shapes Telugu conjuncts, so shaping is likely workable); no Devanagari face in craft-fonts | no | none | no | 10–18 |
-| Arabic | `ar` | 2,143 (100%) | dialogs and tooltips; no help | Letters joined and lines reordered at load, but **layout not mirrored**, wrapped lines break at the wrong end, typed text runs left to right (`localization.md` §Arabic) | no | partial | yes (Middle East edition) | 25–45 |
+| Arabic | `ar` | 2,143 (100%) | dialogs and tooltips; no help | Letters joined and lines reordered at load; long tooltips, dialog text, notes, the toast and the canvas banners wrap in typing order; document text in the panels is in display order; lists joined in code follow the reading order; the frame, dialog forms, menus and context menus are mirrored, but **the side submenus open on, scrollbars, the dock's tab bars, the document-tab order and the canvas are not**, and a few plain wrapped labels still break at the wrong end; text typed into fields is edited in display order (single-line and multi-line fields and the Add text and Edit text boxes; `localization.md` §Arabic) | no | partial | yes (Middle East edition) | 25–45 |
 | French | `fr` | 2,128 (99.3%) | dialogs and tooltips; no help | Latin | no | partial | yes | 1–2 |
 | Portuguese (Brazil) | `pt-br` | 2,130 (99.4%) | dialogs and tooltips; no help | Latin | community (#288) | partial | yes | 1–2 |
 | Indonesian | `id` | 0 | none | Latin | no | none | no | 3–5 |
@@ -82,6 +82,12 @@ Acrobat languages PdfCraft lacks: Danish, Dutch, Finnish, Norwegian, Swedish, He
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Arabic and Latin: the Add text box and the Edit text box break their lines where the page writes them (the page's own measure for Add text, the engine's rows for Edit text), so a retyped paragraph wraps the same before and after Apply |
+| 2026-10-22 | minor | Arabic: the Add text box and the Edit text box (a paragraph of the page) are edited in display order, the draft, the applied edit and the page's `/ActualText` in typing order; the Edit text box keeps the page's fonts, sizes and colours, reads the block in the direction the page will write it and puts a right-to-left row against the right edge. Estimates unchanged |
+| 2026-10-22 | minor | Arabic: multi-line fields (the comment composer, the Comments panel's reply and edit boxes, tag, figure-description, header-and-footer, watermark and computed-field boxes, the on-page editor of a multi-line form field) wrap each paragraph in reading order and edit it in display order: right-to-left paragraphs sit against the right edge, left-to-right ones against the left, the stored text gains no line break from a soft wrap; the Add text and Edit text boxes still run words left to right |
+| 2026-10-22 | minor | Arabic: text typed into single-line fields (search, comment and dialog fields, the palette, Find, the on-page form editor) is edited in display order, with the caret, click, selection, copy and undo working on what is drawn; multi-line fields and the Add text and Edit text boxes still run words left to right |
+| 2026-10-22 | minor | Arabic: the frame is mirrored (Tools at the right, navigation panes and rail at the left, mode bar, tab strip, rows and dialog footers from the right); menus, dialog bodies and the canvas are not. Typed text still runs left to right |
+| 2026-10-21 | minor | Arabic: tooltips, dialog text and notes wrap in typing order; document text in bookmarks, search, Properties, fields, signatures and notices is in display order; Find ignores harakat. Layout still not mirrored, typed text still left to right |
 | 2026-10-13 | minor | Vietnamese (`vi`) catalog: 2,591 entries (100% of current key union + `theme`/`Appearance`); twelve-language mean ≈ 68%; native-speaker community review; registered with `plural_none` |
 | 2026-10-14 | minor | Italian: 2,528 entries after adding the 201 keys the other catalogs had and the code looks up |
 | 2026-10-12 | minor | Added current counts for Kazakh, Polish, Slovenian, Greek, Turkish and Lithuanian; retained existing language assessments and the original percentage snapshot |

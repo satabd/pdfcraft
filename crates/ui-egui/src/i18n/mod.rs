@@ -48,6 +48,9 @@ pub struct LangInfo {
     /// translations are put into display order when it loads ([`crate::bidi::display_rtl`]).
     pub rtl: bool,
     catalog: OnceLock<Catalog>,
+    /// The catalog in logical (typing) order, for a right-to-left language only (see
+    /// [`LangInfo::logical_catalog`]).
+    logical: OnceLock<Catalog>,
 }
 
 fn plural_one_other(n: u64) -> usize {
@@ -148,18 +151,46 @@ fn plural_sl(n: u64) -> usize {
 
 /// The registry. English first: it is the fallback and the source language.
 pub static LANGUAGES: [LangInfo; 23] = [
-    LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, rtl: false, catalog: OnceLock::new() },
-    LangInfo { code: "ja", name: "日本語", source: include_str!("ja.tsv"), plural: plural_none, rtl: false, catalog: OnceLock::new() },
+    LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, rtl: false, catalog: OnceLock::new(), logical: OnceLock::new() },
+    LangInfo {
+        code: "ja",
+        name: "日本語",
+        source: include_str!("ja.tsv"),
+        plural: plural_none,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Simplified Chinese; `zh`, `zh-CN`, `zh-SG` and `zh-Hans-*` locales resolve here (see `candidates`).
     LangInfo {
-        code: "zh-hans", name: "简体中文", source: include_str!("zh-hans.tsv"), plural: plural_none, rtl: false, catalog: OnceLock::new()
+        code: "zh-hans",
+        name: "简体中文",
+        source: include_str!("zh-hans.tsv"),
+        plural: plural_none,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
     },
     // Traditional Chinese in the vocabulary used in Taiwan; `zh-TW`, `zh-HK`, `zh-MO` and `zh-Hant-*`
     // locales all resolve here (see `candidates`).
     LangInfo {
-        code: "zh-hant", name: "繁體中文", source: include_str!("zh-hant.tsv"), plural: plural_none, rtl: false, catalog: OnceLock::new()
+        code: "zh-hant",
+        name: "繁體中文",
+        source: include_str!("zh-hant.tsv"),
+        plural: plural_none,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
     },
-    LangInfo { code: "cs", name: "Čeština", source: include_str!("cs.tsv"), plural: plural_cs, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "cs",
+        name: "Čeština",
+        source: include_str!("cs.tsv"),
+        plural: plural_cs,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Brazilian Portuguese; `pt`, `pt-BR` and `pt-PT` locales all resolve here (see `candidates`).
     LangInfo {
         code: "pt-br",
@@ -168,48 +199,179 @@ pub static LANGUAGES: [LangInfo; 23] = [
         plural: plural_pt,
         rtl: false,
         catalog: OnceLock::new(),
+        logical: OnceLock::new(),
     },
     // German (informal "du"); every `de-*` locale (`de-DE`, `de-AT`, `de-CH` ...) resolves here.
-    LangInfo { code: "de", name: "Deutsch", source: include_str!("de.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "de",
+        name: "Deutsch",
+        source: include_str!("de.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Spanish (European vocabulary); every `es-*` locale (`es-ES`, `es-MX`, `es-419` ...) resolves here.
-    LangInfo { code: "es", name: "Español", source: include_str!("es.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "es",
+        name: "Español",
+        source: include_str!("es.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // French; every `fr-*` locale (`fr-FR`, `fr-CA`, `fr-BE` ...) resolves here.
-    LangInfo { code: "fr", name: "Français", source: include_str!("fr.tsv"), plural: plural_fr, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "fr",
+        name: "Français",
+        source: include_str!("fr.tsv"),
+        plural: plural_fr,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Russian; every `ru-*` locale (`ru-RU`, `ru-BY`, `ru-KZ` ...) resolves here.
-    LangInfo { code: "ru", name: "Русский", source: include_str!("ru.tsv"), plural: plural_russian, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "ru",
+        name: "Русский",
+        source: include_str!("ru.tsv"),
+        plural: plural_russian,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Kazakh; every `kk-*` locale (`kk-KZ`, `kk-KZ.UTF-8`) resolves here.
-    LangInfo { code: "kk", name: "Қазақша", source: include_str!("kk.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "kk",
+        name: "Қазақша",
+        source: include_str!("kk.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Bulgarian; every `bg-*` locale (`bg-BG`) resolves here.
     LangInfo {
-        code: "bg", name: "Български", source: include_str!("bg.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new()
+        code: "bg",
+        name: "Български",
+        source: include_str!("bg.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
     },
     // Telugu; every `te-*` locale (`te-IN`) resolves here.
     LangInfo {
-        code: "te", name: "తెలుగు", source: include_str!("te.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new()
+        code: "te",
+        name: "తెలుగు",
+        source: include_str!("te.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
     },
     // Hungarian; every `hu-*` locale (`hu-HU`) resolves here.
-    LangInfo { code: "hu", name: "Magyar", source: include_str!("hu.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "hu",
+        name: "Magyar",
+        source: include_str!("hu.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Ukrainian; every `uk-*` locale (`uk-UA`, `uk_UA.UTF-8`) resolves here.
     LangInfo {
-        code: "uk", name: "Українська", source: include_str!("uk.tsv"), plural: plural_ukrainian, rtl: false, catalog: OnceLock::new()
+        code: "uk",
+        name: "Українська",
+        source: include_str!("uk.tsv"),
+        plural: plural_ukrainian,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
     },
     // Italian; every `it-*` locale (`it-IT`) resolves here.
-    LangInfo { code: "it", name: "Italiano", source: include_str!("it.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "it",
+        name: "Italiano",
+        source: include_str!("it.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Arabic (Modern Standard, Western digits); every `ar-*` locale (`ar-MA`, `ar-EG`, `ar-SA` ...)
     // resolves here. Right to left: see `LangInfo::rtl`.
-    LangInfo { code: "ar", name: "العربية", source: include_str!("ar.tsv"), plural: plural_arabic, rtl: true, catalog: OnceLock::new() },
+    LangInfo {
+        code: "ar",
+        name: "العربية",
+        source: include_str!("ar.tsv"),
+        plural: plural_arabic,
+        rtl: true,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Polish; every `pl-*` locale (`pl-pl`, `pl_pl.UTF-8`) resolves here.
-    LangInfo { code: "pl", name: "Polski", source: include_str!("pl.tsv"), plural: plural_polish, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "pl",
+        name: "Polski",
+        source: include_str!("pl.tsv"),
+        plural: plural_polish,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Slovene; every `sl-*` locale (`sl-SI`) resolves here. Four plural forms (one, two, few, other).
-    LangInfo { code: "sl", name: "Slovenščina", source: include_str!("sl.tsv"), plural: plural_sl, rtl: false, catalog: OnceLock::new() },
-    LangInfo { code: "el", name: "Ελληνικά", source: include_str!("el.tsv"), plural: plural_one_other, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "sl",
+        name: "Slovenščina",
+        source: include_str!("sl.tsv"),
+        plural: plural_sl,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
+    LangInfo {
+        code: "el",
+        name: "Ελληνικά",
+        source: include_str!("el.tsv"),
+        plural: plural_one_other,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Turkish; every `tr-*` locale (`tr-TR`, `tr_TR.UTF-8`) resolves here.
-    LangInfo { code: "tr", name: "Türkçe", source: include_str!("tr.tsv"), plural: plural_none, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "tr",
+        name: "Türkçe",
+        source: include_str!("tr.tsv"),
+        plural: plural_none,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Lithuanian; every `lt-*` locale (`lt-LT`, `lt_LT.UTF-8`) resolves here. Three plural forms (one, few, other).
-    LangInfo { code: "lt", name: "Lietuvių", source: include_str!("lt.tsv"), plural: plural_lithuanian, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "lt",
+        name: "Lietuvių",
+        source: include_str!("lt.tsv"),
+        plural: plural_lithuanian,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
     // Vietnamese; every `vi-*` locale (`vi-VN`, `vi_VN.UTF-8`) resolves here. CLDR `vi` counts have
     // one form ("other"), so `@plural` entries list a single form.
-    LangInfo { code: "vi", name: "Tiếng Việt", source: include_str!("vi.tsv"), plural: plural_none, rtl: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "vi",
+        name: "Tiếng Việt",
+        source: include_str!("vi.tsv"),
+        plural: plural_none,
+        rtl: false,
+        catalog: OnceLock::new(),
+        logical: OnceLock::new(),
+    },
 ];
 
 impl LangInfo {
@@ -229,6 +391,16 @@ impl LangInfo {
             }
             catalog
         })
+    }
+
+    /// The catalog with its translations still in logical (typing) order, which is what wrapped
+    /// text needs ([`Logical`]). The same as [`LangInfo::catalog`] for a left-to-right language.
+    fn logical_catalog(&self) -> &Catalog {
+        if !self.rtl {
+            return self.catalog();
+        }
+        // `catalog()` has already logged the catalog's errors, so they are not logged twice.
+        self.logical.get_or_init(|| Catalog::parse(self.source, self.plural_forms()).0)
     }
 }
 
@@ -285,6 +457,10 @@ impl Lang {
 
     fn catalog(self) -> &'static Catalog {
         self.0.catalog()
+    }
+
+    fn logical_catalog(self) -> &'static Catalog {
+        self.0.logical_catalog()
     }
 }
 
@@ -534,6 +710,16 @@ pub fn fmt(template: &str, args: &[(&str, &str)]) -> String {
 /// A generated history label (the action part of "Undo …") in the current language. Captured
 /// values (file and field names) are inserted as they are; unknown labels are looked up whole.
 pub fn action_label(text: &str) -> String {
+    action_label_with(text, |s| t(s).to_owned(), |n, one, other| trn(current(), n, one, other))
+}
+
+/// [`action_label`] in logical order (see [`Logical`]), for a notice.
+pub fn action_label_logical(text: &str) -> Logical<'static> {
+    Logical::from(action_label_with(text, |s| t_logical(s).into_owned(), |n, one, other| trn_logical(current(), n, one, other).into_owned()))
+}
+
+/// [`action_label`] with the lookups given: display order or logical order.
+fn action_label_with(text: &str, look: impl Fn(&str) -> String, plural: impl Fn(u64, &str, &str) -> String) -> String {
     for (prefix, template) in [
         ("Insert pages from ", "Insert pages from {name}"),
         ("Fill in ", "Fill in {name}"),
@@ -542,18 +728,18 @@ pub fn action_label(text: &str) -> String {
         ("Import ", "Import {name}"),
     ] {
         if let Some(value) = text.strip_prefix(prefix) {
-            return fmt(t(template), &[("name", value)]);
+            return fmt(&look(template), &[("name", value)]);
         }
     }
     if let Some(key) = text.strip_prefix("Change ")
         && ["Title", "Author", "Subject", "Keywords", "Creator", "Producer"].contains(&key)
     {
-        return fmt(t("Change {key}"), &[("key", t(key))]);
+        return fmt(&look("Change {key}"), &[("key", &look(key))]);
     }
     if let Some(n) = text.strip_prefix("Delete ").and_then(|rest| rest.strip_suffix(" fields")).and_then(|n| n.parse::<u64>().ok()) {
-        return trn(current(), n, "Delete {n} field", "Delete {n} fields");
+        return plural(n, "Delete {n} field", "Delete {n} fields");
     }
-    t(text).to_owned()
+    look(text)
 }
 
 /// A history label in the current language, out of the engine's own two parts: the wording is
@@ -561,12 +747,22 @@ pub fn action_label(text: &str) -> String {
 /// name is never read as part of the wording. This is exact where [`action_label`] has to guess
 /// from the English text, and is what the engine's own labels go through.
 pub fn edit_label(label: &pdfcraft_engine::Label) -> String {
+    edit_label_with(label, |s| t(s).to_owned())
+}
+
+/// [`edit_label`] in logical order (see [`Logical`]), for a notice.
+pub fn edit_label_logical(label: &pdfcraft_engine::Label) -> Logical<'static> {
+    Logical::from(edit_label_with(label, |s| t_logical(s).into_owned()))
+}
+
+/// [`edit_label`] with the lookup given: display order or logical order.
+fn edit_label_with(label: &pdfcraft_engine::Label, look: impl Fn(&str) -> String) -> String {
     // A batch's wording is only the hole: it carries its name as text, which from below L7 is one
     // of `BATCH_LABELS` and so is looked up too.
     if let Some(name) = label.value.as_deref().filter(|_| label.wording == "{batch}") {
-        return t(name).to_owned();
+        return look(name);
     }
-    label.said(t(label.wording))
+    label.said(&look(label.wording))
 }
 
 /// A command label such as "Undo Insert pages from a.pdf" in the current language. A catalog
@@ -599,6 +795,109 @@ pub fn trn(lang: Lang, n: u64, one: &str, other: &str) -> String {
     let idx = (lang.0.plural)(n);
     let text = lang.catalog().plural(one, other, idx).unwrap_or(if n == 1 { one } else { other });
     fmt(text, &[("n", &n.to_string())])
+}
+
+/// Translated text still in logical (typing) order, for the wrapping helpers only
+/// ([`crate::widgets::hover_text`], [`crate::widgets::body_text`],
+/// [`crate::widgets::styled_text`], and for notices and banners
+/// [`crate::PdfCraftApp::notify`] and [`crate::widgets::logical_label`]).
+///
+/// The lookups ([`t`], [`tr`], [`trn`]) hand a right-to-left language's text back in display
+/// order, which is right for a label painted on one line and wrong for text egui wraps: it
+/// breaks the line at the wrong end. [`tr_logical`] and friends return the text as it was typed,
+/// and the helpers wrap and reorder it with the Unicode bidirectional algorithm. Feeding such
+/// text anywhere else shows it in typing order, so the type keeps it out of `&str` parameters.
+///
+/// For every language but the right-to-left ones, the logical text is the display text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Logical<'a>(std::borrow::Cow<'a, str>);
+
+impl<'a> Logical<'a> {
+    /// The text, in logical order.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The text as an owned string, still in logical order.
+    pub fn into_owned(self) -> String {
+        self.0.into_owned()
+    }
+
+    /// Append `tail`, which must be in logical order too (a clause of the same sentence).
+    pub fn push_str(&mut self, tail: &str) {
+        self.0.to_mut().push_str(tail);
+    }
+}
+
+impl std::ops::Deref for Logical<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Logical<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for Logical<'static> {
+    /// Constructing a [`Logical`] by hand asserts that the text is in logical order: built from
+    /// [`tl_logical!`](crate::tl_logical) and [`fmt_logical`] pieces, or text people typed.
+    fn from(text: String) -> Self {
+        Logical(std::borrow::Cow::Owned(text))
+    }
+}
+
+impl<'a> From<&'a str> for Logical<'a> {
+    /// Constructing a [`Logical`] by hand asserts that the text is in logical order (English
+    /// source text, or text people typed), never the output of [`t`] or [`tr`].
+    fn from(text: &'a str) -> Self {
+        Logical(std::borrow::Cow::Borrowed(text))
+    }
+}
+
+impl PartialEq<str> for Logical<'_> {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<String> for Logical<'_> {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<&str> for Logical<'_> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+/// [`tr`] in logical order (see [`Logical`]).
+pub fn tr_logical(lang: Lang, s: &str) -> Logical<'_> {
+    Logical::from(lang.logical_catalog().plain(s).unwrap_or(s))
+}
+
+/// [`t`] in logical order (see [`Logical`]).
+pub fn t_logical(s: &str) -> Logical<'_> {
+    tr_logical(current(), s)
+}
+
+/// [`fmt`] for logical text: the placeholders of a [`tr_logical`] template are filled and the
+/// result stays in logical order.
+pub fn fmt_logical(template: &Logical<'_>, args: &[(&str, &str)]) -> Logical<'static> {
+    Logical::from(fmt(template.as_str(), args))
+}
+
+/// [`trn`] in logical order (see [`Logical`]).
+pub fn trn_logical(lang: Lang, n: u64, one: &str, other: &str) -> Logical<'static> {
+    let idx = (lang.0.plural)(n);
+    let text = lang.logical_catalog().plural(one, other, idx).unwrap_or(if n == 1 { one } else { other });
+    Logical::from(fmt(text, &[("n", &n.to_string())]))
 }
 
 #[cfg(test)]
@@ -812,6 +1111,7 @@ mod tests {
             plural: plural_none,
             rtl: false,
             catalog: OnceLock::new(),
+            logical: OnceLock::new(),
         };
         assert_eq!(tr(Lang(&BROKEN), "File"), "File");
         assert_eq!(trn(Lang(&BROKEN), 2, "{n} page", "{n} pages"), "2 pages");
@@ -826,6 +1126,7 @@ mod tests {
             plural: plural_one_other,
             rtl: false,
             catalog: OnceLock::new(),
+            logical: OnceLock::new(),
         };
         let l = Lang(&TEST);
         assert_eq!(tr_ctx(l, "weight", "Light"), "Thin");
@@ -943,7 +1244,9 @@ mod tests {
                     }
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let source = std::fs::read_to_string(path).expect("UI source file").replace("\r\n", "\n");
-                    let source = if expanded { source.replace("crate::i18n::t(", "tl!(") } else { source };
+                    // `tl_logical!` literals are catalog keys exactly as `tl!` ones are.
+                    let source = source.replace("tl_logical!(", "tl!(");
+                    let source = if expanded { source.replace("crate::i18n::t(", "tl!(").replace("crate::i18n::t_logical(", "tl!(") } else { source };
                     let mut rest = source.split("#[cfg(test)]\nmod ").next().unwrap_or_default();
                     while let Some((_, after)) = rest.split_once(if expanded { "tl!(" } else { "tl!(\"" }) {
                         let after = if expanded {
@@ -3325,6 +3628,84 @@ mod tests {
         assert_eq!(command_label("Undo Insert pages from a.pdf"), "a.pdf من صفحات إدراج عن التراجع");
         assert_eq!(menu_label("file.saveAs", "Save as…"), "…باسم حفظ");
         set_current(Lang::EN);
+    }
+
+    /// The logical lookups keep the typing order that wrapping needs; the display lookups are the
+    /// same text reordered for one line.
+    #[test]
+    fn arabic_logical_lookups_keep_typing_order() {
+        let ar = arabic();
+        for key in ["Save as…", "Couldn't open {name}: {e}", "Page {p} of {n}", "About PdfCraft"] {
+            let logical = tr_logical(ar, key);
+            assert_ne!(logical.as_str(), tr(ar, key), "{key}");
+            assert_eq!(crate::bidi::display_rtl(&logical), tr(ar, key), "{key}");
+        }
+        assert_eq!(tr_logical(ar, "Save as…"), "حفظ باسم…");
+        // Unknown strings come back as they are.
+        assert_eq!(tr_logical(ar, "تقرير {n}.pdf"), "تقرير {n}.pdf");
+        assert_eq!(tr_logical(ar, "No such label"), "No such label");
+        // Placeholders are filled in logical text, and the values are not read as templates.
+        let template = tr_logical(ar, "Page {p} of {n}");
+        assert_eq!(fmt_logical(&template, &[("p", "3"), ("n", "{p}")]), "الصفحة 3 من {p}");
+        assert_eq!(
+            crate::bidi::display_rtl(&fmt_logical(&template, &[("p", "3"), ("n", "12")])),
+            fmt(tr(ar, "Page {p} of {n}"), &[("p", "3"), ("n", "12")])
+        );
+        // Plurals, too.
+        for n in [0, 1, 2, 5, 11, 100] {
+            let logical = trn_logical(ar, n, "{n} page", "{n} pages");
+            assert_eq!(crate::bidi::display_rtl(&logical), trn(ar, n, "{n} page", "{n} pages"), "{n}");
+        }
+        // The current language is the one `t_logical` and `tl_logical!` read.
+        set_current(ar);
+        assert_eq!(t_logical("Save as…"), "حفظ باسم…");
+        assert_eq!(tl_logical!("Save as…"), "حفظ باسم…");
+        set_current(Lang::EN);
+        // Everything else is the display text, which needs no reordering.
+        for lang in Lang::all().filter(|l| !l.rtl()) {
+            for key in ["Save as…", "Couldn't open {name}: {e}", "Page {p} of {n}"] {
+                assert_eq!(tr_logical(lang, key), tr(lang, key), "{}: {key}", lang.code());
+            }
+            assert_eq!(trn_logical(lang, 3, "{n} page", "{n} pages"), trn(lang, 3, "{n} page", "{n} pages"), "{}", lang.code());
+        }
+        assert_eq!(tr_logical(Lang::EN, "Save as…"), "Save as…");
+        assert_eq!(Logical::from("x").into_owned(), "x");
+    }
+
+    /// History labels have a logical form for notices ("Undid {label}"): in Arabic it is the
+    /// display form before reordering, in every other language the same text.
+    #[test]
+    fn history_labels_have_a_logical_form() {
+        let ar = arabic();
+        let edit = |label: &pdfcraft_engine::Label| (edit_label(label), edit_label_logical(label));
+        let actions = ["Insert pages from a.pdf", "Fill in Name", "Change Title", "Delete 3 fields", "Enhance camera image"];
+        let labels = [pdfcraft_engine::Label::of("Rotate page"), pdfcraft_engine::Label::with("Fill in {name}", "Total")];
+        for lang in Lang::all() {
+            set_current(lang);
+            for action in actions {
+                let (display, logical) = (action_label(action), action_label_logical(action));
+                if lang.rtl() {
+                    assert_eq!(crate::bidi::display_rtl(&logical), display, "{}: {action}", lang.code());
+                } else {
+                    assert_eq!(logical, display, "{}: {action}", lang.code());
+                }
+            }
+            for label in &labels {
+                let (display, logical) = edit(label);
+                if lang.rtl() {
+                    assert_eq!(crate::bidi::display_rtl(&logical), display, "{}: {label:?}", lang.code());
+                } else {
+                    assert_eq!(logical, display, "{}: {label:?}", lang.code());
+                }
+            }
+        }
+        set_current(ar);
+        assert_ne!(action_label_logical("Insert pages from a.pdf"), action_label("Insert pages from a.pdf"));
+        set_current(Lang::EN);
+        assert_eq!(action_label_logical("Insert pages from a.pdf"), "Insert pages from a.pdf");
+        let mut sentence = Logical::from("a");
+        sentence.push_str(" b");
+        assert_eq!(sentence, "a b");
     }
 
     #[test]

@@ -65,7 +65,7 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     ui.add_space(2.0);
     ui.separator();
 
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    widgets::scroll_area(ui, egui::ScrollArea::vertical().auto_shrink([false, false]), |ui| {
         widgets::section_title(ui, tl!("Pages selected"));
         let current = view.current;
         let picked = view.organize_range.show(ui, &view.selected, n, current, |ui| {
@@ -79,11 +79,11 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
                 ("Landscape pages", P::Both, O::Landscape),
                 ("Portrait pages", P::Both, O::Portrait),
             ] {
-                if ui.button(tl!(label)).clicked() {
+                if widgets::menu_entry(ui, true, tl!(label), None).clicked() {
                     chosen = Some(filter_pages(info, &all, parity, orient));
                 }
             }
-            if ui.button(tl!("None")).clicked() {
+            if widgets::menu_entry(ui, true, tl!("None"), None).clicked() {
                 chosen = Some(Vec::new());
             }
             chosen
@@ -117,15 +117,15 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             // Insert ▸: a blank page, pages from a file, or copies of the selected pages.
             let insert = row(ui, t, "file-plus-2", tl!("Insert"), Availability::Ready, true);
             egui::Popup::menu(&insert).align(egui::RectAlign::RIGHT_START).gap(6.0).show(|ui| {
-                if ui.button(tl!("Insert a blank page after the selection")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Insert a blank page after the selection"), None).clicked() {
                     let crop = info.pages.get(last).map_or([0.0, 0.0, 612.0, 792.0], |p| p.crop);
                     let (w, h) = ((crop[2] - crop[0]).abs().max(1.0) as f64, (crop[3] - crop[1]).abs().max(1.0) as f64);
                     act = Some(Act::Edit(Box::new(Edit::InsertBlankPage { at: last.saturating_add(1), width: w, height: h })));
                 }
-                if ui.button(tl!("Insert pages from a file…")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Insert pages from a file…"), None).clicked() {
                     act = Some(Act::View(ViewAction::InsertFromFile));
                 }
-                if ui.button(tl!("Duplicate pages")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Duplicate pages"), None).clicked() {
                     act = Some(Act::Command("page.duplicate"));
                 }
             });

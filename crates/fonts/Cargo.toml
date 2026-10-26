@@ -15,3 +15,8 @@ skrifa = "0.44"
 # Arabic shaping for text written into PDFs; already in the tree via egui, on the same read-fonts.
 harfrust = "0.12"
 unicode-bidi = "0.3"
+
+[features]
+# A thread-local stand-in for the craft-fonts faces (`shaped_text::set_test_shaper`), for the tests
+# of the crates that lay out shaped text. Enabled by their dev-dependencies, never in a product build.
+test-shaper = []

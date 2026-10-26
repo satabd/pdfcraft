@@ -28,6 +28,16 @@ macro_rules! tl_ctx {
     };
 }
 
+/// [`tl!`] for text that egui wraps (tooltips, body text, notes), as [`i18n::Logical`]: a
+/// right-to-left language's text stays in typing order for [`widgets::hover_text`],
+/// [`widgets::body_text`] and [`widgets::styled_text`], which wrap and reorder it. Anywhere else
+/// use [`tl!`].
+macro_rules! tl_logical {
+    ($s:expr) => {
+        $crate::i18n::t_logical($s)
+    };
+}
+
 mod a11y_ui;
 mod actions_ui;
 mod appearance;
@@ -107,6 +117,7 @@ mod web_print;
 mod word_count_ui;
 pub use print_ui::{Handling as PrintHandling, PrintDraft, PrinterSource, Which as PrintWhich, system_printers};
 mod redact_ui;
+mod rtl;
 pub use redact_ui::{HiddenDraft, PagesDraft as RedactPagesDraft, RedactPrefs, SearchDraft as RedactSearchDraft, SearchMode as RedactSearchMode};
 pub mod i18n;
 
@@ -485,6 +496,9 @@ pub struct RecentFile {
 
 pub struct PdfCraftApp {
     pub docking: docking::Workspace,
+    /// Whether `docking`'s stock arrangement was last laid out for a right-to-left language, so
+    /// a language switch mirrors it once (and only if the user has not rearranged it).
+    pub(crate) layout_rtl: bool,
     pub(crate) pending_panel_reveals: Vec<docking::Panel>,
     pub session: Session,
     pub views: Vec<DocView>,
@@ -590,7 +604,9 @@ pub struct PdfCraftApp {
     open_prepare_gate: Option<std::sync::Arc<open_worker::PrepareGate>>,
     /// Folders pinned to Home, and what they held when last listed.
     pub pinned: folders_ui::PinnedFolders,
-    pub toast: Option<(String, f64)>,
+    /// The notice at the bottom centre and the time it appeared (0 until it is first drawn). The
+    /// message is in logical order ([`i18n::Logical`]): [`widgets::toast`] wraps and reorders it.
+    pub toast: Option<(i18n::Logical<'static>, f64)>,
     /// Whether the macOS title bar is drawn by us (traffic lights over our tab strip).
     pub integrated_titlebar: bool,
     /// Set when the desktop leaves the window frame to the app (GNOME on Wayland): the tab strip
@@ -902,6 +918,7 @@ impl PdfCraftApp {
             mode_override: None,
             left: LeftPanel::AllTools,
             docking: docking::Workspace::default(),
+            layout_rtl: false,
             pending_panel_reveals: Vec::new(),
             left_open: true,
             right: None,
@@ -1979,7 +1996,7 @@ impl PdfCraftApp {
                 } else {
                     "{who} in this document tried to open an address PdfCraft won't open: {e}. Only web (http, https) and email (mailto) links open from documents."
                 };
-                self.notify_fmt(template, &[("who", tl!(origin.noun())), ("e", &e.to_string())]);
+                self.notify_fmt(template, &[("who", &tl_logical!(origin.noun())), ("e", &e.to_string())]);
             }
         }
     }
@@ -1993,13 +2010,17 @@ impl PdfCraftApp {
         }
     }
 
-    pub fn notify(&mut self, msg: impl Into<String>) {
+    /// Show `msg` as the toast. It must be in logical order: built from [`tl_logical!`],
+    /// [`i18n::fmt_logical`] and [`i18n::trn_logical`] pieces, text people typed or a file's name,
+    /// or an engine or OS message (English, never reordered). Never the output of [`tl!`]: the
+    /// Arabic catalog's display-order text would be reordered a second time and read backwards.
+    pub fn notify(&mut self, msg: impl Into<i18n::Logical<'static>>) {
         self.toast = Some((msg.into(), 0.0));
     }
 
     /// Notify with a static message in the UI language.
     pub fn notify_tr(&mut self, text: &str) {
-        self.notify(tl!(text).to_string());
+        self.notify(i18n::t_logical(text).into_owned());
     }
 
     /// Notify with an error's own text. Engine and OS messages are not translated: matching their
@@ -2008,9 +2029,11 @@ impl PdfCraftApp {
         self.notify(error.to_string());
     }
 
-    /// Notify with a `{name}`-style template in the UI language (placeholders filled once).
+    /// Notify with a `{name}`-style template in the UI language (placeholders filled once). The
+    /// values go in as they are: a file's name, an engine message, or text from
+    /// [`tl_logical!`] (never [`tl!`] output).
     pub fn notify_fmt(&mut self, template: &str, args: &[(&str, &str)]) {
-        self.notify(i18n::fmt(tl!(template), args));
+        self.notify(i18n::fmt_logical(&i18n::t_logical(template), args));
     }
 
     pub fn set_theme_preference(&mut self, preference: ThemePreference) {
@@ -2098,11 +2121,11 @@ impl PdfCraftApp {
             .flat_map(|g| g.sections.iter().flat_map(|s| s.items.iter()))
             .find(|i| i.command == command)
             .map(|i| match i.availability {
-                pdfcraft_engine::catalog::Availability::Planned(m) => crate::i18n::fmt(tl!("ships in milestone {m}"), &[("m", m)]),
-                pdfcraft_engine::catalog::Availability::Provider => tl!("needs an AI provider (off by default)").to_string(),
-                pdfcraft_engine::catalog::Availability::Ready => tl!("is available").to_string(),
+                pdfcraft_engine::catalog::Availability::Planned(m) => crate::i18n::fmt_logical(&tl_logical!("ships in milestone {m}"), &[("m", m)]),
+                pdfcraft_engine::catalog::Availability::Provider => tl_logical!("needs an AI provider (off by default)"),
+                pdfcraft_engine::catalog::Availability::Ready => tl_logical!("is available"),
             })
-            .unwrap_or_else(|| tl!("is not available yet").to_string());
+            .unwrap_or_else(|| tl_logical!("is not available yet"));
         self.notify_fmt("`{command}` {when}", &[("command", command), ("when", &when)]);
     }
 
@@ -2307,6 +2330,7 @@ impl PdfCraftApp {
         });
         // Set apart: one more key inside the macro above passes serde_json's recursion limit.
         v["redact_prefs"] = self.redact_defaults.to_json();
+        v["layout_rtl"] = serde_json::Value::Bool(self.layout_rtl);
         // Set outside json! above, which is at serde_json's macro recursion limit.
         v["hide_empty_highlight_hover"] = serde_json::Value::Bool(self.comment_prefs.hide_empty_highlight_hover);
         v.to_string()
@@ -2320,6 +2344,7 @@ impl PdfCraftApp {
             && workspace.validate().is_ok()
         {
             self.docking = workspace;
+            self.layout_rtl = v.get("layout_rtl").and_then(serde_json::Value::as_bool).unwrap_or(false);
             self.left_open =
                 v.get("docking_left_open").and_then(serde_json::Value::as_bool).unwrap_or(self.docking.layout.contains(&docking::Panel::Tools));
             self.right = v.get("docking_right").and_then(|value| serde_json::from_value(value.clone()).ok()).flatten();
@@ -2860,8 +2885,8 @@ impl PdfCraftApp {
 
 /// Why nothing can be copied out of the document: its security doesn't allow it (Table 22,
 /// bit 5; #568).
-pub(crate) fn copy_refused() -> &'static str {
-    tl!("The document's security settings don't allow copying text and images")
+pub(crate) fn copy_refused() -> i18n::Logical<'static> {
+    tl_logical!("The document's security settings don't allow copying text and images")
 }
 
 impl PdfCraftApp {
@@ -2872,7 +2897,7 @@ impl PdfCraftApp {
         if self.session.get(id).is_none_or(pdfcraft_engine::Document::allows_copying) {
             return true;
         }
-        self.notify(copy_refused().to_string());
+        self.notify(copy_refused());
         false
     }
 
@@ -3120,6 +3145,12 @@ impl eframe::App for PdfCraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         i18n::set_current(i18n::Lang::from_pref(&self.language));
+        // A language switch mirrors the stock panel arrangement once; a layout the user changed
+        // is theirs.
+        if rtl::mirrored() != self.layout_rtl {
+            self.docking.mirror_standard_shape(rtl::mirrored());
+            self.layout_rtl = rtl::mirrored();
+        }
         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
         if !self.fonts_ready {
             ctx.request_repaint();
@@ -3171,12 +3202,12 @@ impl eframe::App for PdfCraftApp {
             // there, so its buttons (Bookmarks, Page thumbnails, ...) must open their panels.
             // Outside Read mode the docking workspace draws the inspector.
             if self.mode == Mode::Read && self.right.is_some() {
-                egui::Panel::right("read_right_panel")
+                rtl::panel("read_right_panel", rtl::Side::End)
                     .resizable(true)
                     .default_size(330.0)
                     .size_range(260.0..=520.0)
                     .frame(egui::Frame::NONE)
-                    .show(ui, |ui| panels::right_panel(self, ui));
+                    .show(ui, |ui| panels::right_panel_page(self, ui));
             }
         }
         let t = theme::Tokens::get(&ctx);
@@ -3184,7 +3215,7 @@ impl eframe::App for PdfCraftApp {
             if self.mode == Mode::Read {
                 match self.active {
                     None if self.combine_showing() => combine_ui::page(self, ui),
-                    None => home::show(self, ui),
+                    None => rtl::page(ui, |ui| home::show(self, ui)),
                     Some(index) => match compare_ui::side_by_side(self, index) {
                         Some((old, new)) => compare_ui::compare_area(self, old, new, ui),
                         None => canvas::document_area(self, index, ui),

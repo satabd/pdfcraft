@@ -107,6 +107,288 @@ fn text_tool_drafts_grow_for_latin_and_arabic() {
     }
 }
 
+/// The galleys of every text the last frame painted, with where each is painted.
+fn painted_galleys(h: &Harness<'static, PdfCraftApp>) -> Vec<(Pos2, std::sync::Arc<egui::Galley>)> {
+    fn walk(shape: &egui::Shape, out: &mut Vec<(Pos2, std::sync::Arc<egui::Galley>)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((text.pos, std::sync::Arc::clone(&text.galley))),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &h.output().shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// The decoded streams of the saved document that mention `needle`.
+fn saved_streams_with(h: &Harness<'static, PdfCraftApp>, needle: &str) -> Vec<String> {
+    let state = h.state();
+    let bytes = state.session.save_bytes(state.views[0].id).unwrap();
+    let doc = pdfcraft_cos::Document::open(bytes).unwrap();
+    doc.object_numbers()
+        .into_iter()
+        .filter_map(|n| match &*doc.get(pdfcraft_cos::ObjRef::new(n, 0)) {
+            pdfcraft_cos::Object::Stream(stream) => stream.decoded().ok(),
+            _ => None,
+        })
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .filter(|text| text.contains(needle))
+        .collect()
+}
+
+/// Typed Arabic shows in the Add text box as it will be on the page: the words in display order, the
+/// first word to the right of the second, while the draft keeps the typing order, and the saved text is
+/// what was typed, with the page's copy of it (`/ActualText`) in typing order too.
+#[test]
+fn typed_arabic_in_the_add_text_box_shows_in_display_order_and_is_saved_in_typing_order() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        return;
+    }
+    let input = "سلام عليكم";
+    for zoom in ["100", "150", "300"] {
+        let mut h = harness();
+        h.state_mut().set_option("zoom", zoom).unwrap();
+        h.run_steps(4);
+        assert!(h.state_mut().execute("edit.text"));
+        h.run_steps(2);
+        let point = at(&h, 40.0, 100.0);
+        click(&mut h, point);
+        h.event(egui::Event::Text(input.into()));
+        h.run_steps(4);
+        let draft = h.state().views[0].content.draft.as_ref().expect("the editor is open");
+        assert_eq!(draft.text, input, "the draft keeps the typing order at {zoom}%");
+        // What is painted: the second word first from the left, the letters of each word in the order
+        // the shaper joins them, so the first word's glyphs lie to the right of the second word's.
+        let galleys = painted_galleys(&h);
+        let (_, galley) =
+            galleys.iter().find(|(_, g)| g.job.text.contains('\u{633}')).unwrap_or_else(|| panic!("the box paints the Arabic text at {zoom}%"));
+        assert_eq!(galley.job.text, "عليكم سلام", "the words are in display order at {zoom}%");
+        let glyphs: Vec<(char, f32)> = galley.rows.iter().flat_map(|row| row.glyphs.iter().map(|g| (g.chr, g.pos.x))).collect();
+        assert_eq!(glyphs.len(), "عليكم سلام".chars().count(), "a glyph for every character at {zoom}%");
+        let (second, first) = glyphs.split_at("عليكم ".chars().count());
+        let second_right = second.iter().map(|g| g.1).fold(f32::MIN, f32::max);
+        let first_left = first.iter().map(|g| g.1).fold(f32::MAX, f32::min);
+        assert!(first_left > second_right, "the first word is right of the second at {zoom}%: {first_left} against {second_right}");
+        if let Ok(dir) = std::env::var("PDFCRAFT_SHOTS") {
+            h.render().unwrap().save(format!("{dir}/add-text-arabic-{zoom}.png")).unwrap();
+        }
+        h.get_by_label("Done adding text").click();
+        h.run_steps(3);
+        assert_eq!(texts(&h), [input], "the text is saved as typed at {zoom}%");
+        let actual: String = input.encode_utf16().map(|u| format!("{u:04X}")).collect();
+        let marked = saved_streams_with(&h, &format!("/ActualText <FEFF{actual}>"));
+        assert!(!marked.is_empty(), "the page keeps the typing order for copy and search at {zoom}%");
+    }
+}
+
+/// The rows of the Add text box sit where the text's alignment puts them, in the box as on the page:
+/// Arabic with the default alignment (left) starts at the box's left edge, with Align right it ends at
+/// the right edge; Latin text follows the alignment too.
+#[test]
+fn rows_of_the_add_text_box_follow_the_texts_alignment() {
+    // The text typed, and the text the box paints (the words of Arabic in display order).
+    for (text, painted, needs_arabic) in [("سلام عليكم", "عليكم سلام", true), ("Hello there", "Hello there", false)] {
+        if needs_arabic && pdfcraft_fonts::document_arabic_font().is_none() {
+            continue;
+        }
+        for align in [pdfcraft_engine::TextAlign::Left, pdfcraft_engine::TextAlign::Center, pdfcraft_engine::TextAlign::Right] {
+            let mut h = harness();
+            assert!(h.state_mut().execute("edit.text"));
+            h.run_steps(2);
+            let point = at(&h, 40.0, 100.0);
+            click(&mut h, point);
+            h.state_mut().views[0].content.draft.as_mut().expect("the editor is open").style.align = align;
+            h.event(egui::Event::Text(text.into()));
+            h.run_steps(4);
+            let galleys = painted_galleys(&h);
+            let (pos, galley) =
+                galleys.iter().find(|(_, g)| g.job.text == painted).unwrap_or_else(|| panic!("the box paints {text:?} as {painted:?}"));
+            let row = &galley.rows[0];
+            let (left, right) = (pos.x + row.pos.x, pos.x + row.pos.x + row.row.size.x);
+            let (area_left, area_right) = (pos.x, pos.x + galley.rect.width());
+            let what = format!("{text:?} aligned {align:?}: the row is {left}..{right} in {area_left}..{area_right}");
+            match align {
+                pdfcraft_engine::TextAlign::Left => assert!((left - area_left).abs() <= 1.0, "{what}"),
+                pdfcraft_engine::TextAlign::Right => assert!((right - area_right).abs() <= 1.0, "{what}"),
+                _ => assert!(((left - area_left) - (area_right - right)).abs() <= 1.5, "{what}"),
+            }
+            assert!(right > left && right <= area_right + 1.0 && left >= area_left - 1.0, "{what}");
+        }
+    }
+}
+
+/// The rows the Add text box paints for `probe` (a word of the text), without the spaces a wrapped row keeps at its end:
+/// one string per row, as the galley holds the characters (Arabic words keep the letters in typing order).
+fn editor_rows(h: &Harness<'static, PdfCraftApp>, probe: &str) -> Vec<String> {
+    let galleys = painted_galleys(h);
+    let (_, galley) = galleys.iter().find(|(_, g)| g.job.text.contains(probe)).unwrap_or_else(|| panic!("the box paints {probe:?}"));
+    galley.rows.iter().map(|row| row.glyphs.iter().map(|g| g.chr).collect::<String>().trim().to_owned()).collect()
+}
+
+/// The lines of the saved document's page that are not among `before` (the text lines the page had), top to bottom.
+fn new_page_lines(h: &Harness<'static, PdfCraftApp>, before: &[String]) -> Vec<String> {
+    let mut left = before.to_vec();
+    let state = h.state();
+    let mut lines = state.session.get(state.views[0].id).unwrap().text_lines(0);
+    lines.sort_by(|a, b| b.rect[3].total_cmp(&a.rect[3]));
+    lines
+        .into_iter()
+        .map(|l| l.text)
+        .filter(|text| match left.iter().position(|old| old == text) {
+            Some(i) => {
+                left.remove(i);
+                false
+            }
+            None => true,
+        })
+        .collect()
+}
+
+/// The Add text box breaks its lines where the page it is saved to does, whichever font it is typed in:
+/// Latin is measured in the standard font the box is written in (Helvetica) and Arabic by the shaped face, not
+/// by the interface font, and the box's width is the field's inner width (no margin). Typed near the page's
+/// right edge the box is narrow and the text wraps; the rows of the editor are the lines of the saved page.
+#[test]
+fn the_add_text_box_wraps_where_the_saved_page_does() {
+    let latin = "The quick brown fox jumps over the lazy dog while nine wizards quickly box jumpers and wrap lines at the edge";
+    let arabic = "سلام عليكم ورحمة الله وبركاته مع أطيب التحيات من الجميع هنا اليوم وفي كل مكان";
+    // Arabic with Latin words and digits in it: its lines hold the same words, in the order the bidirectional algorithm gives.
+    let mixed = "سلام PDF عليكم ورحمة الله Acrobat وبركاته 2026 مع أطيب التحيات من الجميع هنا Reader اليوم وفي كل مكان";
+    for (input, probe, needs_arabic) in [(latin, "quick", false), (arabic, "\u{633}\u{644}\u{627}\u{645}", true), (mixed, "Acrobat", true)] {
+        if needs_arabic && pdfcraft_fonts::document_arabic_font().is_none() {
+            continue;
+        }
+        // Two widths of box: the page's right edge leaves the text 100 and then 160 points.
+        for (zoom, x) in [("150", 200.0), ("150", 140.0), ("100", 200.0), ("200", 140.0)] {
+            let mut h = harness();
+            h.state_mut().set_option("zoom", zoom).unwrap();
+            h.run_steps(4);
+            let before: Vec<String> = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0).into_iter().map(|l| l.text).collect();
+            assert!(h.state_mut().execute("edit.text"));
+            h.run_steps(2);
+            let point = at(&h, x, 100.0);
+            click(&mut h, point);
+            h.event(egui::Event::Text(input.into()));
+            h.run_steps(4);
+            let draft = h.state().views[0].content.draft.as_ref().expect("the editor is open");
+            let box_width = draft.rect[2] - draft.rect[0];
+            assert!(box_width <= 300.0 - x as f64 + 1.0, "the box stops at the page's edge: {box_width}");
+            let rows = editor_rows(&h, probe);
+            h.get_by_label("Done adding text").click();
+            h.run_steps(3);
+            assert_eq!(texts(&h), [input]);
+            let saved = new_page_lines(&h, &before);
+            let what = format!("zoom {zoom}, box {box_width:.1} pt wide, at x {x}");
+            assert!(saved.len() >= 3, "the text wraps over several lines ({what}): {saved:?}");
+            assert_eq!(rows.len(), saved.len(), "the editor has the saved lines ({what}): {rows:?} against {saved:?}");
+            for (i, (row, line)) in rows.iter().zip(&saved).enumerate() {
+                // The glyphs of a right-to-left row are in display order: all its characters are the saved line's, last to first.
+                if input == mixed {
+                    // The same words on the row, whatever order their letters are in.
+                    let words = |text: &str| {
+                        let mut words: Vec<Vec<char>> = text
+                            .split(' ')
+                            .map(|w| {
+                                let mut chars: Vec<char> = w.chars().collect();
+                                chars.sort_unstable();
+                                chars
+                            })
+                            .collect();
+                        words.sort();
+                        words
+                    };
+                    assert_eq!(words(row), words(line), "row {i} ({what})");
+                    continue;
+                }
+                let read: String = if needs_arabic { row.chars().rev().collect() } else { row.clone() };
+                assert_eq!(&read, line, "row {i} ({what})");
+            }
+        }
+    }
+}
+
+/// The painted rows of the Add text box for `probe`: for each, where its ink begins and ends on screen (the spaces a wrapped row keeps are
+/// no ink) and where its top is.
+fn editor_row_extents(h: &Harness<'static, PdfCraftApp>, probe: &str) -> Vec<(f32, f32, f32)> {
+    let galleys = painted_galleys(h);
+    let (pos, galley) = galleys.iter().find(|(_, g)| g.job.text.contains(probe)).unwrap_or_else(|| panic!("the box paints {probe:?}"));
+    galley
+        .rows
+        .iter()
+        .map(|row| {
+            let ink: Vec<_> = row.glyphs.iter().filter(|g| g.chr != ' ').collect();
+            let left = ink.iter().map(|g| g.pos.x).fold(f32::MAX, f32::min);
+            let right = ink.iter().map(|g| g.pos.x + g.advance_width).fold(f32::MIN, f32::max);
+            (pos.x + row.pos.x + left, pos.x + row.pos.x + right, pos.y + row.pos.y)
+        })
+        .collect()
+}
+
+/// The rows of a wrapped Latin Add text box sit where the saved page writes its lines, at every alignment (a justified text with its
+/// spaces stretched): each row's ink begins and ends
+/// where the page line's does (the interface font is fitted to the standard font's width) and the rows are as far apart as the page's lines.
+#[test]
+fn the_rows_of_the_add_text_box_sit_where_the_page_writes_them() {
+    let input = "The quick brown fox jumps over the lazy dog while nine wizards quickly box jumpers and wrap lines at the edge";
+    use pdfcraft_engine::TextAlign::{Center, Justify, Left, Right};
+    // The interface font's rows are 1.21 em apart, the page's 1.2: a large size shows the pitch.
+    let cases = [("100", Left, 12.0), ("100", Center, 12.0), ("100", Right, 12.0), ("150", Left, 12.0), ("150", Center, 12.0), ("150", Right, 12.0)]
+        .into_iter()
+        .chain([("200", Left, 12.0), ("200", Center, 12.0), ("200", Right, 12.0), ("150", Left, 72.0), ("100", Right, 36.0)])
+        // Justified: every row but the last is stretched to the box's width, as the page writes it.
+        .chain([("100", Justify, 12.0), ("150", Justify, 12.0), ("200", Justify, 12.0), ("150", Justify, 36.0)]);
+    for (zoom, align, size) in cases {
+        {
+            let mut h = harness();
+            h.state_mut().set_option("zoom", zoom).unwrap();
+            h.run_steps(4);
+            let before: Vec<String> = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0).into_iter().map(|l| l.text).collect();
+            assert!(h.state_mut().execute("edit.text"));
+            h.run_steps(2);
+            let point = at(&h, 140.0, 100.0);
+            click(&mut h, point);
+            let style = &mut h.state_mut().views[0].content.draft.as_mut().expect("the editor is open").style;
+            (style.align, style.size) = (align, size);
+            h.event(egui::Event::Text(input.into()));
+            h.run_steps(4);
+            let rows = editor_row_extents(&h, "quick");
+            h.get_by_label("Done adding text").click();
+            h.run_steps(3);
+            let state = h.state();
+            let mut lines = state.session.get(state.views[0].id).unwrap().text_lines(0);
+            lines.retain(|l| !before.contains(&l.text));
+            lines.sort_by(|a, b| b.rect[3].total_cmp(&a.rect[3]));
+            let what = format!("zoom {zoom}, {align:?}, {size} pt");
+            assert_eq!(rows.len(), lines.len(), "{what}");
+            assert!(lines.len() >= 3, "{what}");
+            // The pitch adds up over the rows: the first and the last row are as far apart as the page's first and last lines.
+            if let (Some((_, _, first)), Some((_, _, last)), Some(top), Some(bottom)) = (rows.first(), rows.last(), lines.first(), lines.last()) {
+                let page_span = (at(&h, 0.0, top.rect[3] as f32).y - at(&h, 0.0, bottom.rect[3] as f32).y).abs();
+                // (half a pixel a row for the whole-pixel heights egui gives rows)
+                let slack = 1.5 + 0.5 * rows.len() as f32;
+                assert!(((last - first) - page_span).abs() <= slack, "the rows span {} against the page's {page_span} ({what})", last - first);
+            }
+            for (i, ((left, right, top), line)) in rows.iter().zip(&lines).enumerate() {
+                let (page_left, page_right) = (at(&h, line.rect[0] as f32, 0.0).x, at(&h, line.rect[2] as f32, 0.0).x);
+                assert!((left - page_left).abs() <= 2.0, "row {i} begins at {left}, the page's line at {page_left} ({what})");
+                assert!((right - page_right).abs() <= 2.0, "row {i} ends at {right}, the page's line at {page_right} ({what})");
+                if let (Some((_, _, next)), Some(below)) = (rows.get(i + 1), lines.get(i + 1)) {
+                    let page_pitch = (at(&h, 0.0, line.rect[3] as f32).y - at(&h, 0.0, below.rect[3] as f32).y).abs();
+                    assert!(
+                        (next - top - page_pitch).abs() <= 1.0,
+                        "rows {i} and {} are {} apart, the page's lines {page_pitch} ({what})",
+                        i + 1,
+                        next - top
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn text_tool_single_click_retypes_added_text_without_another_item() {
     for command in ["edit.text", "edit.edit_text"] {
@@ -584,4 +866,54 @@ fn released_text_does_not_jump_back_before_the_page_is_redrawn() {
     h.run_steps(2);
     let (old, new) = ink_at(&mut h, from, to);
     assert!(new > 20 && old == 0, "the redrawn page has the text in its new place ({old} old, {new} new)");
+}
+
+/// A justified Arabic Add text box stretches the spaces of its rows but the last to the box's width, as the page writes the text: the rows
+/// that the saved lines span the box are as wide in the editor (their width is the box's plus the space a wrap leaves at the row's left
+/// end), the last row is as long as its words.
+#[test]
+fn a_justified_arabic_add_text_box_stretches_its_rows_to_the_boxs_width() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        return;
+    }
+    let input = "سلام عليكم ورحمة الله وبركاته مع أطيب التحيات من الجميع هنا اليوم وفي كل مكان";
+    for zoom in ["100", "200"] {
+        let mut h = harness();
+        h.state_mut().set_option("zoom", zoom).unwrap();
+        h.run_steps(4);
+        let before: Vec<String> = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0).into_iter().map(|l| l.text).collect();
+        assert!(h.state_mut().execute("edit.text"));
+        h.run_steps(2);
+        let point = at(&h, 140.0, 100.0);
+        click(&mut h, point);
+        h.state_mut().views[0].content.draft.as_mut().expect("the editor is open").style.align = pdfcraft_engine::TextAlign::Justify;
+        h.event(egui::Event::Text(input.into()));
+        h.run_steps(4);
+        let galleys = painted_galleys(&h);
+        let (_, galley) = galleys.iter().find(|(_, g)| g.job.text.contains("\u{633}\u{644}\u{627}\u{645}")).expect("the box paints the draft");
+        let widths: Vec<f32> = galley.rows.iter().map(|row| row.row.size.x).collect();
+        // The width of a space where the rows' break spaces are: the box's own font.
+        let space = h.ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                " ".into(),
+                egui::FontId::new(12.0 * zoom.parse::<f32>().unwrap() / 100.0 * 4.0 / 3.0, egui::FontFamily::Proportional),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x
+        });
+        h.get_by_label("Done adding text").click();
+        h.run_steps(3);
+        let mut lines = h.state().session.get(h.state().views[0].id).unwrap().text_lines(0);
+        lines.retain(|l| !before.contains(&l.text));
+        assert!(lines.len() >= 3 && lines.len() == widths.len(), "{} rows, {} lines ({zoom}%)", widths.len(), lines.len());
+        lines.sort_by(|a, b| b.rect[3].total_cmp(&a.rect[3]));
+        for (i, (width, line)) in widths.iter().zip(&lines).enumerate().take(lines.len() - 1) {
+            let page = at(&h, line.rect[2] as f32, 0.0).x - at(&h, line.rect[0] as f32, 0.0).x;
+            assert!((width - space - page).abs() <= 3.0, "row {i} is {width} wide (a space is {space}), the page's line {page} ({zoom}%)");
+        }
+        let last = lines.len() - 1;
+        let page_last = at(&h, lines[last].rect[2] as f32, 0.0).x - at(&h, lines[last].rect[0] as f32, 0.0).x;
+        assert!(widths[last] <= page_last + space + 3.0 && widths[last] < widths[0] * 0.9, "the last row is not stretched ({zoom}%)");
+    }
 }

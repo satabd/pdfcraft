@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (gap 12: reading order is scored, not just word F1) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (M1: raw-deflate fallback preserves decoding-limit errors; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (gap 14: Vietnamese catalog shipped; Hindi/Indonesian/Korean and Arabic RTL remain) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (gap 14: the document view's scrollbar, the order of document tabs and the About tables, the date calendar and Shared Field Properties are mirrored; the Arabic frame, dialog forms, menus, submenus and panel scrollbars are mirrored; interface text wraps in typing order, document text in the panels is in display order, Find ignores harakat; every text field, the Add text box and the Edit text box edit Arabic in display order and break lines where the page will; the dock's tab bars, the canvas, Home's, Combine's and the dialogs' scrollbars, the header and footer boxes and the swatch grids remain; gap 3: Edit text and Add text shape Arabic; Hebrew points remain) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (gap 6: #1910 Organize Pages opens on the current page; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1398 stamps read upright on rotated pages; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1317, #1327, #1302, #1315 and #1340; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -42,7 +42,7 @@ update the numbers.
 | 11 | Accessibility: checker only, no tagging tools | feature | 40–70 | [target-app-parity.md](target-app-parity.md) |
 | 12 | No measured fidelity harness against Acrobat | quality | (in 2) | [target-app-parity.md](target-app-parity.md) |
 | 13 | Performance budgets and lazy loading of very large files | performance | 25–45 | this file |
-| 14 | Arabic not mirrored; no Hindi, Indonesian, Korean | localization | 25–45 | [localization-parity.md](localization-parity.md) |
+| 14 | Arabic only partly mirrored; no Hindi, Indonesian, Korean | localization | 25–45 | [localization-parity.md](localization-parity.md) |
 | 15 | Forms: JavaScript object model, actions, submit, XFA depth | feature | 40–75 | [pdf-spec-parity.md](pdf-spec-parity.md) |
 | 16 | UI precision gaps (multi-select move, rulers, accelerators, windows) | UI/UX | 30–60 | [ui-parity.md](ui-parity.md) |
 | 17 | Certificate security and other protect gaps | feature, spec | 15–30 | [pdf-spec-parity.md](pdf-spec-parity.md) |
@@ -99,7 +99,8 @@ update the numbers.
   baseline is still replaced. Estimates are unchanged.
 
 - **Missing:** robust in-place editing of text PdfCraft didn't write: subset fonts without the
-  needed glyphs, CJK and right-to-left text, rotated text, lists, superscript/subscript, keeping
+  needed glyphs, CJK text (Arabic replacement text is shaped with the craft-fonts face and edited in display
+  order in the Edit text box; Hebrew points are not, and the editor draws Arabic in the interface's face), rotated text, lists, superscript/subscript, keeping
   structure tags, find and replace in edit mode; vector and object editing; arrange and align.
 - **Evidence:** `edit.text-edit` is partial (font reused or Helvetica substituted);
   `edit.rtl-cjk-editing`, `edit.rotated-text-editing`, `edit.keep-tags-on-edit`,
@@ -293,14 +294,43 @@ update the numbers.
   to edit.
 - **Estimate:** 25–45 h. **Doc:** this file.
 
-### 14. Arabic not mirrored; no Hindi, Indonesian, Korean
+### 14. Arabic only partly mirrored; no Hindi, Indonesian, Korean
 
-- **Missing:** a right-to-left layout (panels, menus, alignment), bidirectional text in the text
-  layout itself (wrapping, typed text); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+- **Done (2026-10-22):** the frame is mirrored for Arabic: Tools at the right, navigation panes and
+  rail at the left, mode bar, tab strip, rows and dialog footers from the right, directional icons
+  flipped, fields aligned to the script typed (`rtl` module; the stock arrangement only, a
+  rearranged layout is kept).
+- **Done (2026-10-22, later):** every caption-and-field dialog form is a `widgets::form_grid`, every menu and
+  context menu has its label at the start and its shortcut at the end, dialog titles and tab strips start at
+  the right, and truncated tool rows and the search box cut in logical order.
+- **Done (2026-10-22, typing):** single-line text fields edit right-to-left script in display order
+  (`widgets::BidiEdit` over `bidi::ScreenMap`: the `widgets::line` fields, the palette, the bookmark search, Find and the
+  on-page form editor): caret, click, drag selection, Left/Right, Backspace/Delete, copy, undo and input methods
+  work on what is drawn and what is stored stays in typing order.
+- **Done (2026-10-22, later still):** submenus open to the start side and the panels' and menus' scroll areas put
+  their bar at the start edge (`widgets::sub_menu`, `widgets::scroll_area`); multi-line fields, the Add text box and the
+  Edit text box edit Arabic and Hebrew in display order and break their lines where the page will write them
+  (`BidiEdit` layout hook, `edit::added::LineMeasure`, `TextDraftProbe`), with the draft, the saved text and
+  `/ActualText` in typing order.
+- **Done (2026-10-22, the view, the tabs, the tables):** the document view's vertical scrollbar is at the left edge
+  (`widgets::scroll_area_with`; it also draws the bottom bar, since egui hides both bars with one setting; scrolling is
+  egui's own), the document tabs run from the right (first document rightmost, Combine leftmost; drag, drop line and
+  overflow arrows follow; Ctrl+Tab and the document order unchanged), and the data tables that hold text run their
+  columns from the right: the About contributor and model tables, the date calendar and Shared Field Properties
+  (`credits::mirrored_table`, `widgets::form_grid_of`). The header and footer boxes (the page's left, centre and right)
+  and the swatch grids (a palette) stay left to right on purpose.
+- **Missing:** the rest of the right-to-left layout (the scrollbars of Home, Combine and the lists inside dialogs, the
+  dock's tab bars (craft-libs), the canvas and its overlays), a selection that is logically rather
+  than screen contiguous, the page's own Arabic face in the Edit text box, Hebrew points (no Hebrew face in the pinned
+  craft-fonts); catalogs for Hindi, Indonesian and Korean (Acrobat ships
   Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
   Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
   like other non-English languages (no translated help; engine/OS details stay English).
-- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` planned.
+- **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` partial (mirrored frame, dialog forms, menus,
+  submenus, panel and document-view scrollbars, document-tab order, the About tables, the calendar and Shared Field Properties; tooltips, dialog text and notes wrap in typing order; document text in bookmarks,
+  search, Properties, fields, signatures and notices is in display order; Find ignores harakat and matches
+  presentation forms; text fields and the Add text and Edit text boxes edit Arabic in display order);
+  `edit.rtl-cjk-editing` and `edit.add-text` partial (kittests `edit_text_rtl`, `edit_text_latin`, `content`).
 - **Estimate:** 25–45 h (Arabic RTL 20–35, three catalogs 8–12 plus review). **Doc:**
   [localization-parity.md](localization-parity.md).
 
@@ -382,6 +412,10 @@ update the numbers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Gap 14: the document view's vertical scrollbar is at the left edge for Arabic, the document tabs run from the right, and the About contributor and model tables, the date calendar and Shared Field Properties run their columns from the right; the header and footer boxes and the swatch grids stay left to right by design. Estimates unchanged |
+| 2026-10-22 | minor | Gap 14: every dialog caption-and-field form, every menu and context menu, dialog titles and tab strips are mirrored for Arabic, and truncated labels cut in logical order; submenu side, scrollbars, dock tab bars, tab order, the canvas and the data tables stay left to right. Estimates unchanged |
+| 2026-10-22 | minor | Gap 14: the Arabic interface mirrors its frame (Tools at the right, navigation panes and rail at the left, mode bar, tab strip, rows and dialog footers from the right, directional icons flipped, fields aligned to the script typed); menus, dialog bodies and grids, some panels, the tab order and the canvas are not mirrored. Estimates unchanged |
+| 2026-10-21 | minor | Gap 14: Arabic interface text that wraps goes through logical-order lookups; document text across the panels is painted in display order; Find folds harakat, presentation forms and digits. Gap 3: Edit text shapes Arabic replacement text (`edit.rtl-cjk-editing` notes). Estimates unchanged |
 | 2026-10-15 | minor | Gap 12: the text oracle scores reading order as well as word F1, which is a bag of words and cannot see order; the first measurement separated 18 improvements from 6 regressions in a change F1 called unchanged on 26 of 29 files. Estimates unchanged. |
 | 2026-10-14 | minor | M1: raw-deflate fallback preserves decoding-limit errors in strict and tolerant decoding; synthetic filter and COS stream regressions. Estimates unchanged. |
 | 2026-10-15 | patch | Gap 24: record localization and installers as partial (unusable Chinese, Telugu and Arabic; unsigned Linux packages) |

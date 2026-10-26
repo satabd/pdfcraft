@@ -163,7 +163,7 @@ fn messages_from_scripts_run_on_open_show_right_away() {
 const RUNAWAY: &str = "function f() { for (var j = 0; j &lt; 99999; j++) {} } for (var k = 0; k &lt; 5000; k++) f();";
 const SCRIPTS_OFF: &str = "This form's scripts are turned off because one ran too long";
 
-fn says_scripts_are_off(toast: &Option<(String, f64)>) -> bool {
+fn says_scripts_are_off(toast: &Option<(pdfcraft_ui_egui::i18n::Logical<'static>, f64)>) -> bool {
     toast.as_ref().is_some_and(|t| t.0.contains(SCRIPTS_OFF))
 }
 

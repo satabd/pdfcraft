@@ -62,24 +62,170 @@ pub struct Workspace {
     pub hidden: Vec<(Panel, Location<Panel>)>,
 }
 
+/// The Tools and Inspector widths of the stock arrangement.
+const TOOLS_WIDTH: f32 = 272.0;
+const INSPECTOR_WIDTH: f32 = 330.0;
+/// Deepest tree [`Workspace::stock`] looks into; the stock arrangements are two splits deep.
+const STOCK_DEPTH: usize = 8;
+
 impl Default for Workspace {
     fn default() -> Self {
-        Self {
-            layout: Layout {
-                root: Some(split(
-                    SplitAxis::Horizontal,
-                    SplitSize::FixedFirst(272.0),
-                    tabs(Panel::Tools),
-                    split(SplitAxis::Horizontal, SplitSize::FixedSecond(330.0), tabs(Panel::Canvas), tabs(Panel::Inspector)),
-                )),
-                floating: Vec::new(),
-            },
-            hidden: Vec::new(),
+        Self::default_for(false)
+    }
+}
+
+/// Which stock arrangement a workspace is, with the widths and open state it keeps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Stock {
+    rtl: bool,
+    tools_open: bool,
+    inspector_open: bool,
+    tools_width: f32,
+    inspector_width: f32,
+}
+
+/// `size` with its value zeroed: two layouts that differ only in how wide a pane was dragged
+/// compare equal.
+fn blank_size(size: SplitSize) -> SplitSize {
+    match size {
+        SplitSize::Ratio(_) => SplitSize::Ratio(0.0),
+        SplitSize::FixedFirst(_) => SplitSize::FixedFirst(0.0),
+        SplitSize::FixedSecond(_) => SplitSize::FixedSecond(0.0),
+    }
+}
+
+/// `node` with every split's size blanked, or `None` for a tree deeper than `depth`.
+fn blank_sizes(node: &Node<Panel>, depth: usize) -> Option<Node<Panel>> {
+    Some(match node {
+        Node::Split { axis, size, first, second } => Node::Split {
+            axis: *axis,
+            size: blank_size(*size),
+            first: Box::new(blank_sizes(first, depth.checked_sub(1)?)?),
+            second: Box::new(blank_sizes(second, depth.checked_sub(1)?)?),
+        },
+        other => other.clone(),
+    })
+}
+
+/// The size `panel` has in `node` when it fills one child of a horizontal split by itself:
+/// a fixed first child or a fixed second child. `None` when it is anywhere else.
+fn pane_width(node: &Node<Panel>, panel: Panel, depth: usize) -> Option<f32> {
+    let Node::Split { size, first, second, .. } = node else { return None };
+    let alone = |child: &Node<Panel>| matches!(child, Node::Tabs { panels, .. } if panels.as_slice() == [panel]);
+    match size {
+        SplitSize::FixedFirst(v) if alone(first) => Some(*v),
+        SplitSize::FixedSecond(v) if alone(second) => Some(*v),
+        _ => {
+            let depth = depth.checked_sub(1)?;
+            pane_width(first, panel, depth).or_else(|| pane_width(second, panel, depth))
         }
     }
 }
 
 impl Workspace {
+    /// The stock arrangement for a reading direction: Tools at the outer start edge, the
+    /// Inspector at the outer end edge, the document between them.
+    fn standard(rtl: bool, tools: f32, inspector: f32) -> Self {
+        let root = if rtl {
+            split(
+                SplitAxis::Horizontal,
+                SplitSize::FixedSecond(tools),
+                split(SplitAxis::Horizontal, SplitSize::FixedFirst(inspector), tabs(Panel::Inspector), tabs(Panel::Canvas)),
+                tabs(Panel::Tools),
+            )
+        } else {
+            split(
+                SplitAxis::Horizontal,
+                SplitSize::FixedFirst(tools),
+                tabs(Panel::Tools),
+                split(SplitAxis::Horizontal, SplitSize::FixedSecond(inspector), tabs(Panel::Canvas), tabs(Panel::Inspector)),
+            )
+        };
+        Self { layout: Layout { root: Some(root), floating: Vec::new() }, hidden: Vec::new() }
+    }
+
+    /// The stock arrangement for a language: `rtl` puts Tools at the right and the Inspector
+    /// at the left. `default_for(false)` is the arrangement before the interface was mirrored.
+    pub fn default_for(rtl: bool) -> Self {
+        Self::standard(rtl, TOOLS_WIDTH, INSPECTOR_WIDTH)
+    }
+
+    /// Which stock arrangement this is: either direction, either pane open or closed, any pane
+    /// width. `None` as soon as the user rearranged anything else (moved, floated, tabbed or
+    /// stacked a panel, or closed one that was not docked at its stock edge).
+    fn stock(&self) -> Option<Stock> {
+        if self.validate().is_err() || !self.layout.floating.is_empty() {
+            return None;
+        }
+        let root = self.layout.root.as_ref()?;
+        let blank = blank_sizes(root, STOCK_DEPTH)?;
+        let location = |panel: Panel| self.hidden.iter().find(|(id, _)| *id == panel).map(|(_, location)| location);
+        for rtl in [false, true] {
+            for tools_open in [true, false] {
+                for inspector_open in [true, false] {
+                    let mut candidate = Self::default_for(rtl);
+                    if (!tools_open && candidate.set_visible(Panel::Tools, false).is_err())
+                        || (!inspector_open && candidate.set_visible(Panel::Inspector, false).is_err())
+                    {
+                        continue;
+                    }
+                    if candidate.layout.root.as_ref().and_then(|root| blank_sizes(root, STOCK_DEPTH)).as_ref() != Some(&blank) {
+                        continue;
+                    }
+                    // A closed pane must have been docked at its stock edge, or its saved side
+                    // would silently change.
+                    let (tools_edge, inspector_edge) = if rtl { (Zone::Right, Zone::Left) } else { (Zone::Left, Zone::Right) };
+                    let docked_at = |panel: Panel, open: bool, edge: Zone| {
+                        open || location(panel).is_some_and(|l| l.floating.is_none() && l.placement == Placement::Split(edge))
+                    };
+                    if self.hidden.len() != usize::from(!tools_open) + usize::from(!inspector_open)
+                        || !docked_at(Panel::Tools, tools_open, tools_edge)
+                        || !docked_at(Panel::Inspector, inspector_open, inspector_edge)
+                    {
+                        continue;
+                    }
+                    // A closed pane's width is the size its parent split had when it closed.
+                    let width = |panel: Panel, open: bool, edge: Zone| {
+                        let closed = location(panel).and_then(|l| l.size).and_then(|size| match (size, edge) {
+                            (SplitSize::FixedFirst(v), Zone::Left) | (SplitSize::FixedSecond(v), Zone::Right) => Some(v),
+                            _ => None,
+                        });
+                        if open { pane_width(root, panel, STOCK_DEPTH) } else { closed }
+                    };
+                    return Some(Stock {
+                        rtl,
+                        tools_open,
+                        inspector_open,
+                        tools_width: width(Panel::Tools, tools_open, tools_edge).filter(|v| v.is_finite()).unwrap_or(TOOLS_WIDTH),
+                        inspector_width: width(Panel::Inspector, inspector_open, inspector_edge).filter(|v| v.is_finite()).unwrap_or(INSPECTOR_WIDTH),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Mirror the stock arrangement for a language written `rtl` (Tools at the right, the
+    /// Inspector at the left) or back, keeping the pane widths and which panes are open. A layout
+    /// the user rearranged is left exactly as it is. Returns whether anything changed.
+    pub fn mirror_standard_shape(&mut self, rtl: bool) -> bool {
+        let Some(stock) = self.stock() else { return false };
+        if stock.rtl == rtl {
+            return false;
+        }
+        let mut next = Self::standard(rtl, stock.tools_width, stock.inspector_width);
+        // The Inspector closes first: with the document alone beside it, Tools remembers its edge
+        // (closed before the Inspector it would remember a sibling that is gone and reopen at
+        // its default side, the left).
+        if (!stock.inspector_open && next.set_visible(Panel::Inspector, false).is_err())
+            || (!stock.tools_open && next.set_visible(Panel::Tools, false).is_err())
+        {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
     /// Side of the Tools panel, including its saved position while closed.
     pub fn tools_on_right(&self) -> bool {
         let location = self
@@ -321,7 +467,9 @@ fn publish_visibility(app: &mut crate::PdfCraftApp, workspace: &Workspace) {
 pub fn command(app: &mut crate::PdfCraftApp, reset: bool, params: &Value) -> Result<Value, String> {
     let mut workspace = app.docking.clone();
     if reset {
-        workspace = Workspace::default();
+        let rtl = crate::rtl::of_pref(&app.language);
+        workspace = Workspace::default_for(rtl);
+        app.layout_rtl = rtl;
         workspace.set_visible(Panel::Inspector, app.right.is_some())?;
     } else {
         sync(&mut workspace, app)?;
@@ -371,7 +519,9 @@ pub fn show(app: &mut crate::PdfCraftApp, ui: &mut egui::Ui) {
     let mut workspace = std::mem::take(&mut app.docking);
     if let Err(error) = workspace.validate().and_then(|()| sync(&mut workspace, app)) {
         app.notify_fmt("Panel layout could not be restored: {error}", &[("error", &error)]);
-        workspace = Workspace::default();
+        let rtl = crate::rtl::of_pref(&app.language);
+        workspace = Workspace::default_for(rtl);
+        app.layout_rtl = rtl;
         let _ = sync(&mut workspace, app);
     }
     let mut style = DockStyle::from_ui(ui);
@@ -408,7 +558,7 @@ pub fn show(app: &mut crate::PdfCraftApp, ui: &mut egui::Ui) {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, t.pasteboard);
                 match app.active {
                     None if app.combine_showing() => crate::combine_ui::page(app, ui),
-                    None => crate::home::show(app, ui),
+                    None => crate::rtl::page(ui, |ui| crate::home::show(app, ui)),
                     Some(index) => match crate::compare_ui::side_by_side(app, index) {
                         Some((old, new)) => crate::compare_ui::compare_area(app, old, new, ui),
                         None => crate::canvas::document_area(app, index, ui),
@@ -418,7 +568,7 @@ pub fn show(app: &mut crate::PdfCraftApp, ui: &mut egui::Ui) {
             Panel::Tools => crate::panels::left_panel(app, ui),
             Panel::Inspector => {
                 ui.data_mut(|data| data.insert_temp(egui::Id::new("pdfcraft-inspector-body"), ui.max_rect()));
-                crate::panels::right_panel(app, ui);
+                crate::panels::right_panel_page(app, ui);
             }
         },
     );
@@ -476,6 +626,107 @@ mod tests {
         workspace.set_visible(Panel::Tools, true).unwrap();
         assert!(!workspace.tools_on_right());
         workspace.validate().unwrap();
+    }
+
+    fn tools_width(workspace: &Workspace) -> Option<f32> {
+        pane_width(workspace.layout.root.as_ref()?, Panel::Tools, STOCK_DEPTH)
+    }
+
+    #[test]
+    fn the_left_to_right_default_is_what_it_always_was() {
+        let workspace = Workspace::default_for(false);
+        assert_eq!(serde_json::to_value(&workspace).unwrap(), serde_json::to_value(Workspace::default()).unwrap());
+        assert!(!workspace.tools_on_right());
+        workspace.validate().unwrap();
+    }
+
+    #[test]
+    fn the_right_to_left_default_has_tools_on_the_right_and_the_inspector_on_the_left() {
+        let mut workspace = Workspace::default_for(true);
+        workspace.validate().unwrap();
+        assert!(workspace.tools_on_right());
+        let Some(Node::Split { first, second, .. }) = &workspace.layout.root else { panic!("a split") };
+        assert!(matches!(second.as_ref(), Node::Tabs { panels, .. } if panels.as_slice() == [Panel::Tools]));
+        let Node::Split { first: inspector, second: canvas, .. } = first.as_ref() else { panic!("a nested split") };
+        assert!(matches!(inspector.as_ref(), Node::Tabs { panels, .. } if panels.as_slice() == [Panel::Inspector]));
+        assert!(matches!(canvas.as_ref(), Node::Tabs { panels, .. } if panels.as_slice() == [Panel::Canvas]));
+        // Closing and reopening a pane puts it back at its edge.
+        workspace.set_visible(Panel::Inspector, false).unwrap();
+        workspace.set_visible(Panel::Inspector, true).unwrap();
+        assert!(workspace.tools_on_right());
+        workspace.validate().unwrap();
+    }
+
+    #[test]
+    fn the_stock_layout_mirrors_both_ways_and_keeps_widths_and_closed_panes() {
+        let mut workspace = Workspace::default_for(false);
+        assert!(workspace.mirror_standard_shape(true));
+        assert_eq!(serde_json::to_value(&workspace).unwrap(), serde_json::to_value(Workspace::default_for(true)).unwrap());
+        assert!(!workspace.mirror_standard_shape(true), "already mirrored: nothing to do");
+        assert!(workspace.mirror_standard_shape(false));
+        assert_eq!(serde_json::to_value(&workspace).unwrap(), serde_json::to_value(Workspace::default_for(false)).unwrap());
+
+        // A dragged divider and a closed Inspector come along.
+        workspace.apply(Action::ResizeSplit { path: vec![], size: SplitSize::FixedFirst(300.0) }).unwrap();
+        workspace.set_visible(Panel::Inspector, false).unwrap();
+        assert!(workspace.mirror_standard_shape(true));
+        assert_eq!(tools_width(&workspace), Some(300.0));
+        assert!(workspace.tools_on_right());
+        assert!(!workspace.layout.contains(&Panel::Inspector));
+        workspace.set_visible(Panel::Inspector, true).unwrap();
+        workspace.validate().unwrap();
+        assert!(workspace.mirror_standard_shape(false));
+        assert_eq!(tools_width(&workspace), Some(300.0));
+        assert!(!workspace.tools_on_right());
+
+        // Everything closed is still the stock arrangement.
+        let mut closed = Workspace::default_for(false);
+        closed.set_visible(Panel::Inspector, false).unwrap();
+        closed.set_visible(Panel::Tools, false).unwrap();
+        assert!(closed.mirror_standard_shape(true));
+        closed.set_visible(Panel::Tools, true).unwrap();
+        assert!(closed.tools_on_right(), "Tools reopens at the right");
+    }
+
+    #[test]
+    fn a_rearranged_layout_is_never_mirrored() {
+        let untouched = |mut workspace: Workspace| {
+            let before = serde_json::to_value(&workspace).unwrap();
+            assert!(!workspace.mirror_standard_shape(true));
+            assert!(!workspace.mirror_standard_shape(false));
+            assert_eq!(serde_json::to_value(&workspace).unwrap(), before);
+        };
+        // Tools put at the right by the "Tools panel side" preference.
+        let mut right = Workspace::default_for(false);
+        right.set_tools_on_right(true).unwrap();
+        right.validate().unwrap();
+        untouched(right.clone());
+        // ... and closed there: its saved side is the user's.
+        right.set_visible(Panel::Tools, false).unwrap();
+        untouched(right);
+        // Floating, tabbed together, or the Inspector at the far left.
+        let mut floating = Workspace::default_for(false);
+        floating.apply(Action::Float { panel: Panel::Tools, rect: [10.0, 20.0, 300.0, 400.0] }).unwrap();
+        untouched(floating);
+        let mut tabbed = Workspace::default_for(false);
+        tabbed.apply(Action::Move { panel: Panel::Inspector, anchor: Panel::Tools, placement: Placement::Split(Zone::Center) }).unwrap();
+        untouched(tabbed);
+        let mut moved = Workspace::default_for(false);
+        moved.apply(Action::Move { panel: Panel::Inspector, anchor: Panel::Tools, placement: Placement::Split(Zone::Left) }).unwrap();
+        untouched(moved);
+        // A layout with no root, or only the document.
+        untouched(Workspace { layout: Layout { root: None, floating: Vec::new() }, hidden: Vec::new() });
+    }
+
+    #[test]
+    fn a_tree_too_deep_for_the_stock_shape_is_left_alone_without_recursion_trouble() {
+        let mut node = tabs(Panel::Canvas);
+        for _ in 0..200 {
+            node = split(SplitAxis::Horizontal, SplitSize::Ratio(0.5), node, tabs(Panel::Tools));
+        }
+        let mut workspace = Workspace { layout: Layout { root: Some(node), floating: Vec::new() }, hidden: Vec::new() };
+        assert!(!workspace.mirror_standard_shape(true));
+        assert!(blank_sizes(workspace.layout.root.as_ref().unwrap(), STOCK_DEPTH).is_none());
     }
 
     #[test]

@@ -27,6 +27,10 @@ use crate::x509::{Certificate, build_chain, build_chain_noted};
 #[path = "pdf_discovery_tests.rs"]
 mod discovery_tests;
 
+#[cfg(test)]
+#[path = "shaped_tests.rs"]
+mod shaped_tests;
+
 /// Digests of signed byte ranges (and parsed signed revisions), kept across revalidations of
 /// one document: incremental edits only append to the file, so the signed bytes and their
 /// digest don't change, and rehashing a large file on every edit was the expensive part of
@@ -1721,7 +1725,7 @@ impl AppearanceLabels {
     /// can't draw, and that character. Signing refuses such a label when it is shown, so an
     /// interface checks its translated labels here and falls back to [`Default`] if one fails.
     pub fn first_undrawable(&self) -> Option<(&'static str, char)> {
-        self.fields().into_iter().find_map(|(field, text)| pdfcraft_fonts::first_undrawable(text).map(|c| (field, c)))
+        self.fields().into_iter().find_map(|(field, text)| crate::shaped::first_undrawable(text).map(|c| (field, c)))
     }
 }
 
@@ -2064,13 +2068,16 @@ pub fn display_date(pdf: &str) -> String {
 
 /// The visible signature: the signer's name large on the left, or the graphic in its place, and
 /// the details on the right (Acrobat's standard layout), in Helvetica. A graphic with no details
-/// beside it fills the box. An error, before anything is drawn, when a detail it writes in
-/// Helvetica (the signer's name, the certificate's subject, the reason or the location) has a
-/// character Helvetica can't draw: signing invisibly, or leaving that part out, still works. A
-/// graphic doesn't change this: the name it replaces on the left is still among the details.
-/// A label that is drawn ([`AppearanceLabels`], the caller's words) is refused the same way.
+/// beside it fills the box. Arabic in a detail or a label is drawn shaped (see [`crate::shaped`]):
+/// one `/ActualText` span per line, right-aligned when its paragraph runs right to left. An error,
+/// before anything is drawn, when a detail (the signer's name, the certificate's subject, the
+/// reason or the location) or a label that is drawn has a character neither Helvetica nor the
+/// Arabic face can draw: signing invisibly, or leaving that part out, still works. A graphic
+/// doesn't change this: the name it replaces on the left is still among the details. A label
+/// ([`AppearanceLabels`], the caller's words) is refused the same way.
 fn appearance(doc: &mut Document, rect: [f64; 4], name: &str, cert: &Certificate, opts: &SignOptions) -> Result<Stream, SignError> {
-    use pdfcraft_fonts::{first_undrawable, helvetica_width, literal, undrawable_message, win_ansi, wrap};
+    use crate::shaped::{self, Setter, Wrapped, first_undrawable};
+    use pdfcraft_fonts::{helvetica_width, literal, undrawable_message, win_ansi};
     let (w, h) = ((rect[2] - rect[0]).max(0.0), (rect[3] - rect[1]).max(0.0));
     let a = &opts.appearance;
     let dn = cert.subject.display();
@@ -2088,6 +2095,9 @@ fn appearance(doc: &mut Document, rect: [f64; 4], name: &str, cert: &Certificate
                     undrawable_message(&format!("{what} of the visible signature"), c)
                 )));
             }
+            if on && let Some(e) = text.and_then(shaped::too_long) {
+                return Err(e);
+            }
         }
         // The labels are the caller's words (a translation), checked as the details are: only
         // those that are drawn, as each is drawn only beside its detail.
@@ -2099,6 +2109,11 @@ fn appearance(doc: &mut Document, rect: [f64; 4], name: &str, cert: &Certificate
                 "{}; pass that label in Western European characters, or leave the labels out of the visible signature",
                 undrawable_message(&format!("the {field} label of the visible signature"), c)
             )));
+        }
+        for ((_, text), _) in opts.appearance_labels.fields().into_iter().zip(drawn).filter(|&(_, on)| a.labels && on) {
+            if let Some(e) = shaped::too_long(text) {
+                return Err(e);
+            }
         }
     }
     let mut lines: Vec<String> = Vec::new();
@@ -2128,7 +2143,40 @@ fn appearance(doc: &mut Document, rect: [f64; 4], name: &str, cert: &Certificate
     lines.retain(|l| !l.is_empty());
     let mut out = Vec::new();
     let mut image = None;
+    let mut fonts = Dict::new();
+    let mut font = Dict::new();
+    font.set(b"Type".to_vec(), Object::name("Font"));
+    font.set(b"Subtype".to_vec(), Object::name("Type1"));
+    font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
+    font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+    fonts.set(b"Helv".to_vec(), Object::Dict(font));
     if w > 1.0 && h > 1.0 {
+        // Text with Arabic in it is laid out shaped; everything else as ever, in Helvetica.
+        let latin = |s: &str| helvetica_width(s, 1.0);
+        let setter = (shaped::face_available() && lines.iter().any(|l| pdfcraft_fonts::shaped_text::has_arabic(l))).then(|| Setter::new(&latin));
+        if setter.is_some() && !(w.is_finite() && h.is_finite()) {
+            return Err(SignError::Unsupported("the signature's rectangle is not a finite size".into()));
+        }
+        let em = |text: &str| setter.as_ref().map_or_else(|| helvetica_width(text, 1.0), |s| s.em(text));
+        let wrap = |text: &str, size: f64, width: f64| -> Vec<Wrapped> {
+            match &setter {
+                Some(s) => s.wrap(text, size, width),
+                None => pdfcraft_fonts::wrap(text, size, width).into_iter().map(|text| Wrapped { text, rtl: false, shaped: false }).collect(),
+            }
+        };
+        let em_of = |l: &Wrapped| setter.as_ref().map_or_else(|| helvetica_width(&l.text, 1.0), |s| s.em_of(l));
+        /// One line of the signature, placed in its column.
+        struct Row {
+            line: Wrapped,
+            size: f64,
+            /// The column's left edge and width.
+            left: f64,
+            width: f64,
+            y: f64,
+            /// The index of the line in the shaped plan, if it is drawn shaped.
+            planned: Option<usize>,
+        }
+        let mut rows: Vec<Row> = Vec::new();
         let pad = (h * 0.06).clamp(1.0, 6.0);
         let (left_w, right_x) = match (&opts.graphic, a.name) {
             (Some(_), _) if lines.is_empty() => (w, pad),
@@ -2136,43 +2184,62 @@ fn appearance(doc: &mut Document, rect: [f64; 4], name: &str, cert: &Certificate
             (None, false) => (0.0, pad),
         };
         let right_w = (w - right_x - pad).max(1.0);
-        if let Some(g) = &opts.graphic {
-            let (ops, im) = g.draw(doc, [pad, pad, (left_w - 2.0 * pad).max(0.0), (h - 2.0 * pad).max(0.0)])?;
-            out.extend(ops.bytes());
-            image = im;
-        }
-        out.extend_from_slice(b"BT\n0 g\n");
         if a.name && opts.graphic.is_none() {
             // The name fills the left half.
             let mut size = (h * 0.4).min(36.0);
             let fit = (left_w - 2.0 * pad).max(1.0);
-            let longest = helvetica_width(name, 1.0).max(0.01);
+            let longest = em(name).max(0.01);
             size = size.min(fit / longest).max(4.0);
             let words = wrap(name, size, fit);
             let total = words.len() as f64 * size * 1.1;
             let mut y = (h + total) / 2.0 - size * 0.85;
-            for l in &words {
-                out.extend(format!("/Helv {} Tf 1 0 0 1 {} {} Tm ", fmt(size), fmt(pad), fmt(y)).bytes());
-                out.extend(literal(&win_ansi(l)));
-                out.extend_from_slice(b" Tj\n");
+            for line in words {
+                rows.push(Row { line, size, left: pad, width: fit, y, planned: None });
                 y -= size * 1.1;
             }
         }
         // The details, shrunk to fit the right side.
         let mut size = (h / (lines.len().max(1) as f64 * 1.15)).min(12.0);
         let wrapped = loop {
-            let all: Vec<String> = lines.iter().flat_map(|l| wrap(l, size, right_w)).collect();
+            let all: Vec<Wrapped> = lines.iter().flat_map(|l| wrap(l, size, right_w)).collect();
             if all.len() as f64 * size * 1.15 <= h - 2.0 * pad || size <= 3.0 {
                 break all;
             }
             size *= 0.9;
         };
         let mut y = h - pad - size * 0.9;
-        for l in &wrapped {
-            out.extend(format!("/Helv {} Tf 1 0 0 1 {} {} Tm ", fmt(size), fmt(right_x), fmt(y)).bytes());
-            out.extend(literal(&win_ansi(l)));
-            out.extend_from_slice(b" Tj\n");
+        for line in wrapped {
+            rows.push(Row { line, size, left: right_x, width: right_w, y, planned: None });
             y -= size * 1.15;
+        }
+        // The shaped lines are planned together before anything else is added to the document: a
+        // line that can't be drawn is an error and leaves nothing behind.
+        let directed: Vec<(String, bool)> = rows.iter().filter(|r| r.line.shaped).map(|r| (r.line.text.clone(), r.line.rtl)).collect();
+        let plan = if directed.is_empty() { None } else { Some(shaped::plan(doc, &mut fonts, &directed)?) };
+        for (i, row) in rows.iter_mut().filter(|r| r.line.shaped).enumerate() {
+            row.planned = Some(i);
+        }
+        if let Some(g) = &opts.graphic {
+            let (ops, im) = g.draw(doc, [pad, pad, (left_w - 2.0 * pad).max(0.0), (h - 2.0 * pad).max(0.0)])?;
+            out.extend(ops.bytes());
+            image = im;
+        }
+        out.extend_from_slice(b"BT\n0 g\n");
+        for row in &rows {
+            // A right-to-left line ends at its column's right edge (one wider than the column
+            // starts at the left edge).
+            let x = if row.line.rtl { row.left + (row.width - em_of(&row.line) * row.size).max(0.0) } else { row.left };
+            match (&plan, row.planned) {
+                (Some(plan), Some(i)) => {
+                    out.extend(format!("1 0 0 1 {} {} Tm ", fmt(x), fmt(row.y)).bytes());
+                    out.extend(shaped::line_bytes(plan, i, row.size));
+                }
+                _ => {
+                    out.extend(format!("/Helv {} Tf 1 0 0 1 {} {} Tm ", fmt(row.size), fmt(x), fmt(row.y)).bytes());
+                    out.extend(literal(&win_ansi(&row.line.text)));
+                    out.extend_from_slice(b" Tj\n");
+                }
+            }
         }
         out.extend_from_slice(b"ET\n");
     }
@@ -2180,13 +2247,6 @@ fn appearance(doc: &mut Document, rect: [f64; 4], name: &str, cert: &Certificate
     d.set(b"Type".to_vec(), Object::name("XObject"));
     d.set(b"Subtype".to_vec(), Object::name("Form"));
     d.set(b"BBox".to_vec(), Object::Array([0.0, 0.0, w, h].iter().map(|x| Object::Real(*x)).collect()));
-    let mut font = Dict::new();
-    font.set(b"Type".to_vec(), Object::name("Font"));
-    font.set(b"Subtype".to_vec(), Object::name("Type1"));
-    font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
-    font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
-    let mut fonts = Dict::new();
-    fonts.set(b"Helv".to_vec(), Object::Dict(font));
     let mut res = Dict::new();
     res.set(b"Font".to_vec(), Object::Dict(fonts));
     if let Some(im) = image {

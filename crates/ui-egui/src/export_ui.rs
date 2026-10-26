@@ -35,19 +35,20 @@ impl Default for ExportDraft {
     }
 }
 
-/// Progress of a background export: (done, total, final message once finished).
+/// Progress of a background export: (done, total, final message once finished). The message is
+/// in logical order ([`crate::i18n::Logical`]): it becomes the toast.
 pub type ExportStatus = Arc<Mutex<Option<(usize, usize, Option<String>)>>>;
 
 pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: ExportKind) -> (bool, bool) {
     let count = app.active_ids().and_then(|(_, id)| app.session.get(id)).map(|d| d.info.pages.len()).unwrap_or(0);
     let d = &mut app.export_draft;
-    ui.label(
-        egui::RichText::new(match kind {
+    widgets::dialog_title(
+        ui,
+        match kind {
             ExportKind::Image => tl!("Export to Image"),
             ExportKind::Text => tl!("Export to Text"),
             ExportKind::AllImages => tl!("Export All Images"),
-        })
-        .font(theme::semibold(18.0)),
+        },
     );
     ui.add_space(8.0);
     if kind == ExportKind::Image {
@@ -99,13 +100,13 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, kind: E
                 }
             });
         });
-        ui.label(
-            egui::RichText::new(tl!("Each image once, named after the document and page. JPEG images are saved unchanged; others as PNG."))
-                .small()
-                .color(t.text_faint),
+        widgets::small_text(
+            ui,
+            &tl_logical!("Each image once, named after the document and page. JPEG images are saved unchanged; others as PNG."),
+            t.text_faint,
         );
     } else {
-        ui.label(egui::RichText::new(tl!("Plain text in reading order; pages are separated by form feeds.")).small().color(t.text_faint));
+        widgets::small_text(ui, &tl_logical!("Plain text in reading order; pages are separated by form feeds."), t.text_faint);
     }
     ui.add_space(6.0);
     ui.label(egui::RichText::new(tl!("Pages")).font(theme::semibold(12.5)));
@@ -137,8 +138,9 @@ fn run(
     mut sink: impl FnMut(&str, Vec<u8>) -> Result<(), String>,
     status: &ExportStatus,
     lang: crate::i18n::Lang,
-) -> String {
-    // May run on a worker thread: messages are drawn in the UI's language.
+) -> crate::i18n::Logical<'static> {
+    // May run on a worker thread: messages are drawn in the UI's language, in logical order (the
+    // toast wraps and reorders them).
     crate::i18n::set_current(lang);
     let total = pages.len();
     let set = |done: usize, msg: Option<String>| {
@@ -150,22 +152,22 @@ fn run(
         set(0, None);
         let out = match pdfcraft_engine::export::extract_images(&src, &pages, min_side) {
             Ok(o) => o,
-            Err(e) => return crate::i18n::fmt(tl!("Export stopped: {e}"), &[("e", &e.to_string())]),
+            Err(e) => return crate::i18n::fmt_logical(&tl_logical!("Export stopped: {e}"), &[("e", &e.to_string())]),
         };
         for (k, img) in out.images.iter().enumerate() {
             if let Err(e) = sink(&pdfcraft_engine::export::image_file_name(&stem, img, k + 1, src.pages), img.data.clone()) {
-                return crate::i18n::fmt(tl!("Export stopped: {e}"), &[("e", &e.to_string())]);
+                return crate::i18n::fmt_logical(&tl_logical!("Export stopped: {e}"), &[("e", &e.to_string())]);
             }
         }
         let n = out.images.len();
         let mut msg = if n == 1 {
-            crate::i18n::fmt(tl!("Exported 1 image"), &[])
+            crate::i18n::fmt_logical(&tl_logical!("Exported 1 image"), &[])
         } else {
-            crate::i18n::fmt(tl!("Exported {n} images"), &[("n", &n.to_string())])
+            crate::i18n::fmt_logical(&tl_logical!("Exported {n} images"), &[("n", &n.to_string())])
         };
         if !out.skipped.is_empty() {
-            msg.push_str(&crate::i18n::fmt(
-                tl!(" ({s} not exported: {first})"),
+            msg.push_str(&crate::i18n::fmt_logical(
+                &tl_logical!(" ({s} not exported: {first})"),
                 &[("s", &out.skipped.len().to_string()), ("first", &out.skipped[0].2)],
             ));
         }
@@ -174,26 +176,26 @@ fn run(
     let mut ex = Exporter::from_source(src);
     match kind {
         // Handled above.
-        ExportKind::AllImages => String::new(),
+        ExportKind::AllImages => crate::i18n::Logical::default(),
         ExportKind::Image => {
             for (k, p) in pages.iter().enumerate() {
                 set(k, None);
                 let result = ex.image(*p, dpi, format).and_then(|img| sink(&format!("{stem}_page_{}.{}", p + 1, format.extension()), img));
                 if let Err(e) = result {
-                    return crate::i18n::fmt(tl!("Export stopped: {e}"), &[("e", &e.to_string())]);
+                    return crate::i18n::fmt_logical(&tl_logical!("Export stopped: {e}"), &[("e", &e.to_string())]);
                 }
             }
             let mut msg = if total == 1 {
-                crate::i18n::fmt(tl!("Exported 1 image"), &[])
+                crate::i18n::fmt_logical(&tl_logical!("Exported 1 image"), &[])
             } else {
-                crate::i18n::fmt(tl!("Exported {n} images"), &[("n", &total.to_string())])
+                crate::i18n::fmt_logical(&tl_logical!("Exported {n} images"), &[("n", &total.to_string())])
             };
             // Pages too large for the renderer at the chosen resolution are drawn at the most it
             // allows: say so, rather than leave a smaller image unexplained.
             let lowered: Vec<f64> = pages.iter().map(|p| ex.dpi_used(*p, dpi)).filter(|used| *used < dpi.clamp(18.0, 1200.0) - 0.5).collect();
             if let Some(lowest) = lowered.iter().copied().reduce(f64::min) {
-                msg.push_str(&crate::i18n::fmt(
-                    tl!(" ({n} at {dpi} dpi, the largest size they can be drawn at)"),
+                msg.push_str(&crate::i18n::fmt_logical(
+                    &tl_logical!(" ({n} at {dpi} dpi, the largest size they can be drawn at)"),
                     &[("n", &lowered.len().to_string()), ("dpi", &format!("{}", lowest.floor()))],
                 ));
             }
@@ -204,12 +206,12 @@ fn run(
             match ex.text_of(&pages).and_then(|text| sink(&format!("{stem}.txt"), text.into_bytes())) {
                 Ok(()) => {
                     if total == 1 {
-                        crate::i18n::fmt(tl!("Exported the text of 1 page"), &[])
+                        crate::i18n::fmt_logical(&tl_logical!("Exported the text of 1 page"), &[])
                     } else {
-                        crate::i18n::fmt(tl!("Exported the text of {n} pages"), &[("n", &total.to_string())])
+                        crate::i18n::fmt_logical(&tl_logical!("Exported the text of {n} pages"), &[("n", &total.to_string())])
                     }
                 }
-                Err(e) => crate::i18n::fmt(tl!("Export stopped: {e}"), &[("e", &e.to_string())]),
+                Err(e) => crate::i18n::fmt_logical(&tl_logical!("Export stopped: {e}"), &[("e", &e.to_string())]),
             }
         }
     }
@@ -247,8 +249,8 @@ impl PdfCraftApp {
                     let msg = run(src, kind, dpi, format, min_side, pages, stem, sink, &st, lang);
                     if let Ok(mut s) = st.lock() {
                         let (done, total) = s.as_ref().map_or((0, 0), |(d, t, _)| (*d, *t));
-                        let done_msg = crate::i18n::fmt(tl!("{msg} to {dir}"), &[("msg", &msg), ("dir", &shown)]);
-                        *s = Some((done.max(total), total, Some(done_msg)));
+                        let done_msg = crate::i18n::fmt_logical(&tl_logical!("{msg} to {dir}"), &[("msg", &msg), ("dir", &shown)]);
+                        *s = Some((done.max(total), total, Some(done_msg.into_owned())));
                     }
                 };
                 if inline {
@@ -281,7 +283,7 @@ impl PdfCraftApp {
                 crate::i18n::current(),
             );
             if let Ok(mut s) = status.lock() {
-                *s = Some((0, 0, Some(msg)));
+                *s = Some((0, 0, Some(msg.into_owned())));
             }
             self.export_status = Some(status);
         }
@@ -297,7 +299,7 @@ impl PdfCraftApp {
                 self.notify(msg);
             }
             Some((done, total, None)) if total > 1 => {
-                let m = crate::i18n::fmt(tl!("Exporting… {d} of {t}"), &[("d", &done.to_string()), ("t", &total.to_string())]);
+                let m = crate::i18n::fmt_logical(&tl_logical!("Exporting… {d} of {t}"), &[("d", &done.to_string()), ("t", &total.to_string())]);
                 self.notify(m);
             }
             _ => {}

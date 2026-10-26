@@ -333,11 +333,13 @@ fn language_switch_preserves_document_and_command_ids() {
     let documents = ok(&mut h, &c, "ui.state", json!({}))["documents"].clone();
     assert_eq!(documents[0]["dirty"], true);
     let commands = ok(&mut h, &c, "ui.commands", json!({}));
-    for code in ["ja", "zh-hans", "fr", "de", "uk", "lt", "en"] {
+    for code in ["ja", "zh-hans", "ar", "fr", "de", "uk", "lt", "en"] {
         ok(&mut h, &c, "ui.set", json!({ "key": "language", "value": code }));
         h.run_steps(2);
         let state = ok(&mut h, &c, "ui.state", json!({}));
         assert_eq!(state["language"], code);
+        // The stock panel arrangement is mirrored for Arabic and nothing else.
+        assert_eq!(state["tools_side"], if code == "ar" { "right" } else { "left" }, "{code}");
         assert_eq!(state["documents"], documents);
         assert_eq!(ok(&mut h, &c, "ui.commands", json!({})), commands);
 
@@ -1334,6 +1336,28 @@ fn docking_pointer_group_float_close_restore_and_document_commands() {
     assert_eq!(ok(&mut reloaded, &client, "ui.state", json!({}))["documents"][0]["pages"], 6);
     ok(&mut reloaded, &client, "ui.command", json!({"id":"edit.undo"}));
     assert_eq!(ok(&mut reloaded, &client, "ui.state", json!({}))["documents"][0]["pages"], 5);
+}
+
+/// Resetting the panel arrangement gives the stock one for the interface language: in Arabic
+/// the Tools pane returns to the right, and a user who moved it keeps it only until the reset.
+#[test]
+fn resetting_the_panels_restores_the_arrangement_of_the_language() {
+    let (mut h, client) = harness();
+    ok(&mut h, &client, "ui.set", json!({ "key": "language", "value": "ar" }));
+    h.run_steps(2);
+    assert_eq!(ok(&mut h, &client, "ui.state", json!({}))["tools_side"], "right");
+    ok(&mut h, &client, "ui.set", json!({ "key": "tools-side", "value": "left" }));
+    h.run_steps(2);
+    assert_eq!(ok(&mut h, &client, "ui.state", json!({}))["tools_side"], "left", "the explicit side is physical");
+    ok(&mut h, &client, "ui.dock.reset", json!({}));
+    h.run_steps(2);
+    assert_eq!(ok(&mut h, &client, "ui.state", json!({}))["tools_side"], "right");
+    ok(&mut h, &client, "ui.set", json!({ "key": "language", "value": "en" }));
+    h.run_steps(2);
+    assert_eq!(ok(&mut h, &client, "ui.state", json!({}))["tools_side"], "left");
+    ok(&mut h, &client, "ui.dock.reset", json!({}));
+    h.run_steps(2);
+    assert_eq!(ok(&mut h, &client, "ui.state", json!({}))["tools_side"], "left");
 }
 
 #[test]

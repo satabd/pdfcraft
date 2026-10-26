@@ -99,7 +99,7 @@ impl Automation {
             let info = self.doc(a)?.info.clone();
             for (&p, text) in pages.iter().zip(&texts) {
                 let hits: Vec<(Option<usize>, _)> = match pattern {
-                    Some(pat) => text.find_with(|chars| find_pattern(pat, chars)).into_iter().map(|h| (None, h)).collect(),
+                    Some(pat) => text.find_with_folded(|chars| find_pattern(pat, chars)).into_iter().map(|h| (None, h)).collect(),
                     None => needles
                         .iter()
                         .enumerate()

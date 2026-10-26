@@ -660,13 +660,13 @@ impl PdfCraftApp {
             match self.session.extract(id, &pages) {
                 Ok(bytes) => {
                     let message = if pages.len() == 1 {
-                        tl!("Extracted 1 page").to_string()
+                        tl_logical!("Extracted 1 page")
                     } else {
-                        crate::i18n::fmt(tl!("Extracted {n} pages"), &[("n", &pages.len().to_string())])
+                        crate::i18n::fmt_logical(&tl_logical!("Extracted {n} pages"), &[("n", &pages.len().to_string())])
                     };
                     // Save As offers the tab's name, so a name typed in the dialog is kept.
                     let name = if renamed { format!("{base}.pdf") } else { format!("{stem} (extract).pdf") };
-                    self.open_created(&name, bytes, &message)
+                    self.open_created(&name, bytes, message)
                 }
                 Err(e) => {
                     self.notify_fmt("Couldn't extract pages: {e}", &[("e", &e.to_string())]);
@@ -691,7 +691,7 @@ impl PdfCraftApp {
     /// Every name must be a plain file name ([`is_plain_file_name`]); otherwise nothing is written.
     pub(crate) fn write_files_then(&mut self, named: Vec<(String, Arc<Vec<u8>>)>, title: &str, after: impl FnOnce(&mut Self) + Send + 'static) {
         if let Some((name, _)) = named.iter().find(|(name, _)| !is_plain_file_name(name)) {
-            self.notify_fmt("Couldn't write {name}: {e}", &[("name", name), ("e", tl!("the name is not a plain file name"))]);
+            self.notify_fmt("Couldn't write {name}: {e}", &[("name", name), ("e", &tl_logical!("the name is not a plain file name"))]);
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -805,12 +805,17 @@ impl PdfCraftApp {
         let stem =
             self.session.get(id).map(|d| std::path::Path::new(&d.name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
         match self.session.summarize_comments(id, self.summary_sort) {
-            Ok(bytes) => self.open_created(&format!("Summary of comments on {}.pdf", stem.unwrap_or_default()), bytes, "Created a comment summary"),
+            Ok(bytes) => self.open_created(
+                &format!("Summary of comments on {}.pdf", stem.unwrap_or_default()),
+                bytes,
+                tl_logical!("Created a comment summary"),
+            ),
             Err(e) => self.notify_fmt("Couldn't summarize comments: {e}", &[("e", &e.to_string())]),
         }
     }
 
-    pub(crate) fn open_created(&mut self, name: &str, bytes: Arc<Vec<u8>>, message: &str) {
+    /// Open `bytes` as a new document tab called `name` and say `message` (logical order).
+    pub(crate) fn open_created(&mut self, name: &str, bytes: Arc<Vec<u8>>, message: crate::i18n::Logical<'static>) {
         match self.session.open_new(name, bytes) {
             Ok(id) => {
                 // The reading-colours preference is app-wide: the newly created document starts with it.
@@ -818,7 +823,7 @@ impl PdfCraftApp {
                 let Some(doc) = self.session.get(id) else { return };
                 self.views.push(crate::DocView::new(id, &doc.info, self.view_defaults));
                 self.active = Some(self.views.len() - 1);
-                self.notify_tr(message);
+                self.notify(message);
             }
             Err(e) => self.notify_fmt("Couldn't open the result: {e}", &[("e", &e.to_string())]),
         }

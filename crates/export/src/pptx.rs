@@ -1,7 +1,7 @@
 //! PowerPoint presentation (.pptx, Office Open XML PresentationML): slides per page,
 //! largest text as slide title, remaining paragraphs as body text, images and tables between them.
 
-use crate::{Block, Image, Page, Table, Zip, esc, hex};
+use crate::{Block, Image, Page, Table, Zip, esc, hex, is_rtl, table_is_rtl};
 
 /// Items on a slide in reading order.
 enum SlideBodyItem<'a> {
@@ -51,6 +51,11 @@ fn run_drawingml(text: &str, size: f64, bold: bool, italic: bool, color: [f64; 3
     format!("<a:r><a:rPr{rpr}>{fill}</a:rPr><a:t>{}</a:t></a:r>", esc(text))
 }
 
+/// The properties of a paragraph holding `text`: right-to-left text starts at the right.
+fn ppr_drawingml(text: &str) -> &'static str {
+    if is_rtl(text) { "<a:pPr algn=\"r\" rtl=\"1\"/>" } else { "" }
+}
+
 /// Generates a DrawingML table inside a `<p:graphicFrame>` with explicit cell borders.
 fn pptx_table(shape_id: usize, t: &Table, x: i64, y: i64, content_w: i64) -> (String, i64) {
     let mut edges = t.cols.clone();
@@ -82,12 +87,18 @@ fn pptx_table(shape_id: usize, t: &Table, x: i64, y: i64, content_w: i64) -> (St
             let span = c.span.max(1);
             let run = run_drawingml(&c.text, c.size, c.bold, c.italic, c.color);
             if span > 1 {
-                rows_xml.push_str(&format!("<a:tc gridSpan=\"{span}\"><a:txBody><a:bodyPr/><a:lstStyle/><a:p>{run}</a:p></a:txBody>{TC_PR}</a:tc>"));
+                rows_xml.push_str(&format!(
+                    "<a:tc gridSpan=\"{span}\"><a:txBody><a:bodyPr/><a:lstStyle/><a:p>{}{run}</a:p></a:txBody>{TC_PR}</a:tc>",
+                    ppr_drawingml(&c.text)
+                ));
                 for _ in 1..span {
                     rows_xml.push_str(&format!("<a:tc hMerge=\"1\"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody>{TC_PR}</a:tc>"));
                 }
             } else {
-                rows_xml.push_str(&format!("<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p>{run}</a:p></a:txBody>{TC_PR}</a:tc>"));
+                rows_xml.push_str(&format!(
+                    "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p>{}{run}</a:p></a:txBody>{TC_PR}</a:tc>",
+                    ppr_drawingml(&c.text)
+                ));
             }
         }
         let used: usize = row.iter().map(|c| c.span).sum();
@@ -97,12 +108,13 @@ fn pptx_table(shape_id: usize, t: &Table, x: i64, y: i64, content_w: i64) -> (St
         rows_xml.push_str("</a:tr>");
     }
 
+    let tbl_rtl = if table_is_rtl(t) { " rtl=\"1\"" } else { "" };
     let frame = format!(
         "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{shape_id}\" name=\"Table {shape_id}\"/>\
 <p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=\"1\"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr>\
 <p:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{table_w}\" cy=\"{table_h}\"/></p:xfrm>\
 <a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\">\
-<a:tbl><a:tblPr/><a:tblGrid>{grid_cols}</a:tblGrid>{rows_xml}</a:tbl>\
+<a:tbl><a:tblPr{tbl_rtl}/><a:tblGrid>{grid_cols}</a:tblGrid>{rows_xml}</a:tbl>\
 </a:graphicData></a:graphic></p:graphicFrame>"
     );
     (frame, table_h)
@@ -161,7 +173,8 @@ pub fn pptx(pages: &[Page], title: &str) -> Vec<u8> {
             shapes.push_str(&format!(
                 "<p:sp><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"Title {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
 <p:spPr><a:xfrm><a:off x=\"{mx}\" y=\"{current_y}\"/><a:ext cx=\"{content_w}\" cy=\"{title_h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
-<p:txBody><a:bodyPr wrap=\"square\" rtlCol=\"0\"><a:spAutoFit/></a:bodyPr><a:lstStyle/><a:p>{title_run}</a:p></p:txBody></p:sp>"
+<p:txBody><a:bodyPr wrap=\"square\" rtlCol=\"0\"><a:spAutoFit/></a:bodyPr><a:lstStyle/><a:p>{}{title_run}</a:p></p:txBody></p:sp>",
+                ppr_drawingml(&title_block.text)
             ));
             shape_id += 1;
             current_y = current_y.saturating_add(title_h).saturating_add(height_emu(18.0));
@@ -175,7 +188,7 @@ pub fn pptx(pages: &[Page], title: &str) -> Vec<u8> {
                     let mut est_h_pt = 0.0;
                     while let Some((_, _, SlideBodyItem::Para(b))) = items.get(i) {
                         let run = run_drawingml(&b.text, b.size, b.bold, b.italic, b.color);
-                        paras_xml.push_str(&format!("<a:p>{run}</a:p>"));
+                        paras_xml.push_str(&format!("<a:p>{}{run}</a:p>", ppr_drawingml(&b.text)));
                         let lines = (b.text.len() as f64 / 60.0).ceil().max(1.0);
                         est_h_pt += (b.size.max(10.0) * 1.3) * lines + 6.0;
                         i += 1;

@@ -397,7 +397,7 @@ mod tests {
         app.pickers.deliver(None, vec![PathBuf::from("y.pdf")], record(&got));
         app.process_picked();
         assert_eq!(*got.lock().unwrap(), vec![PathBuf::from("y.pdf")]);
-        let toast = app.toast.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+        let toast = app.toast.as_ref().map(|(m, _)| m.as_str().to_owned()).unwrap_or_default();
         assert!(toast.contains("internal error"), "the user is told: {toast:?}");
         assert!(!app.pickers.showing.load(Ordering::SeqCst));
     }

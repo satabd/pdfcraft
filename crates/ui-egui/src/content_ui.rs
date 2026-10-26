@@ -35,24 +35,24 @@ pub(crate) fn undrawable(d: &TextDraft, memo: &UndrawableMemo) -> Option<char> {
 pub(crate) type UndrawableMemo = std::cell::RefCell<Option<(AddedText, Option<char>)>>;
 
 /// The warning shown for text with `c` in it.
-pub(crate) fn undrawable_message(c: char) -> String {
-    crate::i18n::fmt(
-        tl!("The PDF text fonts can't draw “{c}” ({code}). Choose supported text."),
+pub(crate) fn undrawable_message(c: char) -> crate::i18n::Logical<'static> {
+    crate::i18n::fmt_logical(
+        &tl_logical!("The PDF text fonts can't draw “{c}” ({code}). Choose supported text."),
         &[("c", &c.to_string()), ("code", &format!("U+{:04X}", u32::from(c)))],
     )
 }
 
 /// The warning after an edit that saved text its font can't draw: PdfCraft drew `?` for it (a form
 /// field, which other viewers redraw from its value, or a comment, where the `?` shows everywhere).
-pub(crate) fn undrawn_message(n: &pdfcraft_engine::TextNotice) -> String {
+pub(crate) fn undrawn_message(n: &pdfcraft_engine::TextNotice) -> crate::i18n::Logical<'static> {
     let template = if n.redrawn_elsewhere {
-        tl!(
+        tl_logical!(
             "This field's font can't draw “{c}” ({code}), so PdfCraft shows ? in its place. The value is saved, and other PDF viewers redraw the field from it."
         )
     } else {
-        tl!("The fonts PdfCraft writes with can't draw “{c}” ({code}), so it shows as ? in every PDF viewer. The text is saved.")
+        tl_logical!("The fonts PdfCraft writes with can't draw “{c}” ({code}), so it shows as ? in every PDF viewer. The text is saved.")
     };
-    crate::i18n::fmt(template, &[("c", &n.ch.to_string()), ("code", &format!("U+{:04X}", u32::from(n.ch)))])
+    crate::i18n::fmt_logical(&template, &[("c", &n.ch.to_string()), ("code", &format!("U+{:04X}", u32::from(n.ch)))])
 }
 
 const SELECT_BLUE: Color32 = Color32::from_rgb(0x14, 0x73, 0xE6);
@@ -517,6 +517,7 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
         view.content.layout = Some((text, zoom, page_width, draft.rect));
     }
     let r = screen_rect(&xf, info, page, draft.rect);
+    let draft_rect = draft.rect;
     let source_rect = draft.index.map(|_| screen_rect(&xf, info, page, draft.style.rect));
     let background_ready = draft.index.is_some_and(|index| view.text_background.ready_added(page, index));
     let tokens = Tokens::get(ctx);
@@ -534,15 +535,16 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
         let [cr, cg, cb] = t.style.color.map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
+            // Typed Arabic and Hebrew read in display order, the rows of the box where the text's
+            // alignment puts them, as the saved text will (`added.rs` draws them the same way).
+            let align = row_align(t.style.align);
+            let style = t.style.clone();
             let resp = ui.add(
-                egui::TextEdit::multiline(&mut t.text)
-                    .font(font)
+                text_field(&mut t.text, &t.style, draft_rect, font)
                     .desired_width(r.width().max(60.0))
-                    .desired_rows(1)
                     .background_color(if background_ready { Color32::TRANSPARENT } else { Color32::WHITE })
                     .text_color(Color32::from_rgb(cr, cg, cb))
-                    .hint_text(tl!("Type text"))
-                    .id_salt("added-text-edit"),
+                    .layout(move |ui, map, ctx| added_galley(ui, map, ctx, &style, zoom, align)),
             );
             if t.focus {
                 resp.request_focus();
@@ -570,7 +572,7 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
         // Page text is drawn with the standard fonts; anything else would be saved as `?` (#125).
         undrawable = self::undrawable(t, memo);
         if let Some(c) = undrawable {
-            ui.label(egui::RichText::new(undrawable_message(c)).small().color(UNDRAWABLE));
+            crate::widgets::small_text(ui, &undrawable_message(c), UNDRAWABLE);
         }
     });
     if cancel {
@@ -583,6 +585,113 @@ pub(crate) fn editor(ctx: &egui::Context, view: &mut DocView, info: &DocInfo, ad
     }
     let edit = view.content.draft.take().and_then(|d| finish(&mut view.content, d, added));
     (edit, done)
+}
+
+/// The Add text box's field: the text breaks into lines where the saved item will, which is at the first word
+/// that makes a line wider than the box in the fonts the page writes it in (the standard font for Latin, the
+/// shaped Arabic or Hebrew face), and not where the interface font would. `rect` is the box in points.
+///
+/// The field has no margin: the saved text starts at the box's left edge and wraps at its width, so the
+/// field's inner width is the box's. Wrapping is in points (the field is told the box's width and measures
+/// lines in points), so it does not depend on the zoom. A word wider than the box stays whole on its line,
+/// and only the space ends a word, as the page does it.
+fn text_field<'t>(text: &'t mut String, style: &AddedText, rect: [f64; 4], font: egui::FontId) -> widgets::BidiEdit<'t> {
+    let meter = pdfcraft_engine::AddedLineMeasure::new(style);
+    // The box's width as `added.rs` wraps at it: never narrower than one em.
+    let box_width = ((rect[2] - rect[0]).max(style.size)) as f32;
+    // Thai is broken between its clusters by the page, which a field cannot follow word by word.
+    let thai = text.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c));
+    widgets::BidiEdit::multiline(text)
+        .font(font)
+        .margin(egui::Margin::ZERO)
+        .desired_rows(1)
+        .hint_text(tl!("Type text"))
+        .id_salt("added-text-edit")
+        .wrap_ltr(true)
+        .wrap_key((style.family.label(), style.bold, style.italic, style.size.to_bits()))
+        .wrap_at(box_width)
+        .measure_in(move |_, candidate| meter.width(candidate.paragraph, candidate.line) as f32)
+        .wrap_rules(crate::bidi::WrapRules { whole_words: !thai, spaces_only: true })
+}
+
+/// The galley of the Add text box: the rows `map` has, drawn in the interface font but fitted to the width the page
+/// writes them at, set at the pitch the page uses, and placed by the text's alignment.
+///
+/// The interface font is wider than the standard font the page writes Latin in (Inter against Helvetica), so a
+/// row with no right-to-left script gets letter spacing that makes it as wide as the page's line: it then ends where
+/// the page's line does, and the editor's rows can be compared with the saved ones. The page's Arabic, Hebrew and the
+/// words around them are drawn in the same face as the interface's, and are left as they are.
+fn added_galley(
+    ui: &egui::Ui,
+    map: &crate::bidi::ScreenMap,
+    ctx: &widgets::LayoutCtx<'_>,
+    style: &AddedText,
+    zoom: f32,
+    align: widgets::RowAlign,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = ctx.job(map);
+    if let Some(base) = job.sections.first().map(|section| section.format.clone()) {
+        let pitch = style.size as f32 * 1.2 * zoom;
+        let mut sections = Vec::new();
+        let mut start: usize = 0;
+        let section = |from: usize, to: usize, format: egui::TextFormat| egui::text::LayoutSection {
+            leading_space: 0.0,
+            byte_range: egui::text::ByteIndex(from)..egui::text::ByteIndex(to),
+            format,
+        };
+        for row in job.text.split_inclusive('\n') {
+            let end = start.saturating_add(row.len());
+            let ink = row.trim_end_matches('\n').trim_matches(' ');
+            let count = ink.chars().count();
+            let mut format = base.clone();
+            // An italic item is skewed by egui; the Arabic is then re-sheared below as the page slants it (Latin keeps the skew).
+            format.italics = style.italic;
+            format.line_height = Some(pitch).filter(|p| p.is_finite() && *p > 0.0).or(format.line_height);
+            // The spacing goes between the letters of the ink (epaint puts it before every glyph but the first of the
+            // row): what follows the ink (the space a wrap leaves) keeps the font's own advance, so the ink ends where
+            // the page's line does.
+            let mut split = None;
+            if count > 1 && !crate::bidi::has_rtl(row) && pdfcraft_fonts::first_non_win_ansi(ink).is_none() {
+                let natural = ui.fonts_mut(|f| f.layout_no_wrap(ink.to_owned(), format.font_id.clone(), egui::Color32::WHITE).size().x);
+                let written = style.family.width(ink, style.size, style.bold, style.italic) as f32 * zoom;
+                // At most a quarter of an em either way: a font nothing like the page's is not squeezed out of shape.
+                let reach = format.font_id.size * 0.25;
+                let spacing = (written - natural) / (count - 1) as f32;
+                if spacing.is_finite() {
+                    format.extra_letter_spacing = spacing.clamp(-reach, reach);
+                    split = Some(start.saturating_add(row.trim_end_matches('\n').trim_end_matches(' ').len()));
+                }
+            }
+            match split {
+                Some(at) if at < end => {
+                    let mut tail = format.clone();
+                    tail.extra_letter_spacing = 0.0;
+                    sections.push(section(start, at, format));
+                    sections.push(section(at, end, tail));
+                }
+                _ => sections.push(section(start, end, format)),
+            }
+            start = end;
+        }
+        if !sections.is_empty() {
+            job.sections = sections;
+        }
+    }
+    let galley = ctx.lay_out(ui, map, job);
+    let galley = ctx.place_aligned(ui, galley, map, align);
+    // The page slants an italic item's Arabic by 12° (a synthesized oblique, the face has no italic); egui's own skew
+    // is a quarter of the height, so the joined letters are re-sheared once they are placed.
+    if style.italic { crate::edit_text_ui::slant_joined_rows(galley) } else { galley }
+}
+
+/// Where the editor puts the rows of the text: the alignment the saved text will have.
+fn row_align(align: TextAlign) -> widgets::RowAlign {
+    match align {
+        TextAlign::Left => widgets::RowAlign::Left,
+        TextAlign::Center => widgets::RowAlign::Center,
+        TextAlign::Right => widgets::RowAlign::Right,
+        TextAlign::Justify => widgets::RowAlign::Justify,
+    }
 }
 
 /// A finished draft as an edit: new text is added (and selected once it exists), retyped text
@@ -934,6 +1043,166 @@ mod tests {
         h.get_by_label(tooltip).click();
         h.run();
         h.state().clone().expect("the button updates the image")
+    }
+
+    /// The lines the Add text field breaks `item`'s text into at the box `item.rect` has, at `zoom`, in the reading order of
+    /// the stored text (what each row holds, whichever order its letters are drawn in).
+    fn field_lines(fonts: egui::FontDefinitions, item: &AddedText, zoom: f32) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.set_os(egui::os::OperatingSystem::Nix);
+        ctx.set_fonts(fonts);
+        let mut lines = Vec::new();
+        // The fonts take effect from the second frame.
+        for _ in 0..2 {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(4000.0, 2000.0))), ..Default::default() };
+            let mut text = item.text.clone();
+            let frame = ctx.run_ui(raw, |ui| {
+                let width = (item.rect[2] - item.rect[0]).max(item.size) as f32 * zoom;
+                let font = egui::FontId::proportional(item.size as f32 * zoom);
+                let out = text_field(&mut text, item, item.rect, font).desired_width(width).show_mapped(ui);
+                let chars: Vec<char> = item.text.chars().collect();
+                // The stored characters on each row of the shaper text, from the first to the last.
+                let source = out.map.shaper_source();
+                let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+                for (c, at) in out.map.shaper.chars().zip(source) {
+                    if c == '\n' && at == crate::bidi::VIRTUAL {
+                        rows.push(Vec::new());
+                    } else if at != crate::bidi::VIRTUAL {
+                        rows.last_mut().expect("a row").push(at);
+                    }
+                }
+                lines = rows
+                    .iter()
+                    .map(|row| match (row.iter().min(), row.iter().max()) {
+                        (Some(low), Some(high)) => chars.get(*low..=*high).unwrap_or_default().iter().collect::<String>(),
+                        _ => String::new(),
+                    })
+                    .collect();
+            });
+            frame.drop_without_applying_deltas();
+            assert_eq!(text, item.text, "looking at the field does not change the text");
+        }
+        lines
+    }
+
+    fn assert_field_matches_page(fonts: &egui::FontDefinitions, item: &AddedText, zoom: f32) {
+        // A paragraph's own line breaks (`\n`) end a row in the stored text too; the page's lines have none.
+        let trim = |lines: Vec<String>| lines.into_iter().map(|l| l.trim().to_owned()).collect::<Vec<_>>();
+        let page = trim(pdfcraft_engine::added_text_lines(item));
+        let field =
+            trim(field_lines(fonts.clone(), item, zoom).into_iter().flat_map(|l| l.split('\n').map(str::to_owned).collect::<Vec<_>>()).collect());
+        assert_eq!(field, page, "box {:?}, {:?} {} pt at {zoom}: {:?}", item.rect, item.family, item.size, item.text);
+    }
+
+    #[test]
+    fn the_add_text_field_breaks_latin_lines_where_the_engine_measures_them() {
+        let text = "The quick brown fox jumps over the lazy dog,  and nine wizards quickly box jumpers.\nA second paragraph with WWW iii mmm words.";
+        for family in [FontFamily::Helvetica, FontFamily::Times, FontFamily::Courier] {
+            for size in [9.0, 12.0, 18.0] {
+                for zoom in [1.0, 1.5] {
+                    for step in 0..30 {
+                        let width = 40.0 + f64::from(step) * 9.7;
+                        let item = AddedText { rect: [20.0, 0.0, 20.0 + width, 50.0], text: text.into(), family, size, ..AddedText::default() };
+                        assert_field_matches_page(&crate::theme::font_definitions(), &item, zoom);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_add_text_field_breaks_arabic_and_mixed_lines_where_the_engine_measures_them() {
+        let Some(fonts) = crate::bidi::arabic_test_fonts() else { return };
+        for text in [
+            "سلام عليكم ورحمة الله وبركاته مع أطيب التحيات من الجميع هنا اليوم",
+            "Hello سلام PDF عليكم 2026 ورحمة الله Acrobat وبركاته مع أطيب",
+            "English first then عربي في الآخر مع كلمات أخرى كثيرة\nسطر ثان بعد سطر",
+        ] {
+            for size in [10.0, 14.0, 20.0] {
+                for zoom in [1.0, 1.5] {
+                    for step in 0..25 {
+                        let width = 50.0 + f64::from(step) * 11.3;
+                        let item = AddedText { rect: [20.0, 0.0, 20.0 + width, 50.0], text: text.into(), size, ..AddedText::default() };
+                        assert_field_matches_page(&fonts, &item, zoom);
+                    }
+                }
+            }
+        }
+    }
+
+    /// For each inked glyph of the first row of the Add text box showing `item` that `keep` takes: how far right the top of its
+    /// quad sits of its bottom, and its height (screen points).
+    fn leans(fonts: egui::FontDefinitions, item: &AddedText, keep: impl Fn(char) -> bool) -> Vec<(f32, f32)> {
+        let ctx = egui::Context::default();
+        ctx.set_os(egui::os::OperatingSystem::Nix);
+        ctx.set_fonts(fonts);
+        let mut leans = Vec::new();
+        // The fonts take effect from the second frame.
+        for _ in 0..2 {
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(4000.0, 2000.0))), ..Default::default() };
+            let mut text = item.text.clone();
+            let frame = ctx.run_ui(raw, |ui| {
+                let font = crate::edit_text_ui::editor_font(item, item.size as f32);
+                let style = item.clone();
+                let out = text_field(&mut text, item, item.rect, font)
+                    .desired_width(item.rect[2] as f32)
+                    .layout(move |ui, map, ctx| added_galley(ui, map, ctx, &style, 1.0, row_align(style.align)))
+                    .show_mapped(ui);
+                let Some(placed) = out.out.galley.rows.first() else { return };
+                let vertices = &placed.row.visuals.mesh.vertices;
+                leans = placed
+                    .row
+                    .glyphs
+                    .iter()
+                    .filter(|g| keep(g.chr) && !g.uv_rect.is_nothing())
+                    .filter_map(|g| match vertices.get(g.first_vertex as usize..g.first_vertex as usize + 4) {
+                        Some([top_left, _, bottom_left, _]) => Some((top_left.pos.x - bottom_left.pos.x, bottom_left.pos.y - top_left.pos.y)),
+                        _ => None,
+                    })
+                    .collect();
+            });
+            frame.drop_without_applying_deltas();
+        }
+        leans
+    }
+
+    /// An italic Add text item's Arabic is sheared in the box as the page slants it (12° about the baseline: the top of a
+    /// letter sits right of its bottom by tan 12° of its height); a regular item's is upright; Latin italic is egui's skew
+    /// (a quarter of the height).
+    #[test]
+    fn italic_arabic_in_the_add_text_box_is_slanted_as_the_page_draws_it() {
+        let Some(fonts) = crate::bidi::arabic_test_fonts() else {
+            eprintln!("skipping: no Arabic face for the interface (build with CRAFT_FONTS_DIR or set PDFCRAFT_TEST_ARABIC_FONT)");
+            return;
+        };
+        let item =
+            |text: &str, italic: bool| AddedText { rect: [0.0, 0.0, 600.0, 80.0], text: text.into(), size: 40.0, italic, ..AddedText::default() };
+        let arabic = "\u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645}";
+        let upright = leans(fonts.clone(), &item(arabic, false), crate::bidi::is_joining_script);
+        let italic = leans(fonts.clone(), &item(arabic, true), crate::bidi::is_joining_script);
+        assert!(!upright.is_empty() && upright.len() == italic.len(), "{upright:?} {italic:?}");
+        assert!(upright.iter().all(|(lean, _)| lean.abs() < 1e-3), "regular: {upright:?}");
+        let tan = (12.0f32).to_radians().tan();
+        let &(lean, height) = italic.iter().max_by(|a, b| a.1.total_cmp(&b.1)).expect("a glyph");
+        assert!(height > 10.0 && (lean - tan * height).abs() < 0.01 * height, "lean {lean} for height {height}: {italic:?}");
+        assert!(italic.iter().all(|(lean, height)| (lean - tan * height).abs() < 0.01 * height.max(1.0)), "{italic:?}");
+        // Latin in the same italic item keeps egui's skew, and upright Latin stays upright.
+        let mixed = format!("{arabic} Hello");
+        let latin = leans(fonts.clone(), &item(&mixed, true), |c| c.is_ascii_alphabetic());
+        assert!(!latin.is_empty() && latin.iter().all(|(lean, height)| (lean - 0.25 * height).abs() < 1e-3), "{latin:?}");
+        let latin = leans(fonts, &item(&mixed, false), |c| c.is_ascii_alphabetic());
+        assert!(!latin.is_empty() && latin.iter().all(|(lean, _)| lean.abs() < 1e-3), "{latin:?}");
+    }
+
+    #[test]
+    fn a_word_wider_than_the_box_stays_whole_and_only_spaces_end_a_word() {
+        let fonts = crate::theme::font_definitions();
+        // The page keeps a long word whole on its own line (it overflows the box); a no-break space is no space.
+        let item = AddedText { rect: [0.0, 0.0, 30.0, 50.0], text: "ab Antidisestablishmentarianism cd\u{a0}ef gh".into(), ..AddedText::default() };
+        let lines = field_lines(fonts.clone(), &item, 1.0);
+        assert!(lines.iter().any(|l| l.trim() == "Antidisestablishmentarianism"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("cd\u{a0}ef")), "{lines:?}");
+        assert_field_matches_page(&fonts, &item, 1.0);
     }
 
     #[test]

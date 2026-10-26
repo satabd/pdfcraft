@@ -11,7 +11,7 @@ use pdfcraft_engine::{SignOptions, SignatureImage, SignatureInfo, SignatureStatu
 use crate::canvas::{DocView, PageXform, Snapshot, SnapshotKind};
 use crate::fill_sign::SavedSig;
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, icons, widgets};
+use crate::{PdfCraftApp, icons, rtl, widgets};
 
 /// A digital ID the app knows about (Acrobat: Digital ID files). The file stays where it is;
 /// its password is asked for at each signing.
@@ -646,7 +646,7 @@ pub(crate) fn dialog(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bo
 }
 
 fn title(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(tl!(text)).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!(text));
     ui.add_space(4.0);
     ui.separator();
     ui.add_space(8.0);
@@ -659,6 +659,31 @@ fn error(ui: &mut egui::Ui, err: &Option<String>) {
     }
 }
 
+/// The second line of a digital ID's row: where it is kept, its e-mail, who issued it and when it
+/// expires, or why it can't be used. Joined in the interface's reading order ([`rtl::join`]).
+fn id_details(e: &DigitalIdEntry) -> String {
+    // The catalog keeps the separator at the edge of the store's name; the join supplies it.
+    let separator = |c: char| c.is_whitespace() || c == '·';
+    let store = if e.path.starts_with("keychain:") {
+        Some(tl!("Keychain  ·  ").trim_end_matches(separator))
+    } else if e.path.starts_with("windows:") {
+        Some(tl!("Windows store  ·  ").trim_end_matches(separator))
+    } else {
+        None
+    };
+    match &e.unusable {
+        Some(reason) => rtl::join(&store.into_iter().chain([reason.as_str()]).collect::<Vec<_>>(), "  ·  "),
+        None => {
+            // "Issued by: X, Expires: Y": the clauses follow each other in reading order.
+            let issued = rtl::caption_value(tl!("Issued by: "), &e.issuer);
+            let expires = rtl::caption_value(tl!(", Expires: "), &e.expires);
+            let details = rtl::join(&[&issued, &expires], "");
+            let email = (!e.email.is_empty()).then_some(e.email.as_str());
+            rtl::join(&store.into_iter().chain(email).chain([details.as_str()]).collect::<Vec<_>>(), "  ·  ")
+        }
+    }
+}
+
 fn choose(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     title(ui, "Sign with a Digital ID");
     ui.label(tl!("Choose the digital ID that you want to use for signing:"));
@@ -666,7 +691,7 @@ fn choose(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     let ids = app.digital_ids.clone();
     let Some(d) = app.sign_draft.as_mut() else { return true };
     let mut close = false;
-    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+    crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().max_height(220.0), |ui| {
         for (i, e) in ids.iter().enumerate() {
             let selected = d.selected == Some(i);
             let usable = e.unusable.is_none();
@@ -691,24 +716,7 @@ fn choose(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
                 ui.painter().layout_job(job)
             };
             let name = line(&e.name, theme::semibold(13.0), name_color);
-            let store = if e.path.starts_with("keychain:") {
-                tl!("Keychain  ·  ").to_string()
-            } else if e.path.starts_with("windows:") {
-                tl!("Windows store  ·  ").to_string()
-            } else {
-                String::new()
-            };
-            let sub = match &e.unusable {
-                Some(reason) => format!("{store}{reason}"),
-                None => format!(
-                    "{store}{email}{issued}{issuer}{expires}{date}",
-                    email = if e.email.is_empty() { String::new() } else { format!("{}  ·  ", e.email) },
-                    issued = tl!("Issued by: "),
-                    issuer = e.issuer,
-                    expires = tl!(", Expires: "),
-                    date = e.expires,
-                ),
-            };
+            let sub = id_details(e);
             let details = line(&sub, theme::regular(11.5), t.text_muted);
             let elided = name.elided || details.elided;
             ui.painter().galley(rect.min + vec2(40.0, 9.0), name, name_color);
@@ -782,53 +790,51 @@ fn configure(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     ui.add_space(8.0);
     let n = &mut d.new_id;
     if n.create {
-        egui::Grid::new("new-id").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        widgets::form_grid(ui, "new-id", [12.0, 8.0], None, |rows| {
             for (label, value) in [
                 (tl!("Name"), &mut n.name),
                 (tl!("Organizational Unit"), &mut n.unit),
                 (tl!("Organization Name"), &mut n.organization),
                 (tl!("Email Address"), &mut n.email),
             ] {
-                let l = ui.label(label);
-                ui.add(crate::widgets::line(value).desired_width(260.0)).labelled_by(l.id);
-                ui.end_row();
+                rows.row(label, |ui, l| _ = ui.add(crate::widgets::line(value).desired_width(260.0)).labelled_by(l.id));
             }
-            let l = ui.label(tl!("Country/Region"));
-            ui.add(crate::widgets::line(&mut n.country).hint_text("US").char_limit(2).desired_width(60.0)).labelled_by(l.id);
-            ui.end_row();
-            ui.label(tl!("Key Algorithm"));
-            egui::ComboBox::from_id_salt("key-alg").selected_text(KEY_ALGORITHMS[n.key].0).show_ui(ui, |ui| {
-                for (i, (label, _)) in KEY_ALGORITHMS.iter().enumerate() {
-                    ui.selectable_value(&mut n.key, i, *label);
-                }
+            rows.row(tl!("Country/Region"), |ui, l| {
+                ui.add(crate::widgets::line(&mut n.country).hint_text("US").char_limit(2).desired_width(60.0)).labelled_by(l.id);
             });
-            ui.end_row();
-            let l = ui.label(tl!("Password"));
-            ui.add(crate::widgets::line(&mut n.password).password(true).desired_width(200.0)).labelled_by(l.id);
-            ui.end_row();
-            let l = ui.label(tl!("Confirm Password"));
-            ui.add(crate::widgets::line(&mut n.confirm).password(true).desired_width(200.0)).labelled_by(l.id);
-            ui.end_row();
+            rows.row(tl!("Key Algorithm"), |ui, _| {
+                egui::ComboBox::from_id_salt("key-alg").selected_text(KEY_ALGORITHMS[n.key].0).show_ui(ui, |ui| {
+                    for (i, (label, _)) in KEY_ALGORITHMS.iter().enumerate() {
+                        ui.selectable_value(&mut n.key, i, *label);
+                    }
+                });
+            });
+            rows.row(tl!("Password"), |ui, l| {
+                ui.add(crate::widgets::plain_line(&mut n.password).password(true).desired_width(200.0)).labelled_by(l.id);
+            });
+            rows.row(tl!("Confirm Password"), |ui, l| {
+                ui.add(crate::widgets::plain_line(&mut n.confirm).password(true).desired_width(200.0)).labelled_by(l.id);
+            });
         });
-        ui.label(
-            egui::RichText::new(tl!("Valid for 5 years, for digital signatures. Self-signed IDs are usually not trusted by others."))
-                .small()
-                .color(t.text_muted),
+        widgets::small_text(
+            ui,
+            &tl_logical!("Valid for 5 years, for digital signatures. Self-signed IDs are usually not trusted by others."),
+            t.text_muted,
         );
     } else {
-        egui::Grid::new("id-file").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            let l = ui.label(tl!("File (.p12, .pfx)"));
-            ui.horizontal(|ui| {
-                ui.add(crate::widgets::line(&mut n.file).desired_width(220.0)).labelled_by(l.id);
-                #[cfg(not(target_arch = "wasm32"))]
-                if ui.button(tl!("Browse…")).clicked() {
-                    browse = true;
-                }
+        widgets::form_grid(ui, "id-file", [12.0, 8.0], None, |rows| {
+            rows.row(tl!("File (.p12, .pfx)"), |ui, l| {
+                rtl::horizontal(ui, |ui| {
+                    ui.add(crate::widgets::line(&mut n.file).desired_width(220.0)).labelled_by(l.id);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.button(tl!("Browse…")).clicked() {
+                        browse = true;
+                    }
+                });
             });
-            ui.end_row();
-            let l = ui.label(tl!("Password"));
-            ui.add(crate::widgets::line(&mut n.file_password).password(true).desired_width(200.0)).labelled_by(l.id);
-            ui.end_row();
+            rows.row(tl!("Password"), |ui, l| {
+                ui.add(crate::widgets::plain_line(&mut n.file_password).password(true).desired_width(200.0)).labelled_by(l.id);
+            });
         });
     }
     ui.add_space(6.0);
@@ -1000,11 +1006,7 @@ fn sign_as(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
         let lines = detail_lines(&d.appearance, &labels, &entry.name, &d.reason, &d.location, &date);
         preview(ui, t, &entry.name, &d.appearance, &lines, graphic.as_ref(), &mut app.sign_graphic_preview);
         if in_english && d.appearance.labels {
-            ui.label(
-                egui::RichText::new(tl!("The labels are in English: the signature's font can't draw them in this language."))
-                    .small()
-                    .color(t.text_muted),
-            );
+            widgets::small_text(ui, &tl_logical!("The labels are in English: the signature's font can't draw them in this language."), t.text_muted);
         }
         ui.horizontal_wrapped(|ui| {
             let a = &mut d.appearance;
@@ -1040,48 +1042,46 @@ fn sign_as(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> bool {
     } else {
         ui.label(egui::RichText::new(tl!("The signature will be invisible.")).color(t.text_muted));
     }
-    egui::Grid::new("sign-as").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+    widgets::form_grid(ui, "sign-as", [12.0, 8.0], None, |rows| {
         if d.certify.is_some() {
-            ui.label(tl!("Permitted actions after certifying"));
-            let mut p = d.certify.unwrap_or(2);
-            let label = |p: u8| match p {
-                1 => tl!("No changes allowed"),
-                3 => tl!("Annotations, form fill-in, and digital signatures"),
-                _ => tl!("Form fill-in and digital signatures"),
-            };
-            egui::ComboBox::from_id_salt("certify-p").selected_text(label(p)).width(300.0).show_ui(ui, |ui| {
-                for v in [1u8, 2, 3] {
-                    ui.selectable_value(&mut p, v, label(v));
+            rows.row(tl!("Permitted actions after certifying"), |ui, _| {
+                let mut p = d.certify.unwrap_or(2);
+                let label = |p: u8| match p {
+                    1 => tl!("No changes allowed"),
+                    3 => tl!("Annotations, form fill-in, and digital signatures"),
+                    _ => tl!("Form fill-in and digital signatures"),
+                };
+                egui::ComboBox::from_id_salt("certify-p").selected_text(label(p)).width(300.0).show_ui(ui, |ui| {
+                    for v in [1u8, 2, 3] {
+                        ui.selectable_value(&mut p, v, label(v));
+                    }
+                });
+                d.certify = Some(p);
+            });
+        }
+        rows.row(tl!("Reason"), |ui, l| {
+            ui.add(crate::widgets::line(&mut d.reason).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
+        });
+        rows.row(tl!("Location"), |ui, l| {
+            ui.add(crate::widgets::line(&mut d.location).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
+        });
+        if in_os_key_store {
+            rows.row("", |ui, _| {
+                let note = if entry.path.starts_with("windows:") {
+                    tl_logical!("The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.")
+                } else {
+                    tl_logical!("The key is in the macOS Keychain, which may ask to allow PdfCraft to use it.")
+                };
+                widgets::small_text(ui, &note, t.text_muted);
+            });
+        } else {
+            rows.row(tl!("Digital ID password"), |ui, l| {
+                let r = ui.add(crate::widgets::plain_line(&mut d.password).password(true).desired_width(200.0)).labelled_by(l.id);
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    go = true;
                 }
             });
-            d.certify = Some(p);
-            ui.end_row();
         }
-        let l = ui.label(tl!("Reason"));
-        ui.add(crate::widgets::line(&mut d.reason).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
-        ui.end_row();
-        let l = ui.label(tl!("Location"));
-        ui.add(crate::widgets::line(&mut d.location).hint_text(tl!("Optional")).desired_width(260.0)).labelled_by(l.id);
-        ui.end_row();
-        if in_os_key_store {
-            ui.label("");
-            ui.label(
-                egui::RichText::new(if entry.path.starts_with("windows:") {
-                    tl!("The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.")
-                } else {
-                    tl!("The key is in the macOS Keychain, which may ask to allow PdfCraft to use it.")
-                })
-                .small()
-                .color(t.text_muted),
-            );
-        } else {
-            let l = ui.label(tl!("Digital ID password"));
-            let r = ui.add(crate::widgets::line(&mut d.password).password(true).desired_width(200.0)).labelled_by(l.id);
-            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                go = true;
-            }
-        }
-        ui.end_row();
     });
     ui.add_space(6.0);
     error(ui, &d.error);
@@ -1213,7 +1213,9 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, sigs: &[SignatureInfo], expan
             (true, false, Some(signer)) => ("Rev. {rev}: Signed by {name}", signer),
             (true, false, None) => ("Rev. {rev}: Signed by an unknown signer", ""),
         };
-        let head = crate::i18n::fmt(tl!(template), &[("rev", &s.revision.to_string()), ("name", name)]);
+        // The name is a signer's or a field's: document text, put in display order before it
+        // goes into the sentence (right in every interface language).
+        let head = crate::i18n::fmt(tl!(template), &[("rev", &s.revision.to_string()), ("name", &crate::bidi::visual_auto(name))]);
         let resp = ui
             .horizontal(|ui| {
                 let chevron = if open { "chevron-down" } else { "chevron-right" };
@@ -1252,13 +1254,25 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, sigs: &[SignatureInfo], expan
             for detail in &s.details {
                 // Each detail is a whole sentence of ours plus what the signature itself says; said
                 // here in the panel's language, with the signature's own words left as they are.
-                let line = detail.said(&crate::i18n::words);
-                ui.add(egui::Label::new(egui::RichText::new(format!("• {line}")).font(theme::regular(11.5)).color(t.text_muted)).wrap());
+                let line = format!("• {}", detail.said(&crate::i18n::words));
+                if crate::i18n::current().rtl() {
+                    // The sentence is in display order already, and the signature's words can't be told from ours.
+                    ui.add(egui::Label::new(egui::RichText::new(line).font(theme::regular(11.5)).color(t.text_muted)).wrap());
+                } else {
+                    widgets::wrapped_text(ui, &line, theme::regular(11.5), t.text_muted, false);
+                }
             }
             ui.add_space(4.0);
             ui.label(egui::RichText::new(tl!("Signature Details")).font(theme::semibold(12.0)));
             let row = |ui: &mut egui::Ui, k: &str, v: &str| {
-                ui.add(egui::Label::new(egui::RichText::new(format!("{}: {v}", tl!(k))).font(theme::regular(11.5))).wrap());
+                if crate::i18n::current().rtl() {
+                    // The label is in display order already; only the value is reordered.
+                    let line = format!("{}: {}", tl!(k), crate::bidi::visual_auto(v));
+                    ui.add(egui::Label::new(egui::RichText::new(line).font(theme::regular(11.5))).wrap());
+                } else {
+                    let colour = ui.visuals().text_color();
+                    widgets::wrapped_text(ui, &format!("{}: {v}", tl!(k)), theme::regular(11.5), colour, false);
+                }
             };
             if let Some(r) = &s.reason {
                 row(ui, "Reason", r);
@@ -1283,7 +1297,7 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, sigs: &[SignatureInfo], expan
                         egui::Label::new(
                             egui::RichText::new(crate::i18n::fmt(
                                 tl!("Field: {field} on page {p}"),
-                                &[("field", &s.field), ("p", &(p + 1).to_string())],
+                                &[("field", &crate::bidi::visual_auto(&s.field)), ("p", &(p + 1).to_string())],
                             ))
                             .font(theme::regular(11.5))
                             .color(t.accent_text)
@@ -1385,7 +1399,7 @@ pub(crate) fn cert_viewer(ui: &mut egui::Ui, v: &mut CertViewer, trusted: &[Cert
                 let c = &v.chain[i];
                 ui.horizontal(|ui| {
                     ui.add_space(depth as f32 * 12.0);
-                    if ui.selectable_label(v.selected == i, c.display_name()).clicked() {
+                    if ui.selectable_label(v.selected == i, crate::bidi::visual_auto(&c.display_name())).clicked() {
                         v.selected = i;
                     }
                 });
@@ -1404,11 +1418,18 @@ pub(crate) fn cert_viewer(ui: &mut egui::Ui, v: &mut CertViewer, trusted: &[Cert
             });
             ui.add_space(8.0);
             let grid = |ui: &mut egui::Ui, rows: Vec<(&str, String)>| {
-                egui::Grid::new(("cert-rows", v.tab as u8)).num_columns(2).spacing([12.0, 5.0]).show(ui, |ui| {
+                widgets::form_grid(ui, ("cert-rows", v.tab as u8), [12.0, 5.0], None, |form| {
                     for (k, val) in rows {
-                        ui.label(egui::RichText::new(tl_ctx!("certificate", k)).color(t.text_muted));
-                        ui.add(egui::Label::new(val).wrap());
-                        ui.end_row();
+                        form.row_styled(
+                            tl_ctx!("certificate", k),
+                            |caption| caption.color(t.text_muted),
+                            |ui, _| {
+                                // Names in a certificate may be right to left; wrapped_label leaves the
+                                // Arabic interface's own words ("Yes", "Any") alone.
+                                let (font, colour) = (egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
+                                widgets::wrapped_label(ui, &val, font, colour);
+                            },
+                        );
                     }
                 });
             };
@@ -1443,13 +1464,16 @@ pub(crate) fn cert_viewer(ui: &mut egui::Ui, v: &mut CertViewer, trusted: &[Cert
                 CertTab::Trust => {
                     let is_trusted = trusted.iter().any(|x| x.raw == c.raw);
                     let anchored = v.chain.iter().any(|x| trusted.iter().any(|y| y.raw == x.raw));
-                    ui.label(if is_trusted {
-                        tl!("This certificate is in your list of trusted certificates.")
-                    } else if anchored {
-                        tl!("This certificate is trusted through a certificate above it in the chain.")
-                    } else {
-                        tl!("This certificate is not trusted. Signatures made with it show an unknown identity.")
-                    });
+                    widgets::body_text(
+                        ui,
+                        &if is_trusted {
+                            tl_logical!("This certificate is in your list of trusted certificates.")
+                        } else if anchored {
+                            tl_logical!("This certificate is trusted through a certificate above it in the chain.")
+                        } else {
+                            tl_logical!("This certificate is not trusted. Signatures made with it show an unknown identity.")
+                        },
+                    );
                     ui.add_space(8.0);
                     if !is_trusted && widgets::pill_button(ui, tl!("Add to Trusted Certificates"), false).clicked() {
                         action = Some(CertAction::Trust(Box::new(c.clone())));
@@ -1476,6 +1500,39 @@ pub fn certificate_pem(c: &Certificate) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(path: &str, email: &str, unusable: Option<&str>) -> DigitalIdEntry {
+        DigitalIdEntry {
+            path: path.into(),
+            name: "Grace".into(),
+            issuer: "Contoso CA".into(),
+            email: email.into(),
+            expires: "2030-01-01".into(),
+            unusable: unusable.map(str::to_owned),
+        }
+    }
+
+    /// The row's details line reads as it always has in English, and in the Arabic interface its
+    /// pieces follow each other in reading order: the store first (at the right), the clauses of
+    /// the issuer and the expiry last.
+    #[test]
+    fn a_digital_id_row_joins_its_pieces_in_reading_order() {
+        assert_eq!(id_details(&entry("a.pfx", "", None)), "Issued by: Contoso CA, Expires: 2030-01-01");
+        assert_eq!(
+            id_details(&entry("keychain:x", "g@example.com", None)),
+            "Keychain  ·  g@example.com  ·  Issued by: Contoso CA, Expires: 2030-01-01"
+        );
+        assert_eq!(id_details(&entry("windows:x", "", Some("no key"))), "Windows store  ·  no key");
+        assert_eq!(id_details(&entry("a.pfx", "", Some("no key"))), "no key");
+        let previous = crate::i18n::current();
+        crate::i18n::set_current(crate::i18n::Lang::from_code("ar").unwrap());
+        let keychain = id_details(&entry("keychain:x", "g@example.com", None));
+        let store = tl!("Keychain  ·  ").trim_end_matches(|c: char| c.is_whitespace() || c == '·');
+        crate::i18n::set_current(previous);
+        // On screen the first piece (the store) is at the right end, the clauses at the left.
+        let at = |needle: &str| keychain.find(needle).unwrap_or_else(|| panic!("{needle:?} in {keychain:?}"));
+        assert!(at("Contoso") < at("g@example.com") && at("g@example.com") < at(store), "{keychain:?}");
+    }
 
     /// A fresh folder per call: tests run in parallel.
     fn scratch() -> PathBuf {

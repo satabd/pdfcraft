@@ -5,7 +5,7 @@ use egui::{Align2, CornerRadius, Rect, Sense, Stroke, vec2};
 use pdfcraft_engine::catalog::{Availability, TOOL_GROUPS};
 
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, icons};
+use crate::{PdfCraftApp, icons, rtl};
 
 struct Hit {
     /// The tool panel to open (tools and catalogue items); `None` for plain commands.
@@ -150,13 +150,15 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
                 ui.set_width(560.0);
-                ui.horizontal(|ui| {
+                rtl::horizontal(ui, |ui| {
                     ui.add(icons::image("search", 18.0, t.text_muted));
+                    let align = crate::widgets::field_align(&app.palette_query);
                     let r = ui.add(
-                        egui::TextEdit::singleline(&mut app.palette_query)
+                        crate::widgets::BidiEdit::singleline(&mut app.palette_query)
                             .hint_text(tl!("Search tools and commands…"))
                             .frame(egui::Frame::NONE)
                             .font(theme::regular(15.0))
+                            .horizontal_align(align)
                             .desired_width(f32::INFINITY),
                     );
                     // Enter runs the selected hit while the field is focused or relinquishing focus.
@@ -177,7 +179,7 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     let press = theme::Press::track(ui, &resp);
                     press.wash(ui, rect, 6, index == selected);
                     let body = rect.translate(press.offset());
-                    icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 9.0), vec2(18.0, 18.0)), h.icon, 17.0, t.icon);
+                    icons::paint(ui, rtl::start_rect(body, 8.0, 9.0, vec2(18.0, 18.0)), h.icon, 17.0, t.icon);
                     // Display is translated; matching above already considered both languages.
                     let shown = crate::i18n::command_label(&h.label);
                     let shown_detail = tl!(&h.detail).to_string();
@@ -187,10 +189,11 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     let detail_max = (rect.width() * 0.42).clamp(0.0, 220.0);
                     let detail = crate::widgets::fit_line(&shown_detail, detail_max, |s| crate::widgets::text_width(ui, s, &detail_font));
                     let detail_w = crate::widgets::text_width(ui, &detail, &detail_font);
-                    ui.painter().text(body.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, detail, detail_font, t.text_faint);
-                    crate::widgets::paint_left(
+                    ui.painter().text(rtl::end_center(body, 10.0), rtl::flip(Align2::RIGHT_CENTER), detail, detail_font, t.text_faint);
+                    // The label may name the last action (Undo/Redo), which can hold document text.
+                    crate::widgets::paint_start_sentence(
                         ui,
-                        body.left_center() + vec2(36.0, 0.0),
+                        rtl::start_center(body, 36.0),
                         &shown,
                         theme::regular(13.5),
                         fg,

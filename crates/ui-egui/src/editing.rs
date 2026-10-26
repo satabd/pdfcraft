@@ -183,7 +183,7 @@ impl PdfCraftApp {
                     view.comments.drawings_refused();
                 }
                 let message = if matches!(edit, Edit::MoveObjects { .. }) { crate::object_ui::move_error(&e) } else { e.to_string() };
-                self.notify_fmt("{label} failed: {e}", &[("label", &crate::i18n::edit_label(&label)), ("e", &message)]);
+                self.notify_fmt("{label} failed: {e}", &[("label", &crate::i18n::edit_label_logical(&label)), ("e", &message)]);
                 false
             }
         }
@@ -222,7 +222,7 @@ impl PdfCraftApp {
                     self.views[i].document_changed(&doc.info);
                 }
                 self.views[i].comments.selected = None;
-                let label = crate::i18n::edit_label(&label);
+                let label = crate::i18n::edit_label_logical(&label);
                 if undo {
                     self.notify_fmt("Undid {label}", &[("label", &label)]);
                 } else {
@@ -325,7 +325,7 @@ impl PdfCraftApp {
             }
         }
         if let Err(e) = result {
-            let label = crate::i18n::action_label("Enhance camera image");
+            let label = crate::i18n::action_label_logical("Enhance camera image");
             self.notify_fmt("{label} failed: {e}", &[("label", &label), ("e", &e.to_string())]);
         }
     }
@@ -364,7 +364,7 @@ impl PdfCraftApp {
                 }
             }
             Err(e) => {
-                let label = crate::i18n::action_label("Enhance camera image");
+                let label = crate::i18n::action_label_logical("Enhance camera image");
                 self.notify_fmt("{label} failed: {e}", &[("label", &label), ("e", &e.to_string())]);
             }
         }
@@ -389,7 +389,11 @@ impl PdfCraftApp {
         if cut {
             self.apply_edit(Edit::DeletePages { pages: pages.clone() });
         }
-        let what = if pages.len() == 1 { tl!("1 page").to_string() } else { crate::i18n::fmt(tl!("{n} pages"), &[("n", &pages.len().to_string())]) };
+        let what = if pages.len() == 1 {
+            tl_logical!("1 page")
+        } else {
+            crate::i18n::fmt_logical(&tl_logical!("{n} pages"), &[("n", &pages.len().to_string())])
+        };
         if cut {
             self.notify_fmt("Cut {what}", &[("what", &what)]);
         } else {

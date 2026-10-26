@@ -59,6 +59,8 @@ pub struct OcrProgress {
 pub struct BatchProgress {
     pub done: usize,
     pub total: usize,
+    /// The summary shown when the run is over, in logical order ([`crate::i18n::Logical`]): it
+    /// becomes the toast.
     pub message: Option<String>,
 }
 
@@ -73,7 +75,7 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
     let d = &mut app.ocr_draft;
     d.to = d.to.clamp(1, pages);
     d.from = d.from.clamp(1, d.to);
-    ui.label(egui::RichText::new(tl!("Recognize Text")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Recognize Text"));
     ui.add_space(8.0);
     let group = |ui: &mut egui::Ui, title: &str, body: &mut dyn FnMut(&mut egui::Ui)| {
         ui.label(egui::RichText::new(tl!(title)).font(theme::semibold(13.0)));
@@ -95,39 +97,40 @@ pub(crate) fn body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> (boo
         });
     });
     group(ui, "Settings", &mut |ui| {
-        egui::Grid::new("ocr-settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label(tl!("Document language"));
-            let name = LANGUAGES.iter().find(|l| l.0 == d.language).map_or("English", |l| l.1);
-            egui::ComboBox::from_id_salt("ocr-language").selected_text(tl!(name)).width(220.0).show_ui(ui, |ui| {
-                for (code, name) in LANGUAGES {
-                    ui.selectable_value(&mut d.language, (*code).to_string(), tl!(*name));
-                }
+        widgets::form_grid(ui, "ocr-settings", [12.0, 8.0], None, |rows| {
+            rows.row(tl!("Document language"), |ui, _| {
+                let name = LANGUAGES.iter().find(|l| l.0 == d.language).map_or("English", |l| l.1);
+                egui::ComboBox::from_id_salt("ocr-language").selected_text(tl!(name)).width(220.0).show_ui(ui, |ui| {
+                    for (code, name) in LANGUAGES {
+                        ui.selectable_value(&mut d.language, (*code).to_string(), tl!(*name));
+                    }
+                });
             });
-            ui.end_row();
-            ui.label(tl!("Output"));
-            egui::ComboBox::from_id_salt("ocr-output").selected_text(tl!("Searchable Image (Exact)")).width(220.0).show_ui(ui, |ui| {
-                let _ = ui
-                    .selectable_label(true, tl!("Searchable Image (Exact)"))
-                    .on_hover_text(tl!("Adds invisible text over each word; the page image is not changed"));
+            rows.row(tl!("Output"), |ui, _| {
+                egui::ComboBox::from_id_salt("ocr-output").selected_text(tl!("Searchable Image (Exact)")).width(220.0).show_ui(ui, |ui| {
+                    let option = ui.selectable_label(true, tl!("Searchable Image (Exact)"));
+                    let _ = widgets::hover_text(option, &tl_logical!("Adds invisible text over each word; the page image is not changed"));
+                });
             });
-            ui.end_row();
-            ui.label(tl!("Downsample to"));
-            egui::ComboBox::from_id_salt("ocr-dpi").selected_text(format!("{} dpi", d.dpi)).width(220.0).show_ui(ui, |ui| {
-                for v in [600, 300, 150, 72] {
-                    ui.selectable_value(&mut d.dpi, v, format!("{v} dpi"));
-                }
+            rows.row(tl!("Downsample to"), |ui, _| {
+                egui::ComboBox::from_id_salt("ocr-dpi").selected_text(format!("{} dpi", d.dpi)).width(220.0).show_ui(ui, |ui| {
+                    for v in [600, 300, 150, 72] {
+                        ui.selectable_value(&mut d.dpi, v, format!("{v} dpi"));
+                    }
+                });
             });
-            ui.end_row();
         });
         ui.add_space(4.0);
-        ui.add(crate::widgets::checkbox(&mut d.text_pages, tl!("Also recognize pages that already have text")))
-            .on_hover_text(tl!("Pictures on those pages are recognized too; words already in the page's text are not added again"));
+        let resp = ui.add(crate::widgets::checkbox(&mut d.text_pages, tl!("Also recognize pages that already have text")));
+        widgets::hover_text(resp, &tl_logical!("Pictures on those pages are recognized too; words already in the page's text are not added again"));
     });
     if !available {
-        ui.label(
-            egui::RichText::new(tl!("Text recognition isn't installed: its model files are missing. Reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them."))
-                .small()
-                .color(t.text_muted),
+        widgets::small_text(
+            ui,
+            &tl_logical!(
+                "Text recognition isn't installed: its model files are missing. Reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them."
+            ),
+            t.text_muted,
         );
         ui.add_space(6.0);
     }
@@ -254,13 +257,14 @@ impl PdfCraftApp {
                 }
             }
             let done = if ok == 1 {
-                crate::i18n::fmt(tl!("Recognized {w} words in 1 file"), &[("w", &words.to_string())])
+                crate::i18n::fmt_logical(&tl_logical!("Recognized {w} words in 1 file"), &[("w", &words.to_string())])
             } else {
-                crate::i18n::fmt(tl!("Recognized {w} words in {n} files"), &[("w", &words.to_string()), ("n", &ok.to_string())])
+                crate::i18n::fmt_logical(&tl_logical!("Recognized {w} words in {n} files"), &[("w", &words.to_string()), ("n", &ok.to_string())])
             };
-            let mut msg = done;
+            // In logical order: the toast wraps and reorders it.
+            let mut msg = done.into_owned();
             if !failed.is_empty() {
-                msg.push_str(&crate::i18n::fmt(tl!("; failed: {list}"), &[("list", &failed.join("; "))]));
+                msg.push_str(&crate::i18n::fmt_logical(&tl_logical!("; failed: {list}"), &[("list", &failed.join("; "))]));
             }
             if let Ok(mut s) = p.lock() {
                 s.done = s.total;
@@ -298,8 +302,8 @@ impl PdfCraftApp {
                     self.notify(m);
                 }
                 Some(Err((done, total))) => {
-                    let m = crate::i18n::fmt(
-                        tl!("Recognizing text… file {d} of {t}"),
+                    let m = crate::i18n::fmt_logical(
+                        &tl_logical!("Recognizing text… file {d} of {t}"),
                         &[("d", &(done + 1).min(total.max(1)).to_string()), ("t", &total.max(1).to_string())],
                     );
                     if self.toast.as_ref().is_none_or(|t| t.0 != m) {
@@ -316,8 +320,8 @@ impl PdfCraftApp {
         let (doc, progress) = (run.doc, run.progress.clone());
         let Ok(mut s) = progress.lock() else { return };
         let Some(result) = s.result.take() else {
-            let msg = crate::i18n::fmt(
-                tl!("Recognizing text… page {d} of {t}"),
+            let msg = crate::i18n::fmt_logical(
+                &tl_logical!("Recognizing text… page {d} of {t}"),
                 &[("d", &(s.done + 1).min(s.total.max(1)).to_string()), ("t", &s.total.max(1).to_string())],
             );
             drop(s);
@@ -348,17 +352,22 @@ impl PdfCraftApp {
                     view.document_changed(&info);
                 }
                 let words_part = if words == 1 {
-                    crate::i18n::fmt(tl!("Recognized 1 word"), &[])
+                    crate::i18n::fmt_logical(&tl_logical!("Recognized 1 word"), &[])
                 } else {
-                    crate::i18n::fmt(tl!("Recognized {n} words"), &[("n", &words.to_string())])
+                    crate::i18n::fmt_logical(&tl_logical!("Recognized {n} words"), &[("n", &words.to_string())])
                 };
-                let pages_part = if read == 1 { tl!("1 page").to_string() } else { crate::i18n::fmt(tl!("{n} pages"), &[("n", &read.to_string())]) };
-                let mut msg = crate::i18n::fmt(tl!("{words} on {pages}"), &[("words", &words_part), ("pages", &pages_part)]);
+                let pages_part = if read == 1 {
+                    tl_logical!("1 page").into_owned()
+                } else {
+                    crate::i18n::fmt_logical(&tl_logical!("{n} pages"), &[("n", &read.to_string())]).into_owned()
+                };
+                let mut msg =
+                    crate::i18n::fmt_logical(&tl_logical!("{words} on {pages}"), &[("words", &words_part), ("pages", &pages_part)]).into_owned();
                 if skipped > 0 {
                     msg.push_str(&if skipped == 1 {
-                        crate::i18n::fmt(tl!("; 1 page already had text"), &[])
+                        crate::i18n::fmt_logical(&tl_logical!("; 1 page already had text"), &[])
                     } else {
-                        crate::i18n::fmt(tl!("; {n} pages already had text"), &[("n", &skipped.to_string())])
+                        crate::i18n::fmt_logical(&tl_logical!("; {n} pages already had text"), &[("n", &skipped.to_string())])
                     });
                 }
                 self.notify(msg);

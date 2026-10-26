@@ -274,6 +274,9 @@ pub struct ParaSpec {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Para {
     pub h_align: HAlign,
+    /// Whether the template states `hAlign` (on this element or one it inherits from): text that
+    /// runs right to left is right-aligned only when it does not.
+    pub h_explicit: bool,
     pub v_align: VAlign,
     /// `None`: 1.15 × the font size.
     pub line_height: Option<f64>,
@@ -288,6 +291,7 @@ impl Para {
     pub fn apply(&self, spec: &ParaSpec) -> Para {
         Para {
             h_align: spec.h_align.unwrap_or(self.h_align),
+            h_explicit: spec.h_align.is_some() || self.h_explicit,
             v_align: spec.v_align.unwrap_or(self.v_align),
             line_height: spec.line_height.or(self.line_height),
             margin_left: spec.margin_left.unwrap_or(self.margin_left),

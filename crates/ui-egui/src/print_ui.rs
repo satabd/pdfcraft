@@ -7,7 +7,7 @@ use egui::{Color32, Pos2, Rect, Stroke, pos2, vec2};
 use pdfcraft_engine::print::{self, Binding, BookletSubset, Content, Layout, Orientation, PAPERS, PageOrder, SizeMode, Subset, spool};
 
 use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, widgets};
+use crate::{PdfCraftApp, rtl, widgets};
 
 /// The preview pane, and the paper inside it (12 pt inset on each side).
 const PREVIEW_W: f32 = 320.0;
@@ -474,8 +474,8 @@ impl PdfCraftApp {
 
     fn report_print_job(&mut self, printer: &str, result: Result<String, String>) {
         match result {
-            Ok(msg) if msg.is_empty() => self.notify(crate::i18n::fmt(tl!("Sent to {printer}"), &[("printer", printer)])),
-            Ok(msg) => self.notify(crate::i18n::fmt(tl!("Sent to {printer}: {msg}"), &[("printer", printer), ("msg", &msg)])),
+            Ok(msg) if msg.is_empty() => self.notify(crate::i18n::fmt_logical(&tl_logical!("Sent to {printer}"), &[("printer", printer)])),
+            Ok(msg) => self.notify(crate::i18n::fmt_logical(&tl_logical!("Sent to {printer}: {msg}"), &[("printer", printer), ("msg", &msg)])),
             Err(e) => self.notify_error(e),
         }
     }
@@ -749,7 +749,7 @@ fn driver_options_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
             ui.label(egui::RichText::new(tl!("This printer offers no settings of its own.")).small().color(t.text_muted));
             return;
         }
-        egui::ScrollArea::vertical().id_salt("driver-options").max_height(240.0).show(ui, |ui| {
+        crate::widgets::scroll_area(ui, egui::ScrollArea::vertical().id_salt("driver-options").max_height(240.0), |ui| {
             for (n, chunk) in options.chunk_by(|a, b| a.group == b.group).enumerate() {
                 let group = chunk.first().map_or("", |o| o.group.as_str());
                 if !group.is_empty() {
@@ -757,25 +757,32 @@ fn driver_options_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
                     // Option and group names are the driver's own text.
                     ui.label(egui::RichText::new(group).small().color(t.text_muted));
                 }
-                egui::Grid::new(("driver-group", n)).num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                widgets::form_grid(ui, ("driver-group", n), [10.0, 4.0], None, |rows| {
                     for o in chunk {
-                        ui.label(&o.label);
-                        let current = choices.get(&o.key).cloned().unwrap_or_else(|| o.default.clone());
-                        let label_of = |c: &str| o.choices.iter().find(|(k, _)| k == c).map_or_else(|| c.to_string(), |(_, l)| l.clone());
-                        let mut pick = current.clone();
-                        egui::ComboBox::from_id_salt(("driver-option", &o.key)).selected_text(label_of(&current)).width(200.0).show_ui(ui, |ui| {
-                            for (k, l) in &o.choices {
-                                ui.selectable_value(&mut pick, k.clone(), l.as_str());
-                            }
-                        });
-                        if pick != current {
-                            if pick == o.default {
-                                choices.remove(&o.key);
-                            } else {
-                                choices.insert(o.key.clone(), pick);
-                            }
-                        }
-                        ui.end_row();
+                        // The driver's own words: painted as they are.
+                        rows.row_with(
+                            |ui| ui.label(&o.label),
+                            |ui, _| {
+                                let current = choices.get(&o.key).cloned().unwrap_or_else(|| o.default.clone());
+                                let label_of = |c: &str| o.choices.iter().find(|(k, _)| k == c).map_or_else(|| c.to_string(), |(_, l)| l.clone());
+                                let mut pick = current.clone();
+                                egui::ComboBox::from_id_salt(("driver-option", &o.key)).selected_text(label_of(&current)).width(200.0).show_ui(
+                                    ui,
+                                    |ui| {
+                                        for (k, l) in &o.choices {
+                                            ui.selectable_value(&mut pick, k.clone(), l.as_str());
+                                        }
+                                    },
+                                );
+                                if pick != current {
+                                    if pick == o.default {
+                                        choices.remove(&o.key);
+                                    } else {
+                                        choices.insert(o.key.clone(), pick);
+                                    }
+                                }
+                            },
+                        );
                     }
                 });
             }
@@ -803,7 +810,7 @@ pub(crate) fn body(
     thumb: &mut dyn FnMut(usize) -> Option<egui::TextureId>,
 ) -> (bool, bool) {
     ui.set_width(820.0);
-    ui.label(egui::RichText::new(tl!("Print")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Print"));
     ui.add_space(8.0);
     let settings = d.settings(sizes.len(), labels);
     let sheets = settings.as_ref().ok().and_then(|s| print::layout(sizes, s).ok()).unwrap_or_default();
@@ -812,121 +819,118 @@ pub(crate) fn body(
         // Settings.
         ui.vertical(|ui| {
             ui.set_width(470.0);
-            egui::Grid::new("print-top").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                ui.label(tl!("Printer:"));
-                let before = d.printer.clone();
-                // The browser's print dialog sets copies, two-sided printing and colour itself.
-                let browser = d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER);
-                ui.horizontal(|ui| {
-                    let shown = match d.printer.as_deref() {
-                        Some(p) => printer_label(p),
-                        None if still_looking(d) => tl!("Looking for printers…").to_string(),
-                        None => tl!("Save as PDF").to_string(),
-                    };
-                    egui::ComboBox::from_id_salt("printer").selected_text(shown).width(260.0).show_ui(ui, |ui| {
-                        if d.printers_loading {
-                            ui.add_enabled(false, egui::Label::new(tl!("Looking for printers…")));
-                        }
-                        for p in &d.printers {
-                            let name = printer_label(&p.name);
-                            let label = if p.default && p.name != crate::web_print::BROWSER_PRINTER {
-                                crate::i18n::fmt(tl!("{name} (default)"), &[("name", &name)])
+            // The browser's print dialog sets copies, two-sided printing and colour itself.
+            let browser = d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER);
+            widgets::form_grid(ui, "print-top", [10.0, 8.0], None, |rows| {
+                rows.row(tl!("Printer:"), |ui, _| {
+                    let before = d.printer.clone();
+                    rtl::horizontal(ui, |ui| {
+                        let shown = match d.printer.as_deref() {
+                            Some(p) => printer_label(p),
+                            None if still_looking(d) => tl!("Looking for printers…").to_string(),
+                            None => tl!("Save as PDF").to_string(),
+                        };
+                        egui::ComboBox::from_id_salt("printer").selected_text(shown).width(260.0).show_ui(ui, |ui| {
+                            if d.printers_loading {
+                                ui.add_enabled(false, egui::Label::new(tl!("Looking for printers…")));
+                            }
+                            for p in &d.printers {
+                                let name = printer_label(&p.name);
+                                let label = if p.default && p.name != crate::web_print::BROWSER_PRINTER {
+                                    crate::i18n::fmt(tl!("{name} (default)"), &[("name", &name)])
+                                } else {
+                                    name
+                                };
+                                ui.selectable_value(&mut d.printer, Some(p.name.clone()), label);
+                            }
+                            // Chosen even when it was already the selection, so the list arriving
+                            // later doesn't replace it with the default printer.
+                            if ui.selectable_value(&mut d.printer, None, tl!("Save as PDF")).clicked() {
+                                d.printer_picked = true;
+                            }
+                        });
+                        let tip = if spool::HAS_PRINTER_PREFERENCES {
+                            tl_logical!("Opens the printer driver's preferences. They are saved for every print from this computer; the copies, two-sided, grayscale and paper chosen here still apply.")
+                        } else {
+                            tl_logical!("The printer driver's own settings for this print: paper tray, paper type, finishing and more.")
+                        };
+                        let properties = ui.add_enabled(d.printer.is_some() && !browser, egui::Button::new(tl!("Properties…")));
+                        let properties = widgets::hover_text(properties, &tip);
+                        if properties.clicked()
+                            && let Some(p) = d.printer.clone()
+                        {
+                            if spool::HAS_PRINTER_PREFERENCES {
+                                d.driver_error = spool::open_printer_preferences(&p).err().map(|e| e.to_string());
                             } else {
-                                name
-                            };
-                            ui.selectable_value(&mut d.printer, Some(p.name.clone()), label);
-                        }
-                        // Chosen even when it was already the selection, so the list arriving
-                        // later doesn't replace it with the default printer.
-                        if ui.selectable_value(&mut d.printer, None, tl!("Save as PDF")).clicked() {
-                            d.printer_picked = true;
+                                if d.driver_options.as_ref().is_none_or(|(read_for, _)| *read_for != p) {
+                                    d.driver_options = Some((p.clone(), spool::printer_options(&p)));
+                                    d.driver_choices.clear();
+                                }
+                                d.show_driver_options = !d.show_driver_options;
+                            }
                         }
                     });
-                    let tip = if spool::HAS_PRINTER_PREFERENCES {
-                        tl!("Opens the printer driver's preferences. They are saved for every print from this computer; the copies, two-sided, grayscale and paper chosen here still apply.")
-                    } else {
-                        tl!("The printer driver's own settings for this print: paper tray, paper type, finishing and more.")
-                    };
-                    let properties = ui.add_enabled(d.printer.is_some() && !browser, egui::Button::new(tl!("Properties…"))).on_hover_text(tip);
-                    if properties.clicked()
-                        && let Some(p) = d.printer.clone()
-                    {
-                        if spool::HAS_PRINTER_PREFERENCES {
-                            d.driver_error = spool::open_printer_preferences(&p).err().map(|e| e.to_string());
-                        } else {
-                            if d.driver_options.as_ref().is_none_or(|(read_for, _)| *read_for != p) {
-                                d.driver_options = Some((p.clone(), spool::printer_options(&p)));
-                                d.driver_choices.clear();
-                            }
-                            d.show_driver_options = !d.show_driver_options;
-                        }
+                    if d.printer != before {
+                        d.printer_picked = true;
+                        d.show_driver_options = false;
+                        d.driver_error = None;
                     }
                 });
-                if d.printer != before {
-                    d.printer_picked = true;
-                    d.show_driver_options = false;
-                    d.driver_error = None;
-                }
-                ui.end_row();
                 // The spooler answered with no printer at all (#160): say so, rather than
                 // leaving Save as PDF looking like the only thing PdfCraft can do.
                 if !d.printers_loading && d.printers.is_empty() {
-                    ui.label("");
-                    ui.label(
-                        egui::RichText::new(tl!("No printers were found. Check that the printer is installed and the print spooler is running, then open Print again."))
-                            .small()
-                            .color(t.text_muted),
-                    );
-                    ui.end_row();
+                    rows.row("", |ui, _| {
+                        widgets::small_text(ui, &tl_logical!("No printers were found. Check that the printer is installed and the print spooler is running, then open Print again."), t.text_muted);
+                    });
                 }
-                ui.label(tl!("Copies:"));
-                ui.add_enabled_ui(!browser, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut d.copies).range(1..=999));
-                        ui.add(widgets::checkbox(&mut d.collate, tl!("Collate")));
-                        ui.add(widgets::checkbox(&mut d.grayscale, tl!("Print in grayscale")));
+                rows.row(tl!("Copies:"), |ui, _| {
+                    ui.add_enabled_ui(!browser, |ui| {
+                        rtl::horizontal(ui, |ui| {
+                            ui.add(egui::DragValue::new(&mut d.copies).range(1..=999));
+                            ui.add(widgets::checkbox(&mut d.collate, tl!("Collate")));
+                            ui.add(widgets::checkbox(&mut d.grayscale, tl!("Print in grayscale")));
+                        });
                     });
                 });
-                ui.end_row();
-                ui.label(tl!("Two-sided:"));
-                ui.add_enabled_ui(!browser, |ui| {
-                    combo(
-                        ui,
-                        "duplex",
-                        &mut d.duplex,
-                        &[
-                            (spool::Duplex::Off, tl!("Off")),
-                            (spool::Duplex::LongEdge, tl!("Flip on long edge")),
-                            (spool::Duplex::ShortEdge, tl!("Flip on short edge")),
-                        ],
-                        160.0,
-                    );
+                rows.row(tl!("Two-sided:"), |ui, _| {
+                    ui.add_enabled_ui(!browser, |ui| {
+                        combo(
+                            ui,
+                            "duplex",
+                            &mut d.duplex,
+                            &[
+                                (spool::Duplex::Off, tl!("Off")),
+                                (spool::Duplex::LongEdge, tl!("Flip on long edge")),
+                                (spool::Duplex::ShortEdge, tl!("Flip on short edge")),
+                            ],
+                            160.0,
+                        );
+                    });
                 });
-                ui.end_row();
-                ui.label(tl!("Paper:"));
-                let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
-                let before = d.paper;
-                egui::ComboBox::from_id_salt("paper").selected_text(tl!(paper_name)).width(260.0).show_ui(ui, |ui| {
-                    for (i, (name, _)) in PAPERS.iter().enumerate() {
-                        ui.selectable_value(&mut d.paper, i, tl!(name));
+                rows.row(tl!("Paper:"), |ui, _| {
+                    let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
+                    let before = d.paper;
+                    egui::ComboBox::from_id_salt("paper").selected_text(tl!(paper_name)).width(260.0).show_ui(ui, |ui| {
+                        for (i, (name, _)) in PAPERS.iter().enumerate() {
+                            ui.selectable_value(&mut d.paper, i, tl!(name));
+                        }
+                    });
+                    // Label stock gets the label layout (cut, turned upright, fitted).
+                    if d.paper != before && d.paper == print::LABEL_PAPER {
+                        d.handling = Handling::Label;
+                        d.sheet = 0;
                     }
                 });
-                // Label stock gets the label layout (cut, turned upright, fitted).
-                if d.paper != before && d.paper == print::LABEL_PAPER {
-                    d.handling = Handling::Label;
-                    d.sheet = 0;
-                }
-                ui.end_row();
             });
             // Windows says which drivers can't print two-sided as they're asked; they keep their
             // own setting, even when Two-sided is Off.
             if let Some(p) = d.printers.iter().find(|p| d.printer.as_ref() == Some(&p.name))
                 && p.two_sided == Some(false)
             {
-                ui.label(egui::RichText::new(tl!("This printer's driver doesn't take two-sided settings from other programs, so its own setting applies. Change it in Properties…")).small().color(t.text_muted));
+                widgets::small_text(ui, &tl_logical!("This printer's driver doesn't take two-sided settings from other programs, so its own setting applies. Change it in Properties…"), t.text_muted);
             }
             if d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER) {
-                ui.label(egui::RichText::new(tl!("Copies, two-sided printing and colour are chosen in the browser's print dialog.")).small().color(t.text_muted));
+                widgets::small_text(ui, &tl_logical!("Copies, two-sided printing and colour are chosen in the browser's print dialog."), t.text_muted);
             }
             if let Some(e) = &d.driver_error {
                 ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Couldn't open the printer's preferences: {e}"), &[("e", e)])).small().color(t.text_muted));
@@ -981,7 +985,7 @@ pub(crate) fn body(
             });
             ui.add_space(6.0);
             widgets::section_title(ui, tl!("Page Sizing & Handling"));
-            ui.horizontal_wrapped(|ui| {
+            rtl::horizontal_wrapped(ui, |ui| {
                 for (h, label) in [
                     (Handling::Size, tl!("Size")),
                     (Handling::Poster, tl!("Poster")),
@@ -1017,11 +1021,7 @@ pub(crate) fn body(
                 }
                 Handling::Label => {
                     ui.add(widgets::checkbox(&mut d.label_flip, tl!("Turn upside down (180°)")));
-                    ui.label(
-                        egui::RichText::new(tl!("Cuts each page to its printed area, turns it upright and fits it to the sheet without stretching. One label per sheet."))
-                            .small()
-                            .color(t.text_muted),
-                    );
+                    widgets::small_text(ui, &tl_logical!("Cuts each page to its printed area, turns it upright and fits it to the sheet without stretching. One label per sheet."), t.text_muted);
                 }
                 Handling::Poster => {
                     ui.horizontal(|ui| {

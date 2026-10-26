@@ -68,7 +68,13 @@ values stay visible), hidden text (render modes 3 and 7, or wholly off the page)
 and `/PieceInfo` private data. Both make the next save a full rewrite.
 
 `patterns` finds phone numbers, e-mail addresses, credit card numbers (Luhn-checked), US Social
-Security numbers and dates for Search & Redact.
+Security numbers and dates for Search & Redact. Callers run them over a page's text with
+`PageText::find_with_folded` (`pdfcraft-render`), which reads the page as Find does: Arabic
+harakat, tatweel and direction marks are dropped, presentation forms and ligatures become base
+letters and Arabic-Indic and Persian digits become ASCII digits, and every character keeps the
+glyph that drew it so a match maps back to glyphs. Only the page is folded; a pattern is matched
+against the folded text. (`find_with` leaves the characters as they are, for Create links from
+URLs, whose addresses must not change.)
 
 `codes` holds the redaction code sets (U.S. FOIA and U.S. Privacy Act exemptions):
 `CodeSet::from_id("foia")?.overlay(&["(b)(6)"])` gives the overlay text for the picked codes.

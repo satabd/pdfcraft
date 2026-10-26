@@ -407,8 +407,33 @@ fn font_definitions_for_platform(prefer_hans: bool, platform: FontPolicyPlatform
         stack.extend(fallback.iter().cloned());
         fonts.families.insert(FontFamily::Name(fam.into()), stack);
     }
+    let mut editor_bold = vec!["Inter-SemiBold".to_owned()];
+    editor_bold.extend(fallback.iter().cloned());
+    if let Some(face) = pdfcraft_fonts::document_arabic_font().filter(|_| pdfcraft_fonts::arabic_bold_available())
+        && let Some(data) = fonts.font_data.get(&face.name()).cloned()
+    {
+        let regular = face.name();
+        let bold = format!("{regular} wght 700");
+        let mut data = FontData::clone(&data);
+        // The page's bold instance (`pdfcraft_fonts::shaping::bold_instance_of`): `wght` at 700, clamped to the axis.
+        // ("wght" is four printable ASCII letters, so it makes a valid tag.)
+        data.tweak.coords = egui::epaint::text::VariationCoords::new([(*b"wght", 700.0)]);
+        fonts.font_data.insert(bold.clone(), Arc::new(data));
+        for name in &mut editor_bold {
+            if *name == regular {
+                name.clone_from(&bold);
+            }
+        }
+    }
+    fonts.families.insert(FontFamily::Name(EDITOR_BOLD.into()), editor_bold);
     fonts
 }
+
+/// The family the Edit text and Add text boxes draw bold text in: the semibold family's faces, except that the
+/// craft-fonts Arabic face is at its `wght` 700 instance, the one the page draws bold Arabic at (a face of its own,
+/// `"<face> wght 700"`, whose tweak carries the coordinates, so no other face of the stack moves). Without that face,
+/// or with one that has no bold instance, it is the semibold family. The interface's own labels keep `semibold`.
+pub(crate) const EDITOR_BOLD: &str = "editor-bold";
 
 pub fn regular(size: f32) -> FontId {
     FontId::proportional(size)

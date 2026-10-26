@@ -77,7 +77,7 @@ pub(crate) fn options_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens)
     let o = &mut app.a11y_options;
     o.to = o.to.clamp(1, pages);
     o.from = o.from.clamp(1, o.to);
-    ui.label(egui::RichText::new(tl!("Accessibility Checker Options")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Accessibility Checker Options"));
     ui.add_space(8.0);
     let group = |ui: &mut egui::Ui, title: &str, body: &mut dyn FnMut(&mut egui::Ui)| {
         ui.label(egui::RichText::new(tl!(title)).font(theme::semibold(13.0)));
@@ -286,28 +286,28 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &mut A11yState, doc: D
             }
             row.context_menu(|ui| {
                 ui.set_min_width(170.0);
-                if ui.add_enabled(fixable(r.rule) && r.status == Status::Failed, egui::Button::new(tl!("Fix"))).clicked() {
+                if widgets::menu_entry(ui, fixable(r.rule) && r.status == Status::Failed, tl!("Fix"), None).clicked() {
                     action = Some(PanelAction::Fix(r.rule));
                     ui.close();
                 }
-                if ui.add_enabled(r.status != Status::Skipped, egui::Button::new(tl!("Skip Rule"))).clicked() {
+                if widgets::menu_entry(ui, r.status != Status::Skipped, tl!("Skip Rule"), None).clicked() {
                     action = Some(PanelAction::Skip(r.rule));
                     ui.close();
                 }
-                if ui.button(tl!("Explain")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Explain"), None).clicked() {
                     state.explain = if state.explain == Some(r.rule) { None } else { Some(r.rule) };
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(tl!("Check Again")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Check Again"), None).clicked() {
                     action = Some(PanelAction::CheckAgain);
                     ui.close();
                 }
-                if ui.button(tl!("Show Report")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Show Report"), None).clicked() {
                     action = Some(PanelAction::ShowReport);
                     ui.close();
                 }
-                if ui.button(tl!("Options…")).clicked() {
+                if widgets::menu_entry(ui, true, tl!("Options…"), None).clicked() {
                     action = Some(PanelAction::Options);
                     ui.close();
                 }
@@ -324,7 +324,12 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, state: &mut A11yState, doc: D
                         // The checker hands over the sentence and the document's own words apart, so
                         // the sentence is said in the panel's language with those words still in it.
                         let said = f.said(&crate::i18n::words);
-                        let l = ui.add(egui::Label::new(egui::RichText::new(said).small().color(t.text_muted)).sense(egui::Sense::click()));
+                        let l = if crate::widgets::needs_bidi(&said) {
+                            let font = egui::TextStyle::Small.resolve(ui.style());
+                            crate::widgets::wrapped_text_clickable(ui, &said, font, t.text_muted, false)
+                        } else {
+                            ui.add(egui::Label::new(egui::RichText::new(said).small().color(t.text_muted)).sense(egui::Sense::click()))
+                        };
                         if let Some(object) = f.object {
                             if l.on_hover_text(tl!("Tags")).clicked() {
                                 action = Some(PanelAction::GoToTag(object, f.page, f.bbox));
@@ -358,9 +363,9 @@ impl PdfCraftApp {
         self.a11y.report = Some((id, report));
         self.right = Some(RightPanel::Accessibility);
         self.notify(if failed == 0 {
-            tl!("No untagged content was found.").to_string()
+            tl_logical!("No untagged content was found.")
         } else {
-            crate::i18n::fmt(tl!("Found {n} untagged content problems."), &[("n", &failed.to_string())])
+            crate::i18n::fmt_logical(&tl_logical!("Found {n} untagged content problems."), &[("n", &failed.to_string())])
         });
     }
 
@@ -402,18 +407,18 @@ impl PdfCraftApp {
         self.a11y.report = Some((id, report));
         self.right = Some(RightPanel::Accessibility);
         self.notify(if failed == 0 && manual == 0 && skipped == 0 {
-            tl!("The checker found no problems in this document.").to_string()
+            tl_logical!("The checker found no problems in this document.")
         } else if failed == 1 {
-            tl!("The checker found 1 problem which may prevent the document from being fully accessible.").to_string()
+            tl_logical!("The checker found 1 problem which may prevent the document from being fully accessible.")
         } else if failed > 1 {
-            crate::i18n::fmt(
-                tl!("The checker found {n} problems which may prevent the document from being fully accessible."),
+            crate::i18n::fmt_logical(
+                &tl_logical!("The checker found {n} problems which may prevent the document from being fully accessible."),
                 &[("n", &failed.to_string())],
             )
         } else if manual > 0 {
-            format!("{}: {manual}", tl!("Needs manual check"))
+            crate::i18n::Logical::from(format!("{}: {manual}", tl_logical!("Needs manual check")))
         } else {
-            format!("{}: {skipped}", tl!("Skipped"))
+            crate::i18n::Logical::from(format!("{}: {skipped}", tl_logical!("Skipped")))
         });
         if self.a11y_options.create_report {
             self.show_accessibility_report();
@@ -563,7 +568,7 @@ pub(crate) fn alt_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) -> 
     let ctx = ui.ctx().clone();
     let doc = app.alt_draft.doc.and_then(|id| app.session.get(id));
     let d = &mut app.alt_draft;
-    ui.label(egui::RichText::new(tl!("Set Alternate Text")).font(theme::semibold(18.0)));
+    widgets::dialog_title(ui, tl!("Set Alternate Text"));
     ui.add_space(8.0);
     let n = d.figures.len();
     if n == 0 {

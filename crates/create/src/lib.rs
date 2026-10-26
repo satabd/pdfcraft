@@ -5,9 +5,10 @@
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 
 mod extract;
+mod text_shaped;
 mod upright_image;
 pub use extract::{ExtractedImage, ImageExport, extract_images, image_file};
-use pdfcraft_fonts::{literal, win_ansi, wrap};
+use pdfcraft_fonts::{literal, win_ansi};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum CreateError {
@@ -628,9 +629,12 @@ fn turkish_code_page(bytes: &[u8]) -> bool {
         && !bytes.iter().any(|b| matches!(b, 0xC1 | 0xCD | 0xD3 | 0xDA | 0xE1 | 0xED | 0xF3 | 0xFA))
 }
 
-/// Plain text set in Helvetica on pages of `page` size with 1-inch margins. Text Helvetica can't
-/// draw (outside Western European) is refused with [`CreateError::Invalid`] naming the line and
-/// the character; text PdfCraft generates goes through [`from_text_escaped`] instead.
+/// Plain text set in Helvetica on pages of `page` size with 1-inch margins. Arabic is shaped with
+/// the craft-fonts Arabic face when this build has it: a paragraph's direction comes from its
+/// first strong character, a right-to-left paragraph is right-aligned, and lines are wrapped on
+/// their shaped widths. Other text Helvetica can't draw (outside Western European, and Arabic in
+/// a build without the face) is refused with [`CreateError::Invalid`] naming the line and the
+/// character; text PdfCraft generates goes through [`from_text_escaped`] instead.
 pub fn from_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> Result<Document, CreateError> {
     // Helvetica in WinAnsiEncoding: text it can't draw is refused with where it is, not set as `?`.
     if let Some((line, c)) = first_undrawable_line(text) {
@@ -639,10 +643,11 @@ pub fn from_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> R
     set_text(title, text, page, font_size)
 }
 
-/// The line (1-based) and character of the first one Helvetica can't draw. Line breaks, tabs and
-/// form feeds (new pages) are layout, not drawn.
+/// The line (1-based) and character of the first one that can't be drawn: Helvetica's, and for a
+/// line with Arabic the Arabic face's and Helvetica's together. Line breaks, tabs and form feeds
+/// (new pages) are layout, not drawn.
 fn first_undrawable_line(text: &str) -> Option<(usize, char)> {
-    text.split('\n').enumerate().find_map(|(i, l)| pdfcraft_fonts::first_undrawable(&l.replace('\u{c}', "")).map(|c| (i + 1, c)))
+    text.split('\n').enumerate().find_map(|(i, l)| text_shaped::first_undrawable(&l.replace('\u{c}', "")).map(|c| (i + 1, c)))
 }
 
 /// What a PDF made from text PdfCraft generated says, in its first line, about characters it
@@ -650,25 +655,51 @@ fn first_undrawable_line(text: &str) -> Option<(usize, char)> {
 pub const ESCAPED_NOTE: &str = "Characters Helvetica can't draw are written as [U+XXXX] code points.";
 
 /// [`from_text`] for text PdfCraft generates from documents (a comment summary, a compare
-/// report), which may quote any language. Each character Helvetica can't draw is written as
-/// `[U+XXXX]` instead of being refused or set as `?`, so nothing is lost, and the first line says
-/// so ([`ESCAPED_NOTE`]). Returns the document and how many characters were written that way.
+/// report), which may quote any language. Arabic is shaped as [`from_text`] shapes it, so it stays
+/// readable; each other character Helvetica can't draw (and Arabic, in a build without the Arabic
+/// face or for a letter the face lacks) is written as `[U+XXXX]` instead of being refused or set
+/// as `?`, so nothing is lost, and the first line says so ([`ESCAPED_NOTE`]). Returns the
+/// document and how many characters were written that way.
 pub fn from_text_escaped(title: &str, text: &str, page: (f64, f64), font_size: f64) -> Result<(Document, usize), CreateError> {
+    let (out, escaped) = escape_undrawable(text, text_shaped::face_available());
+    // Arabic the planner can't lay out (a letter shape it can't outline, too many different
+    // shapes) must not cost the report: it is written as code points, as without the face.
+    let (out, escaped) = match set_text(title, &prefixed(out, escaped), page, font_size) {
+        Ok(doc) => return Ok((doc, escaped)),
+        Err(e) if !text_shaped::face_available() => return Err(e),
+        Err(_) => escape_undrawable(text, false),
+    };
+    // The title is a text string in /Info, which holds any character.
+    Ok((set_text(title, &prefixed(out, escaped), page, font_size)?, escaped))
+}
+
+/// The note [`ESCAPED_NOTE`] before text with escaped characters.
+fn prefixed(text: String, escaped: usize) -> String {
+    if escaped > 0 { format!("{ESCAPED_NOTE}\n\n{text}") } else { text }
+}
+
+/// `text` with each character that can't be drawn written as `[U+XXXX]`, and how many were. With
+/// `shaping`, Arabic the face has (and the direction marks steering it) stays in paragraphs that
+/// have such letters, to be shaped.
+fn escape_undrawable(text: &str, shaping: bool) -> (String, usize) {
     let mut escaped = 0usize;
     let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if matches!(c, '\n' | '\r' | '\u{c}') || pdfcraft_fonts::first_undrawable(c.encode_utf8(&mut [0; 4])).is_none() {
-            out.push(c);
-        } else {
-            escaped = escaped.saturating_add(1);
-            out.push_str(&format!("[U+{:04X}]", u32::from(c)));
+    // Paragraphs are what the layout decides on: cut after each line break.
+    for para in text.split_inclusive(['\n', '\r', '\u{c}']) {
+        let keep_arabic = shaping && para.chars().any(|c| pdfcraft_fonts::shaped_text::is_arabic_script(c) && text_shaped::drawn_with_arabic(c));
+        for c in para.chars() {
+            if matches!(c, '\n' | '\r' | '\u{c}')
+                || pdfcraft_fonts::first_undrawable(c.encode_utf8(&mut [0; 4])).is_none()
+                || keep_arabic && text_shaped::drawn_with_arabic(c)
+            {
+                out.push(c);
+            } else {
+                escaped = escaped.saturating_add(1);
+                out.push_str(&format!("[U+{:04X}]", u32::from(c)));
+            }
         }
     }
-    if escaped > 0 {
-        out = format!("{ESCAPED_NOTE}\n\n{out}");
-    }
-    // The title is a text string in /Info, which holds any character.
-    Ok((set_text(title, &out, page, font_size)?, escaped))
+    (out, escaped)
 }
 
 fn set_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> Result<Document, CreateError> {
@@ -677,12 +708,7 @@ fn set_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> Result
     let margin = 72.0;
     let line_h = size * 1.25;
     let width = (w - 2.0 * margin).max(36.0);
-    let lines: Vec<String> = text
-        .replace("\r\n", "\n")
-        .replace('\t', "    ")
-        .split('\u{c}')
-        .flat_map(|p| wrap(p, size, width).into_iter().chain(std::iter::once("\u{c}".to_string())))
-        .collect();
+    let items = text_shaped::layout(text, size, width, text_shaped::face_available());
     let per_page = (((h - 2.0 * margin) / line_h).floor() as usize).max(1);
     let mut doc = Document::new_empty();
     let mut font = Dict::new();
@@ -691,27 +717,52 @@ fn set_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> Result
     font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
     font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
     let fr = doc.add(font);
-    let mut page_lines: Vec<Vec<String>> = vec![Vec::new()];
-    for l in lines.iter().take(lines.len().saturating_sub(1)) {
-        if l == "\u{c}" || page_lines.last().is_some_and(|p| p.len() >= per_page) {
-            page_lines.push(Vec::new());
-            if l == "\u{c}" {
+    let mut page_lines: Vec<Vec<text_shaped::Line>> = vec![Vec::new()];
+    // The layout ends with the form feed that closes its last part: it starts no page.
+    let used = items.len().saturating_sub(1);
+    for item in items.into_iter().take(used) {
+        let line = match item {
+            text_shaped::Item::FormFeed => {
+                page_lines.push(Vec::new());
                 continue;
             }
+            text_shaped::Item::Line(line) => line,
+        };
+        if page_lines.last().is_some_and(|p| p.len() >= per_page) {
+            page_lines.push(Vec::new());
         }
         if let Some(p) = page_lines.last_mut() {
-            p.push(l.clone());
+            p.push(line);
         }
     }
-    for lines in page_lines {
-        let mut c = format!("BT /F1 {size} Tf {line_h:.3} TL {margin} {:.3} Td\n", h - margin - size).into_bytes();
-        for l in lines {
-            c.extend(literal(&win_ansi(&l)));
-            c.extend_from_slice(b" Tj T*\n");
+    // Pages with Arabic share fonts with the pages planned in the same group.
+    let mut planned: Vec<Option<text_shaped::Planned>> = Vec::new();
+    let mut group_of = vec![0usize; page_lines.len()];
+    for range in text_shaped::groups(&page_lines) {
+        for slot in group_of.iter_mut().take(range.end).skip(range.start) {
+            *slot = planned.len();
         }
-        c.extend_from_slice(b"ET\n");
+        let pages = page_lines.get_mut(range).unwrap_or_default();
+        planned.push(text_shaped::plan(&mut doc, pages)?);
+    }
+    for (i, lines) in page_lines.iter().enumerate() {
+        let group = group_of.get(i).and_then(|g| planned.get(*g)).and_then(Option::as_ref);
         let mut fonts = Dict::new();
         fonts.set(b"F1".to_vec(), Object::Ref(fr));
+        let c = if lines.iter().any(|l| l.shaped.is_some()) {
+            if let Some(p) = group {
+                p.add_fonts(&mut fonts);
+            }
+            text_shaped::page_content(lines, group, size, line_h, margin, width, h - margin - size)
+        } else {
+            let mut c = format!("BT /F1 {size} Tf {line_h:.3} TL {margin} {:.3} Td\n", h - margin - size).into_bytes();
+            for l in lines {
+                c.extend(literal(&win_ansi(&l.text)));
+                c.extend_from_slice(b" Tj T*\n");
+            }
+            c.extend_from_slice(b"ET\n");
+            c
+        };
         let mut res = Dict::new();
         res.set(b"Font".to_vec(), Object::Dict(fonts));
         add_page(&mut doc, w, h, res, Some(c))?;
@@ -722,3 +773,5 @@ fn set_text(title: &str, text: &str, page: (f64, f64), font_size: f64) -> Result
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_shaped_tests;
