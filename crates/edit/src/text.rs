@@ -2613,12 +2613,18 @@ fn rewrite_block_from(
     // The move and the width are checked here, before the fallback fonts are written: a refused
     // paragraph leaves the document as it was. The move is in page space, so it is taken back through
     // the CTM's linear part into the space the paragraph is drawn in.
-    let movement = if dx != 0.0 || dy != 0.0 {
+    // The rows are placed from the paragraph's left edge (`b.rect[0]`), which `width`, the alignment offsets and
+    // `right_edge` are measured from, but the block is drawn from the first run's origin, which starts to the right of
+    // that edge when the first row is shorter than the paragraph (the title row of a right-aligned or centred
+    // paragraph; a right-to-left row whose leftmost piece is drawn first). That lead is taken back, or every row
+    // would shift right by it and a retyped right-to-left row would run past the page's edge.
+    let lead = if upright { Some(first.origin.x - b.rect[0]).filter(|l| l.is_finite()).unwrap_or(0.0).clamp(0.0, 14_400.0) } else { 0.0 };
+    let movement = if dx != 0.0 || dy != 0.0 || lead > 0.0 {
         let c = emit.ctm;
         let back = Matrix([c[0], c[1], c[2], c[3], 0.0, 0.0])
             .invert()
             .ok_or_else(|| EditError::Invalid("the paragraph is drawn in a space it can't be moved in".into()))?;
-        Some(back.apply(dx, dy))
+        Some(back.apply(dx - lead, dy))
     } else {
         None
     };

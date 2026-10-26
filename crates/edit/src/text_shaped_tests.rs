@@ -967,3 +967,36 @@ fn the_real_face_justifies_a_wrapped_paragraph_to_its_width() {
     // What the page says is the typed text, as the unjustified paragraph says it.
     assert_eq!(text::text_blocks(&reopen(&doc), 0).expect("blocks")[0].text.split_whitespace().collect::<Vec<_>>().join(" "), typed);
 }
+
+/// Three right-aligned rows (every glyph 6 pt wide at 12 pt) whose first, one glyph, starts 12 pt to the right of
+/// the other two (a short title row): the paragraph's left edge (300) is the longer rows', not the first run's origin.
+fn rows_with_a_short_first_row() -> Document {
+    arabic_ligature_page("BT /F1 12 Tf 312 720 Td (B) Tj -12 -22 Td (BAB) Tj 0 -16 Td (BAB) Tj ET", false)
+}
+
+#[test]
+fn a_retyped_paragraph_whose_first_row_starts_right_of_its_left_edge_keeps_its_right_edge() {
+    let _face = fake();
+    // A draft that fits the paragraph's own 18 pt width, and one in a width asked for.
+    for (style, typed) in [(BlockStyle::default(), "\u{633}\u{644}"), (wide(), "مرحبا بالعالم")] {
+        let mut doc = rows_with_a_short_first_row();
+        let block = text::text_blocks(&doc, 0).expect("blocks").remove(0);
+        assert_eq!(block.rows.len(), 3, "one paragraph of three rows");
+        let (left, right) = (block.rect[0], block.rect[2]);
+        assert!((left - 300.0).abs() < 0.5 && (right - 318.0).abs() < 0.5, "the paragraph's edges are the longer rows' ({left}, {right})");
+        let layout = text::text_edit_layout(&doc, 0, 0, typed, &style).expect("layout");
+        text::rewrite_block(&mut doc, 0, 0, Some(typed), &style).expect("writes");
+        let rows = row_boxes(&doc);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        // The right-aligned row ends where the paragraph ended (or where the width asked for ends, from the
+        // paragraph's left edge), not 60 pt further right, past the first run's origin.
+        let want_right = style.width.map_or(right, |w| left + w);
+        assert!((rows[0][2] - want_right).abs() < 0.5, "row {:?} should end at {want_right} (style width {:?})", rows[0], style.width);
+        assert!(rows[0][0] >= left - 0.5, "row {:?} starts inside the paragraph ({left})", rows[0]);
+        assert!(
+            layout.row_rects.iter().zip(&rows).all(|(a, b)| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.01)),
+            "{:?} vs {rows:?}",
+            layout.row_rects
+        );
+    }
+}
